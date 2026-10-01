@@ -101,6 +101,7 @@ message Features {
   bool privacy_mode = 1;
   bool terminal = 2;
   bool port_forward_mux = 3;
+  bool codex = 4;
 }
 
 message CodecAbility {
@@ -997,6 +998,124 @@ message PortForwardChannel {
   }
 }
 
+// Read-only Codex control plane. The Windows peer translates these typed
+// requests to its local Codex app-server; raw app-server JSON-RPC is never
+// transported to the controller.
+enum CodexState {
+  CodexUnavailable = 0;
+  CodexStarting = 1;
+  CodexReady = 2;
+  CodexResumable = 3;
+  CodexIdle = 4;
+  CodexWorking = 5;
+  CodexWaitingForApproval = 6;
+  CodexWaitingForInput = 7;
+  CodexCompleted = 8;
+  CodexFailed = 9;
+  CodexDisconnected = 10;
+}
+
+enum CodexHistoryKind {
+  CodexHistoryUnknown = 0;
+  CodexHistoryUserMessage = 1;
+  CodexHistoryAgentMessage = 2;
+  CodexHistoryPlan = 3;
+  CodexHistoryReasoning = 4;
+  CodexHistoryCommand = 5;
+  CodexHistoryFileChange = 6;
+  CodexHistoryTool = 7;
+  CodexHistoryWebSearch = 8;
+  CodexHistoryStatus = 9;
+}
+
+enum CodexEventKind {
+  CodexEventUnknown = 0;
+  CodexEventThreadState = 1;
+  CodexEventItemStarted = 2;
+  CodexEventItemUpdated = 3;
+  CodexEventItemCompleted = 4;
+  CodexEventTurnStarted = 5;
+  CodexEventTurnCompleted = 6;
+}
+
+message CodexListThreadsRequest {}
+
+message CodexThreadHistoryRequest {
+  string thread_id = 1;
+  string cursor = 2;
+  uint32 limit = 3;
+}
+
+message CodexEventSubscriptionRequest {
+  string thread_id = 1;
+  bool subscribe = 2;
+}
+
+message CodexReadRequest {
+  string request_id = 1;
+  oneof union {
+    CodexListThreadsRequest list_threads = 2;
+    CodexThreadHistoryRequest thread_history = 3;
+    CodexEventSubscriptionRequest event_subscription = 4;
+  }
+}
+
+message CodexThreadInfo {
+  string id = 1;
+  string title = 2;
+  string project = 3;
+  string originator = 4;
+  int64 updated_at = 5;
+  CodexState state = 6;
+}
+
+message CodexThreadListResponse {
+  repeated CodexThreadInfo threads = 1;
+  CodexState service_state = 2;
+  string codex_version = 3;
+}
+
+message CodexHistoryItem {
+  string id = 1;
+  string turn_id = 2;
+  CodexHistoryKind kind = 3;
+  string text = 4;
+  string detail = 5;
+  string status = 6;
+}
+
+message CodexThreadHistoryResponse {
+  string thread_id = 1;
+  repeated CodexHistoryItem items = 2;
+  string next_cursor = 3;
+}
+
+message CodexEvent {
+  string thread_id = 1;
+  string turn_id = 2;
+  string item_id = 3;
+  CodexEventKind kind = 4;
+  CodexState state = 5;
+  CodexHistoryKind history_kind = 6;
+  string text = 7;
+  string status = 8;
+}
+
+message CodexError {
+  string thread_id = 1;
+  string message = 2;
+}
+
+message CodexReadResponse {
+  string request_id = 1;
+  oneof union {
+    CodexThreadListResponse thread_list = 2;
+    CodexThreadHistoryResponse thread_history = 3;
+    CodexEvent event = 4;
+    CodexError error = 5;
+  }
+}
+
 message Message {
   oneof union {
     SignedId signed_id = 3;
@@ -1030,5 +1149,7 @@ message Message {
     TerminalAction terminal_action = 31;
     TerminalResponse terminal_response = 32;
     PortForwardChannel port_forward_channel = 33;
+    CodexReadRequest codex_read_request = 34;
+    CodexReadResponse codex_read_response = 35;
   }
 }
