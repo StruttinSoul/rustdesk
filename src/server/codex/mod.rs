@@ -2,10 +2,12 @@ mod discovery;
 mod process;
 mod protocol;
 mod rpc;
+mod threads;
 
 pub use discovery::{discover_installation, CodexInstallation};
 pub use process::CodexConnectionMode;
 pub use protocol::CodexServerInfo;
+pub use threads::{CodexThreadStatus, CodexThreadSummary};
 
 use hbb_common::{bail, ResultType};
 use process::{connection_mode_order, managed_daemon_healthy, CodexProcess};
@@ -47,8 +49,9 @@ impl CodexBridge {
         self.connection_mode
     }
 
-    pub(crate) fn protocol_mut(&mut self) -> &mut CodexProtocol<ChildStdin> {
-        &mut self.protocol
+    pub fn list_threads(&mut self) -> ResultType<Vec<CodexThreadSummary>> {
+        threads::list_threads(&mut self.protocol, Duration::from_secs(10))
+            .map_err(|error| hbb_common::anyhow::anyhow!(error.to_string()))
     }
 
     fn connect_mode(
