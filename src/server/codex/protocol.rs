@@ -102,6 +102,55 @@ where
         Ok(())
     }
 
+    pub(crate) fn probe_control(&mut self, timeout: Duration) -> Result<(), RpcCallError> {
+        // Every probe is deliberately schema-invalid, so supported methods return
+        // InvalidParams without creating/resuming/starting anything. This lets us
+        // capability-detect mutating RPCs without performing a mutation.
+        for (method, params) in [
+            (CodexMethod::ThreadStart, json!({"cwd": false})),
+            (CodexMethod::ThreadResume, json!({"threadId": null})),
+            (
+                CodexMethod::TurnStart,
+                json!({"threadId": null, "input": null}),
+            ),
+            (
+                CodexMethod::TurnSteer,
+                json!({"threadId": null, "expectedTurnId": null, "input": null}),
+            ),
+            (
+                CodexMethod::TurnInterrupt,
+                json!({"threadId": null, "turnId": null}),
+            ),
+        ] {
+            self.probe_method_presence(method, params, timeout)?;
+        }
+        Ok(())
+    }
+
+    fn probe_method_presence(
+        &mut self,
+        method: CodexMethod,
+        invalid_params: Value,
+        timeout: Duration,
+    ) -> Result<(), RpcCallError> {
+        match self.rpc.request(method.as_str(), invalid_params, timeout) {
+            Ok(_) => Err(RpcCallError::Protocol(format!(
+                "Codex capability probe for '{}' unexpectedly succeeded",
+                method.as_str()
+            ))),
+            Err(error) if error.code() == Some(-32601) => {
+                self.capabilities
+                    .insert(method, CapabilityState::Unavailable);
+                Ok(())
+            }
+            Err(error) if matches!(error, RpcCallError::Remote { .. }) => {
+                self.capabilities.insert(method, CapabilityState::Available);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn request(
         &mut self,
         method: CodexMethod,
@@ -266,6 +315,43 @@ mod tests {
         assert_eq!(
             protocol.capability(CodexMethod::TurnSteer),
             CapabilityState::Unknown
+        );
+    }
+
+    #[test]
+    fn control_probe_marks_invalid_params_methods_available_and_missing_methods_unavailable() {
+        let input = concat!(
+            "{\"id\":1,\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}\n",
+            "{\"id\":2,\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}\n",
+            "{\"id\":3,\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}\n",
+            "{\"id\":4,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}\n",
+            "{\"id\":5,\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}\n"
+        );
+        let mut protocol = protocol_with_input(input);
+
+        protocol
+            .probe_control(Duration::from_secs(1))
+            .expect("schema-invalid control probes should be safe capability checks");
+
+        assert_eq!(
+            protocol.capability(CodexMethod::ThreadStart),
+            CapabilityState::Available
+        );
+        assert_eq!(
+            protocol.capability(CodexMethod::ThreadResume),
+            CapabilityState::Available
+        );
+        assert_eq!(
+            protocol.capability(CodexMethod::TurnStart),
+            CapabilityState::Available
+        );
+        assert_eq!(
+            protocol.capability(CodexMethod::TurnSteer),
+            CapabilityState::Unavailable
+        );
+        assert_eq!(
+            protocol.capability(CodexMethod::TurnInterrupt),
+            CapabilityState::Available
         );
     }
 }

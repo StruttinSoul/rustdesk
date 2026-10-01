@@ -420,6 +420,10 @@ impl InvokeUiSession for SciterHandler {
     fn handle_codex_read_response(&self, _response: CodexReadResponse) {
         // Codex read-only UI is implemented only in Flutter/mobile.
     }
+
+    fn handle_codex_control_response(&self, _response: CodexControlResponse) {
+        // Codex control UI is implemented only in Flutter/mobile.
+    }
 }
 
 pub struct SciterSession(Session<SciterHandler>);

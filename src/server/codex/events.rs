@@ -86,11 +86,11 @@ fn turn_event(params: &Value, kind: CodexEventKind, completed: bool) -> Option<C
     let turn = params.get("turn")?;
     let status = string_field(turn, "status");
     let state = if completed {
-        if turn.get("error").is_some_and(|error| !error.is_null())
-            || matches!(status.as_str(), "failed" | "interrupted")
-        {
+        if turn.get("error").is_some_and(|error| !error.is_null()) || status == "failed" {
             Some(CodexThreadStatus::Failed)
         } else {
+            // An interrupted turn is a normal idle outcome for remote control,
+            // not a failed thread.
             Some(CodexThreadStatus::Idle)
         }
     } else {
@@ -203,5 +203,25 @@ mod tests {
             "method":"some/future/private/event","params":{"token":"secret"}
         }))
         .is_none());
+    }
+
+    #[test]
+    fn interrupted_turn_returns_thread_to_idle() {
+        let event = normalize_notification(&json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thr_1",
+                "turn": {
+                    "id": "turn_1",
+                    "status": "interrupted",
+                    "items": []
+                }
+            }
+        }))
+        .expect("turn should normalize");
+
+        assert_eq!(event.kind, CodexEventKind::TurnCompleted);
+        assert_eq!(event.state, Some(CodexThreadStatus::Idle));
+        assert_eq!(event.status, "interrupted");
     }
 }

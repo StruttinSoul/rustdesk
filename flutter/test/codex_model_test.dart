@@ -138,6 +138,192 @@ void main() {
     });
     expect(model.threads.single.state, 'working');
   });
+
+  test('drives resume send steer and interrupt through advertised controls',
+      () async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'codex_version': '0.155.1',
+      'control': {
+        'resume_thread': true,
+        'start_thread': true,
+        'start_turn': true,
+        'steer_turn': true,
+        'interrupt_turn': true,
+      },
+      'threads': [
+        {
+          'id': 'thr_1',
+          'title': 'Persisted desktop task',
+          'project': 'RustDesk',
+          'originator': 'codex_desktop',
+          'updated_at': 1,
+          'state': 'resumable',
+        }
+      ],
+    });
+
+    expect(model.canResumeThread, isTrue);
+    expect(model.canStartThread, isTrue);
+    expect(model.canStartTurn, isTrue);
+    expect(model.canSteerTurn, isTrue);
+    expect(model.canInterruptTurn, isTrue);
+    expect(model.needsNativeResume('thr_1'), isTrue);
+
+    await model.resumeThread('thr_1');
+    final resume = sent.last;
+    expect(resume.key, 'codex-resume-thread');
+    final resumePayload = jsonDecode(resume.value);
+    expect(resumePayload['thread_id'], 'thr_1');
+    expect(model.isControlPending('thr_1'), isTrue);
+
+    model.handleControlResponse({
+      'type': 'result',
+      'request_id': resumePayload['request_id'],
+      'action': 'thread_resumed',
+      'thread_id': 'thr_1',
+      'turn_id': '',
+      'state': 'idle',
+    });
+    expect(model.threads.single.state, 'idle');
+    expect(model.isControlPending('thr_1'), isFalse);
+
+    await model.send('thr_1', 'Implement the control path');
+    final start = sent.last;
+    expect(start.key, 'codex-start-turn');
+    final startPayload = jsonDecode(start.value);
+    expect(startPayload['thread_id'], 'thr_1');
+    expect(startPayload['text'], 'Implement the control path');
+
+    model.handleControlResponse({
+      'type': 'result',
+      'request_id': startPayload['request_id'],
+      'action': 'turn_started',
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'state': 'working',
+    });
+    expect(model.activeTurnIdFor('thr_1'), isEmpty);
+    expect(model.isTurnStarting('thr_1'), isTrue);
+    final sentBeforePrematureInterrupt = sent.length;
+    await model.interrupt('thr_1');
+    expect(sent.length, sentBeforePrematureInterrupt);
+
+    model.handleResponse({
+      'type': 'event',
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'item_id': '',
+      'kind': 'turn_started',
+      'state': 'working',
+      'history_kind': 'unknown',
+      'text': '',
+      'status': 'inProgress',
+    });
+    expect(model.activeTurnIdFor('thr_1'), 'turn_1');
+    expect(model.isTurnStarting('thr_1'), isFalse);
+    expect(model.threads.single.state, 'working');
+
+    await model.steer('thr_1', 'Use the existing RustDesk transport');
+    final steer = sent.last;
+    expect(steer.key, 'codex-steer-turn');
+    final steerPayload = jsonDecode(steer.value);
+    expect(steerPayload['turn_id'], 'turn_1');
+    expect(steerPayload['text'], 'Use the existing RustDesk transport');
+
+    model.handleControlResponse({
+      'type': 'result',
+      'request_id': steerPayload['request_id'],
+      'action': 'turn_steered',
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'state': 'working',
+    });
+
+    await model.interrupt('thr_1');
+    final interrupt = sent.last;
+    expect(interrupt.key, 'codex-interrupt-turn');
+    final interruptPayload = jsonDecode(interrupt.value);
+    expect(interruptPayload['turn_id'], 'turn_1');
+    model.handleControlResponse({
+      'type': 'result',
+      'request_id': interruptPayload['request_id'],
+      'action': 'turn_interrupted',
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'state': 'interrupting',
+    });
+    expect(model.threads.single.state, 'interrupting');
+
+    model.handleResponse({
+      'type': 'event',
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'item_id': '',
+      'kind': 'turn_completed',
+      'state': 'idle',
+      'history_kind': 'unknown',
+      'text': '',
+      'status': 'interrupted',
+    });
+    expect(model.activeTurnIdFor('thr_1'), isEmpty);
+    expect(model.threads.single.state, 'idle');
+  });
+
+  test('starts a new task in an existing workspace without exposing a path',
+      () async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'codex_version': '0.155.1',
+      'control': {'start_thread': true},
+      'threads': [
+        {
+          'id': 'thr_workspace',
+          'title': 'RustDesk control work',
+          'project': 'RustDesk',
+          'originator': 'codex_desktop',
+          'updated_at': 1,
+          'state': 'resumable',
+        }
+      ],
+    });
+
+    await model.startThread(workspaceThreadId: 'thr_workspace');
+    final start = sent.last;
+    expect(start.key, 'codex-start-thread');
+    final payload = jsonDecode(start.value);
+    expect(payload['workspace_thread_id'], 'thr_workspace');
+    expect(payload.containsKey('cwd'), isFalse);
+
+    model.handleControlResponse({
+      'type': 'result',
+      'request_id': payload['request_id'],
+      'action': 'thread_started',
+      'thread_id': 'thr_new',
+      'turn_id': '',
+      'state': 'idle',
+    });
+
+    expect(model.lastStartedThreadId, 'thr_new');
+    final created =
+        model.threads.firstWhere((thread) => thread.id == 'thr_new');
+    expect(created.project, 'RustDesk');
+    expect(created.state, 'idle');
+  });
 }
 
 Map<String, dynamic> _item(String id, String kind, String text) => {

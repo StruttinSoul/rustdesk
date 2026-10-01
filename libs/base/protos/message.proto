@@ -1013,6 +1013,7 @@ enum CodexState {
   CodexCompleted = 8;
   CodexFailed = 9;
   CodexDisconnected = 10;
+  CodexInterrupting = 11;
 }
 
 enum CodexHistoryKind {
@@ -1073,6 +1074,15 @@ message CodexThreadListResponse {
   repeated CodexThreadInfo threads = 1;
   CodexState service_state = 2;
   string codex_version = 3;
+  CodexControlCapabilities control = 4;
+}
+
+message CodexControlCapabilities {
+  bool resume_thread = 1;
+  bool start_thread = 2;
+  bool start_turn = 3;
+  bool steer_turn = 4;
+  bool interrupt_turn = 5;
 }
 
 message CodexHistoryItem {
@@ -1116,6 +1126,68 @@ message CodexReadResponse {
   }
 }
 
+enum CodexControlAction {
+  CodexControlUnknown = 0;
+  CodexControlThreadResumed = 1;
+  CodexControlThreadStarted = 2;
+  CodexControlTurnStarted = 3;
+  CodexControlTurnSteered = 4;
+  CodexControlTurnInterrupted = 5;
+}
+
+message CodexResumeThreadRequest {
+  string thread_id = 1;
+}
+
+// Start a fresh Codex thread. When workspace_thread_id is present, the Windows
+// bridge reuses that stored thread's workspace locally without exposing its
+// filesystem path to Android.
+message CodexStartThreadRequest {
+  string workspace_thread_id = 1;
+}
+
+message CodexStartTurnRequest {
+  string thread_id = 1;
+  string text = 2;
+}
+
+message CodexSteerTurnRequest {
+  string thread_id = 1;
+  string turn_id = 2;
+  string text = 3;
+}
+
+message CodexInterruptTurnRequest {
+  string thread_id = 1;
+  string turn_id = 2;
+}
+
+message CodexControlRequest {
+  string request_id = 1;
+  oneof union {
+    CodexResumeThreadRequest resume_thread = 2;
+    CodexStartThreadRequest start_thread = 3;
+    CodexStartTurnRequest start_turn = 4;
+    CodexSteerTurnRequest steer_turn = 5;
+    CodexInterruptTurnRequest interrupt_turn = 6;
+  }
+}
+
+message CodexControlResult {
+  CodexControlAction action = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  CodexState state = 4;
+}
+
+message CodexControlResponse {
+  string request_id = 1;
+  oneof union {
+    CodexControlResult result = 2;
+    CodexError error = 3;
+  }
+}
+
 message Message {
   oneof union {
     SignedId signed_id = 3;
@@ -1151,5 +1223,7 @@ message Message {
     PortForwardChannel port_forward_channel = 33;
     CodexReadRequest codex_read_request = 34;
     CodexReadResponse codex_read_response = 35;
+    CodexControlRequest codex_control_request = 36;
+    CodexControlResponse codex_control_response = 37;
   }
 }

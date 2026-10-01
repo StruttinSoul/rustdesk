@@ -311,19 +311,22 @@ mod tests {
         );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        let messages = loop {
-            let messages = client
-                .drain_available()
-                .expect("idle notifications should drain");
+        let mut messages = Vec::new();
+        loop {
+            messages.extend(
+                client
+                    .drain_available()
+                    .expect("idle notifications should drain"),
+            );
             if messages.len() == 2 {
-                break messages;
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "reader thread stalled"
             );
             std::thread::yield_now();
-        };
+        }
 
         assert_eq!(messages[0]["method"], "turn/started");
         assert_eq!(messages[1]["method"], "item/agentMessage/delta");

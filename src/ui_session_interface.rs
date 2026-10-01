@@ -883,6 +883,76 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    pub fn resume_codex_thread(&self, request_id: String, thread_id: String) {
+        let mut request = CodexControlRequest::new();
+        request.request_id = request_id;
+        request.set_resume_thread(CodexResumeThreadRequest {
+            thread_id,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_control_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn start_codex_thread(&self, request_id: String, workspace_thread_id: String) {
+        let mut request = CodexControlRequest::new();
+        request.request_id = request_id;
+        request.set_start_thread(CodexStartThreadRequest {
+            workspace_thread_id,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_control_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn start_codex_turn(&self, request_id: String, thread_id: String, text: String) {
+        let mut request = CodexControlRequest::new();
+        request.request_id = request_id;
+        request.set_start_turn(CodexStartTurnRequest {
+            thread_id,
+            text,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_control_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn steer_codex_turn(
+        &self,
+        request_id: String,
+        thread_id: String,
+        turn_id: String,
+        text: String,
+    ) {
+        let mut request = CodexControlRequest::new();
+        request.request_id = request_id;
+        request.set_steer_turn(CodexSteerTurnRequest {
+            thread_id,
+            turn_id,
+            text,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_control_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn interrupt_codex_turn(&self, request_id: String, thread_id: String, turn_id: String) {
+        let mut request = CodexControlRequest::new();
+        request.request_id = request_id;
+        request.set_interrupt_turn(CodexInterruptTurnRequest {
+            thread_id,
+            turn_id,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_control_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
     pub fn capture_displays(&self, add: Vec<i32>, sub: Vec<i32>, set: Vec<i32>) {
         let mut misc = Misc::new();
         misc.set_capture_displays(CaptureDisplays {
@@ -1799,6 +1869,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn handle_screenshot_resp(&self, sid: String, msg: String);
     fn handle_terminal_response(&self, response: TerminalResponse);
     fn handle_codex_read_response(&self, response: CodexReadResponse);
+    fn handle_codex_control_response(&self, response: CodexControlResponse);
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {

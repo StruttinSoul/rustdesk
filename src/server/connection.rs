@@ -4076,6 +4076,20 @@ impl Connection {
                     #[cfg(not(target_os = "windows"))]
                     let _ = request;
                 }
+                Some(message::Union::CodexControlRequest(request)) => {
+                    #[cfg(target_os = "windows")]
+                    if self.is_authed_remote_conn() {
+                        if let Some(reply) = self.inner.tx.clone() {
+                            crate::server::codex::submit_control_request(
+                                self.inner.id,
+                                request,
+                                reply,
+                            );
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    let _ = request;
+                }
                 _ => {}
             }
         }
@@ -6120,6 +6134,8 @@ impl Connection {
             Some(message::Union::TerminalResponse(_)) => "terminal_response",
             Some(message::Union::CodexReadRequest(_)) => "codex_read_request",
             Some(message::Union::CodexReadResponse(_)) => "codex_read_response",
+            Some(message::Union::CodexControlRequest(_)) => "codex_control_request",
+            Some(message::Union::CodexControlResponse(_)) => "codex_control_response",
             Some(message::Union::PortForwardChannel(_)) => "port_forward_channel",
             Some(message::Union::Misc(misc)) => Self::misc_message_family(misc),
             Some(_) => "message.other",
@@ -7676,6 +7692,10 @@ mod test {
                         msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
                         Some("codex_read_request"),
                     ),
+                    (
+                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
+                        Some("codex_control_request"),
+                    ),
                 ],
             ),
             (
@@ -7745,6 +7765,10 @@ mod test {
                         msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
                         Some("codex_read_request"),
                     ),
+                    (
+                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
+                        Some("codex_control_request"),
+                    ),
                 ],
             ),
             (
@@ -7803,6 +7827,10 @@ mod test {
                         msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
                         Some("codex_read_request"),
                     ),
+                    (
+                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
+                        Some("codex_control_request"),
+                    ),
                 ],
             ),
             (
@@ -7819,6 +7847,10 @@ mod test {
                     ),
                     (
                         msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
+                        None,
+                    ),
+                    (
+                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
                         None,
                     ),
                 ],
@@ -7860,6 +7892,10 @@ mod test {
                     (
                         msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
                         Some("codex_read_request"),
+                    ),
+                    (
+                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
+                        Some("codex_control_request"),
                     ),
                 ],
             ),

@@ -369,6 +369,8 @@ class FfiModel with ChangeNotifier {
         parent.target?.routeTerminalResponse(evt);
       } else if (name == 'codex_read_response') {
         parent.target?.codexModel.handleResponse(evt);
+      } else if (name == 'codex_control_response') {
+        parent.target?.codexModel.handleControlResponse(evt);
       } else if (name == 'file_dir') {
         parent.target?.fileModel.receiveFileDir(evt);
       } else if (name == 'empty_dirs') {

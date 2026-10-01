@@ -1190,6 +1190,20 @@ impl InvokeUiSession for FlutterHandler {
                 ),
                 ("codex_version", json!(list.codex_version)),
                 (
+                    "control",
+                    json!(list
+                        .control
+                        .as_ref()
+                        .map(|control| json!({
+                            "resume_thread": control.resume_thread,
+                            "start_thread": control.start_thread,
+                            "start_turn": control.start_turn,
+                            "steer_turn": control.steer_turn,
+                            "interrupt_turn": control.interrupt_turn,
+                        }))
+                        .unwrap_or_else(|| json!({}))),
+                ),
+                (
                     "threads",
                     json!(list
                         .threads
@@ -1263,6 +1277,42 @@ impl InvokeUiSession for FlutterHandler {
         };
         self.push_event_("codex_read_response", &event_data, &[], &[]);
     }
+
+    fn handle_codex_control_response(&self, response: CodexControlResponse) {
+        use base::message_proto::codex_control_response::Union;
+
+        let request_id = response.request_id;
+        let event_data: Vec<(&str, serde_json::Value)> = match response.union {
+            Some(Union::Result(result)) => vec![
+                ("type", json!("result")),
+                ("request_id", json!(request_id)),
+                (
+                    "action",
+                    json!(codex_control_action_name(
+                        result.action.enum_value_or_default()
+                    )),
+                ),
+                ("thread_id", json!(result.thread_id)),
+                ("turn_id", json!(result.turn_id)),
+                (
+                    "state",
+                    json!(codex_state_name(result.state.enum_value_or_default())),
+                ),
+            ],
+            Some(Union::Error(error)) => vec![
+                ("type", json!("error")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(error.thread_id)),
+                ("message", json!(error.message)),
+            ],
+            None => return,
+            Some(_) => {
+                log::warn!("Unhandled Codex control response type");
+                return;
+            }
+        };
+        self.push_event_("codex_control_response", &event_data, &[], &[]);
+    }
 }
 
 fn codex_state_name(state: CodexState) -> &'static str {
@@ -1278,6 +1328,18 @@ fn codex_state_name(state: CodexState) -> &'static str {
         CodexState::CodexCompleted => "completed",
         CodexState::CodexFailed => "failed",
         CodexState::CodexDisconnected => "disconnected",
+        CodexState::CodexInterrupting => "interrupting",
+    }
+}
+
+fn codex_control_action_name(action: CodexControlAction) -> &'static str {
+    match action {
+        CodexControlAction::CodexControlUnknown => "unknown",
+        CodexControlAction::CodexControlThreadResumed => "thread_resumed",
+        CodexControlAction::CodexControlThreadStarted => "thread_started",
+        CodexControlAction::CodexControlTurnStarted => "turn_started",
+        CodexControlAction::CodexControlTurnSteered => "turn_steered",
+        CodexControlAction::CodexControlTurnInterrupted => "turn_interrupted",
     }
 }
 

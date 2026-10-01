@@ -39,6 +39,26 @@ class _CodexPageState extends State<CodexPage> {
         animation: widget.model,
         builder: (context, _) => _buildBody(context),
       ),
+      floatingActionButton: AnimatedBuilder(
+        animation: widget.model,
+        builder: (context, _) {
+          final model = widget.model;
+          if (!model.canStartThread) return const SizedBox.shrink();
+          return FloatingActionButton.extended(
+            onPressed: model.isStartingThread
+                ? null
+                : () => unawaited(model.startThread()),
+            icon: model.isStartingThread
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.add),
+            label: const Text('NEW CODEX TASK'),
+          );
+        },
+      ),
     );
   }
 
@@ -141,7 +161,7 @@ class _CodexServiceHeader extends StatelessWidget {
               ],
             ),
           ),
-          const _ReadOnlyBadge(),
+          if (!model.hasInteractiveControl) const _ReadOnlyBadge(),
         ],
       ),
     );
@@ -206,19 +226,23 @@ class CodexThreadPage extends StatefulWidget {
 
 class _CodexThreadPageState extends State<CodexThreadPage> {
   final ScrollController _scrollController = ScrollController();
+  final TextEditingController _composerController = TextEditingController();
   int _lastItemCount = 0;
 
   @override
   void initState() {
     super.initState();
     widget.model.addListener(_onModelChanged);
-    unawaited(widget.model.selectThread(widget.thread.id));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(widget.model.selectThread(widget.thread.id));
+    });
   }
 
   @override
   void dispose() {
     widget.model.removeListener(_onModelChanged);
     widget.model.leaveThread(widget.thread.id);
+    _composerController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -252,11 +276,12 @@ class _CodexThreadPageState extends State<CodexThreadPage> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            actions: const [
-              Padding(
-                padding: EdgeInsets.only(right: 12),
-                child: Center(child: _ReadOnlyBadge()),
-              ),
+            actions: [
+              if (!widget.model.hasInteractiveControl)
+                const Padding(
+                  padding: EdgeInsets.only(right: 12),
+                  child: Center(child: _ReadOnlyBadge()),
+                ),
             ],
           ),
           body: _buildThreadBody(context, thread),
@@ -271,16 +296,56 @@ class _CodexThreadPageState extends State<CodexThreadPage> {
     final loading = model.isHistoryLoading(thread.id);
     final error = model.errorFor(thread.id);
 
+    final Widget historyBody;
     if (loading && items.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (error.isNotEmpty && items.isEmpty) {
-      return _CodexMessageState(
+      historyBody = const Center(child: CircularProgressIndicator());
+    } else if (error.isNotEmpty && items.isEmpty) {
+      historyBody = _CodexMessageState(
         icon: Icons.error_outline,
         title: 'Unable to load this task',
         message: error,
         actionLabel: 'Retry',
         onAction: () => unawaited(model.loadHistory(thread.id)),
+      );
+    } else if (items.isEmpty) {
+      historyBody = const _CodexMessageState(
+        icon: Icons.notes_outlined,
+        title: 'No visible history',
+        message: 'This task has no visible Codex history yet.',
+      );
+    } else {
+      historyBody = ListView.builder(
+        controller: _scrollController,
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 28),
+        itemCount:
+            items.length + (model.nextCursorFor(thread.id).isNotEmpty ? 1 : 0),
+        itemBuilder: (context, index) {
+          if (model.nextCursorFor(thread.id).isNotEmpty && index == 0) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: TextButton.icon(
+                  onPressed: loading
+                      ? null
+                      : () => unawaited(model.loadHistory(
+                            thread.id,
+                            reset: false,
+                          )),
+                  icon: loading
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.expand_less),
+                  label: const Text('Load older history'),
+                ),
+              ),
+            );
+          }
+          final offset = model.nextCursorFor(thread.id).isNotEmpty ? 1 : 0;
+          return _HistoryItemView(item: items[index - offset]);
+        },
       );
     }
 
@@ -298,51 +363,136 @@ class _CodexThreadPageState extends State<CodexThreadPage> {
             ],
           ),
         Expanded(
-          child: items.isEmpty
-              ? const _CodexMessageState(
-                  icon: Icons.notes_outlined,
-                  title: 'No visible history',
-                  message:
-                      'This task has no history that is available on the read-only surface.',
-                )
-              : ListView.builder(
-                  controller: _scrollController,
-                  padding: const EdgeInsets.fromLTRB(14, 8, 14, 28),
-                  itemCount: items.length +
-                      (model.nextCursorFor(thread.id).isNotEmpty ? 1 : 0),
-                  itemBuilder: (context, index) {
-                    if (model.nextCursorFor(thread.id).isNotEmpty &&
-                        index == 0) {
-                      return Center(
-                        child: Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: TextButton.icon(
-                            onPressed: loading
-                                ? null
-                                : () => unawaited(model.loadHistory(
-                                      thread.id,
-                                      reset: false,
-                                    )),
-                            icon: loading
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2),
-                                  )
-                                : const Icon(Icons.expand_less),
-                            label: const Text('Load older history'),
-                          ),
-                        ),
-                      );
-                    }
-                    final offset =
-                        model.nextCursorFor(thread.id).isNotEmpty ? 1 : 0;
-                    return _HistoryItemView(item: items[index - offset]);
-                  },
-                ),
+          child: historyBody,
+        ),
+        _ThreadControls(
+          model: model,
+          thread: thread,
+          controller: _composerController,
         ),
       ],
+    );
+  }
+}
+
+class _ThreadControls extends StatelessWidget {
+  const _ThreadControls({
+    required this.model,
+    required this.thread,
+    required this.controller,
+  });
+
+  final CodexModel model;
+  final CodexThread thread;
+  final TextEditingController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!model.hasInteractiveControl) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final pending = model.isControlPending(thread.id);
+    if (model.needsNativeResume(thread.id)) {
+      return SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+          child: SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: FilledButton.icon(
+              onPressed: pending
+                  ? null
+                  : () => unawaited(model.resumeThread(thread.id)),
+              icon: pending
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.play_arrow_outlined),
+              label: const Text('RESUME NATIVELY'),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final turnId = model.activeTurnIdFor(thread.id);
+    final starting = model.isTurnStarting(thread.id);
+    final working = turnId.isNotEmpty;
+    final canSubmit =
+        !starting && (working ? model.canSteerTurn : model.canStartTurn);
+    final actionLabel = starting ? 'STARTING' : (working ? 'STEER' : 'SEND');
+
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controller,
+                      enabled: !pending && canSubmit,
+                      minLines: 1,
+                      maxLines: 5,
+                      textCapitalization: TextCapitalization.sentences,
+                      decoration: InputDecoration(
+                        hintText: starting
+                            ? 'Starting Codex turn…'
+                            : working
+                                ? 'Steer the active Codex turn…'
+                                : 'Message Codex…',
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    height: 48,
+                    child: FilledButton(
+                      onPressed: pending || !canSubmit
+                          ? null
+                          : () async {
+                              final text = controller.text.trim();
+                              if (text.isEmpty) return;
+                              if (working) {
+                                await model.steer(thread.id, text);
+                              } else {
+                                await model.send(thread.id, text);
+                              }
+                              controller.clear();
+                            },
+                      child: Text(actionLabel),
+                    ),
+                  ),
+                ],
+              ),
+              if (working && model.canInterruptTurn) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: OutlinedButton.icon(
+                    onPressed: pending
+                        ? null
+                        : () => unawaited(model.interrupt(thread.id)),
+                    icon: const Icon(Icons.stop_circle_outlined),
+                    label: const Text('INTERRUPT'),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -357,7 +507,8 @@ class _ThreadStatusBar extends StatelessWidget {
     final theme = Theme.of(context);
     final working = thread.state == 'working' ||
         thread.state == 'waiting_for_approval' ||
-        thread.state == 'waiting_for_input';
+        thread.state == 'waiting_for_input' ||
+        thread.state == 'interrupting';
     return Container(
       width: double.infinity,
       color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.45),
@@ -575,6 +726,10 @@ IconData _stateIcon(String state) {
   switch (state) {
     case 'working':
       return Icons.pending_outlined;
+    case 'interrupting':
+      return Icons.stop_circle_outlined;
+    case 'resumable':
+      return Icons.play_circle_outline;
     case 'waiting_for_approval':
       return Icons.approval_outlined;
     case 'waiting_for_input':

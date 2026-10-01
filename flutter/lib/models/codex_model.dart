@@ -87,6 +87,18 @@ class CodexHistoryItem {
       );
 }
 
+class _PendingCodexControl {
+  const _PendingCodexControl({
+    required this.action,
+    required this.threadId,
+    this.workspaceThreadId = '',
+  });
+
+  final String action;
+  final String threadId;
+  final String workspaceThreadId;
+}
+
 class CodexModel with ChangeNotifier {
   CodexModel(this.sessionId, {CodexCommandSender? commandSender})
       : _commandSender = commandSender ??
@@ -108,14 +120,23 @@ class CodexModel with ChangeNotifier {
   final Set<String> _pendingThreadListRequests = {};
   final Map<String, bool> _historyResetByRequest = {};
   final Map<String, String> _historyThreadByRequest = {};
+  final Map<String, String> _activeTurnIds = {};
+  final Map<String, String> _startingTurnIds = {};
+  final Map<String, _PendingCodexControl> _pendingControlRequests = {};
 
   List<CodexThread> threads = const [];
   String serviceState = 'unavailable';
   String codexVersion = '';
   String error = '';
+  String lastStartedThreadId = '';
   String? selectedThreadId;
   String? _subscribedThreadId;
   bool loadingThreads = false;
+  bool canResumeThread = false;
+  bool canStartThread = false;
+  bool canStartTurn = false;
+  bool canSteerTurn = false;
+  bool canInterruptTurn = false;
   int _requestSerial = 0;
 
   List<CodexHistoryItem> historyFor(String threadId) =>
@@ -127,7 +148,32 @@ class CodexModel with ChangeNotifier {
 
   bool isHistoryLoading(String threadId) => _loadingHistory.contains(threadId);
 
+  bool isControlPending(String threadId) => _pendingControlRequests.values.any(
+        (pending) =>
+            pending.threadId == threadId ||
+            pending.workspaceThreadId == threadId,
+      );
+
+  bool get isStartingThread => _pendingControlRequests.values
+      .any((pending) => pending.action == 'start_thread');
+
+  String activeTurnIdFor(String threadId) => _activeTurnIds[threadId] ?? '';
+
+  bool isTurnStarting(String threadId) =>
+      _startingTurnIds.containsKey(threadId);
+
+  bool needsNativeResume(String threadId) => threads.any(
+        (thread) => thread.id == threadId && thread.state == 'resumable',
+      );
+
   bool get isReady => serviceState == 'ready';
+
+  bool get hasInteractiveControl =>
+      canResumeThread ||
+      canStartThread ||
+      canStartTurn ||
+      canSteerTurn ||
+      canInterruptTurn;
 
   Future<void> listThreads() async {
     final requestId = _nextRequestId('threads');
@@ -202,6 +248,97 @@ class CodexModel with ChangeNotifier {
     await loadHistory(threadId, reset: true);
   }
 
+  Future<void> resumeThread(String threadId) async {
+    if (threadId.isEmpty || isControlPending(threadId)) return;
+    if (!canResumeThread) {
+      _setControlError(threadId, 'Native Codex resume is unavailable.');
+      return;
+    }
+    await _sendControl(
+      'codex-resume-thread',
+      _PendingCodexControl(action: 'resume_thread', threadId: threadId),
+      {'thread_id': threadId},
+    );
+  }
+
+  Future<void> startThread({String workspaceThreadId = ''}) async {
+    if (isStartingThread) return;
+    if (!canStartThread) {
+      _setControlError('', 'Starting a Codex task is unavailable.');
+      return;
+    }
+    await _sendControl(
+      'codex-start-thread',
+      _PendingCodexControl(
+        action: 'start_thread',
+        threadId: '',
+        workspaceThreadId: workspaceThreadId,
+      ),
+      {'workspace_thread_id': workspaceThreadId},
+    );
+  }
+
+  Future<void> send(String threadId, String text) async {
+    final trimmed = text.trim();
+    if (threadId.isEmpty || trimmed.isEmpty || isControlPending(threadId)) {
+      return;
+    }
+    if (needsNativeResume(threadId)) {
+      _setControlError(
+          threadId, 'Resume this Codex task natively before sending.');
+      return;
+    }
+    if (!canStartTurn) {
+      _setControlError(threadId, 'Starting a Codex turn is unavailable.');
+      return;
+    }
+    if (activeTurnIdFor(threadId).isNotEmpty || isTurnStarting(threadId)) {
+      _setControlError(threadId, 'This Codex task already has an active turn.');
+      return;
+    }
+    await _sendControl(
+      'codex-start-turn',
+      _PendingCodexControl(action: 'start_turn', threadId: threadId),
+      {'thread_id': threadId, 'text': trimmed},
+    );
+  }
+
+  Future<void> steer(String threadId, String text) async {
+    final trimmed = text.trim();
+    final turnId = activeTurnIdFor(threadId);
+    if (threadId.isEmpty ||
+        turnId.isEmpty ||
+        trimmed.isEmpty ||
+        isControlPending(threadId)) return;
+    if (!canSteerTurn) {
+      _setControlError(
+          threadId, 'Steering the active Codex turn is unavailable.');
+      return;
+    }
+    await _sendControl(
+      'codex-steer-turn',
+      _PendingCodexControl(action: 'steer_turn', threadId: threadId),
+      {'thread_id': threadId, 'turn_id': turnId, 'text': trimmed},
+    );
+  }
+
+  Future<void> interrupt(String threadId) async {
+    final turnId = activeTurnIdFor(threadId);
+    if (threadId.isEmpty || turnId.isEmpty || isControlPending(threadId)) {
+      return;
+    }
+    if (!canInterruptTurn) {
+      _setControlError(
+          threadId, 'Interrupting the active Codex turn is unavailable.');
+      return;
+    }
+    await _sendControl(
+      'codex-interrupt-turn',
+      _PendingCodexControl(action: 'interrupt_turn', threadId: threadId),
+      {'thread_id': threadId, 'turn_id': turnId},
+    );
+  }
+
   void leaveThread(String threadId) {
     if (selectedThreadId == threadId) {
       selectedThreadId = null;
@@ -230,11 +367,98 @@ class CodexModel with ChangeNotifier {
     }
   }
 
+  void handleControlResponse(Map<String, dynamic> event) {
+    final requestId = _asString(event['request_id']);
+    final pending = _pendingControlRequests.remove(requestId);
+    final type = _asString(event['type']);
+    final responseThreadId = _asString(event['thread_id']);
+    final threadId = responseThreadId.isNotEmpty
+        ? responseThreadId
+        : (pending?.threadId ?? '');
+
+    if (type == 'error') {
+      final message = _asString(event['message']);
+      _setControlError(
+          threadId, message.isEmpty ? 'Codex control failed.' : message,
+          notify: false);
+      notifyListeners();
+      return;
+    }
+    if (type != 'result') {
+      notifyListeners();
+      return;
+    }
+
+    final action = _asString(event['action']);
+    final turnId = _asString(event['turn_id']);
+    final state = _asString(event['state']);
+    if (threadId.isNotEmpty) {
+      _threadErrors.remove(threadId);
+      if (state.isNotEmpty) _updateThreadState(threadId, state);
+    } else {
+      error = '';
+    }
+
+    switch (action) {
+      case 'thread_started':
+        if (threadId.isNotEmpty) {
+          lastStartedThreadId = threadId;
+          if (!threads.any((thread) => thread.id == threadId)) {
+            final workspaceThreadId = pending?.workspaceThreadId ?? '';
+            final workspace = threads.where(
+              (thread) => thread.id == workspaceThreadId,
+            );
+            final source = workspace.isEmpty ? null : workspace.first;
+            threads = [
+              CodexThread(
+                id: threadId,
+                title: 'New Codex task',
+                project: source?.project ?? '',
+                originator: '',
+                updatedAt: DateTime.now().millisecondsSinceEpoch,
+                state: state.isEmpty ? 'idle' : state,
+              ),
+              ...threads,
+            ];
+          }
+        }
+        break;
+      case 'turn_started':
+        if (threadId.isNotEmpty && turnId.isNotEmpty) {
+          if (_activeTurnIds[threadId] != turnId) {
+            _startingTurnIds[threadId] = turnId;
+          }
+        }
+        break;
+      case 'turn_steered':
+        if (threadId.isNotEmpty && turnId.isNotEmpty) {
+          _activeTurnIds[threadId] = turnId;
+        }
+        break;
+      case 'turn_interrupted':
+        break;
+      case 'thread_resumed':
+        if (threadId.isNotEmpty) {
+          _startingTurnIds.remove(threadId);
+          if (turnId.isNotEmpty) {
+            _activeTurnIds[threadId] = turnId;
+          } else {
+            _activeTurnIds.remove(threadId);
+          }
+        }
+        break;
+      case 'unknown':
+        break;
+    }
+    notifyListeners();
+  }
+
   void reset() {
     threads = const [];
     serviceState = 'unavailable';
     codexVersion = '';
     error = '';
+    lastStartedThreadId = '';
     selectedThreadId = null;
     _subscribedThreadId = null;
     loadingThreads = false;
@@ -245,6 +469,14 @@ class CodexModel with ChangeNotifier {
     _pendingThreadListRequests.clear();
     _historyResetByRequest.clear();
     _historyThreadByRequest.clear();
+    _activeTurnIds.clear();
+    _startingTurnIds.clear();
+    _pendingControlRequests.clear();
+    canResumeThread = false;
+    canStartThread = false;
+    canStartTurn = false;
+    canSteerTurn = false;
+    canInterruptTurn = false;
     notifyListeners();
   }
 
@@ -254,6 +486,20 @@ class CodexModel with ChangeNotifier {
     loadingThreads = _pendingThreadListRequests.isNotEmpty;
     serviceState = _asString(event['service_state']);
     codexVersion = _asString(event['codex_version']);
+    final rawControl = event['control'];
+    if (rawControl is Map) {
+      canResumeThread = _asBool(rawControl['resume_thread']);
+      canStartThread = _asBool(rawControl['start_thread']);
+      canStartTurn = _asBool(rawControl['start_turn']);
+      canSteerTurn = _asBool(rawControl['steer_turn']);
+      canInterruptTurn = _asBool(rawControl['interrupt_turn']);
+    } else {
+      canResumeThread = false;
+      canStartThread = false;
+      canStartTurn = false;
+      canSteerTurn = false;
+      canInterruptTurn = false;
+    }
     final rawThreads = event['threads'];
     threads = rawThreads is List
         ? rawThreads
@@ -297,6 +543,21 @@ class CodexModel with ChangeNotifier {
     if (threadId.isEmpty) return;
     final kind = _asString(event['kind']);
     final state = _asString(event['state']);
+    final turnId = _asString(event['turn_id']);
+
+    if (kind == 'turn_started' && turnId.isNotEmpty) {
+      _startingTurnIds.remove(threadId);
+      _activeTurnIds[threadId] = turnId;
+    } else if (kind == 'turn_completed') {
+      final startingTurnId = _startingTurnIds[threadId];
+      if (turnId.isEmpty || startingTurnId == turnId) {
+        _startingTurnIds.remove(threadId);
+      }
+      final activeTurnId = _activeTurnIds[threadId];
+      if (turnId.isEmpty || activeTurnId == turnId) {
+        _activeTurnIds.remove(threadId);
+      }
+    }
 
     if (state.isNotEmpty && state != 'unavailable') {
       _updateThreadState(threadId, state);
@@ -416,6 +677,44 @@ class CodexModel with ChangeNotifier {
 
   String _nextRequestId(String operation) =>
       'codex-$operation-${++_requestSerial}';
+
+  Future<void> _sendControl(
+    String key,
+    _PendingCodexControl pending,
+    Map<String, dynamic> payload,
+  ) async {
+    final requestId = _nextRequestId(pending.action);
+    _pendingControlRequests[requestId] = pending;
+    if (pending.threadId.isNotEmpty) {
+      _threadErrors.remove(pending.threadId);
+    } else {
+      error = '';
+    }
+    notifyListeners();
+    try {
+      await _commandSender(
+        key,
+        jsonEncode({'request_id': requestId, ...payload}),
+      );
+    } catch (e) {
+      _pendingControlRequests.remove(requestId);
+      _setControlError(
+        pending.threadId,
+        'Unable to send Codex control request: $e',
+        notify: false,
+      );
+      notifyListeners();
+    }
+  }
+
+  void _setControlError(String threadId, String message, {bool notify = true}) {
+    if (threadId.isNotEmpty) {
+      _threadErrors[threadId] = message;
+    } else {
+      error = message;
+    }
+    if (notify) notifyListeners();
+  }
 }
 
 String _asString(dynamic value) => value?.toString() ?? '';
@@ -424,4 +723,9 @@ int _asInt(dynamic value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
   return int.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+bool _asBool(dynamic value) {
+  if (value is bool) return value;
+  return value?.toString().toLowerCase() == 'true';
 }
