@@ -1,6 +1,9 @@
 use hbb_common::{bail, ResultType};
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+#[cfg(windows)]
+pub mod ldplayer;
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProviderId(String);
 
