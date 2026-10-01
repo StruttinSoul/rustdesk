@@ -30,6 +30,10 @@ impl RpcCallError {
             _ => None,
         }
     }
+
+    pub(crate) fn should_reconnect(&self) -> bool {
+        matches!(self, Self::Io(_) | Self::Timeout | Self::Disconnected)
+    }
 }
 
 impl fmt::Display for RpcCallError {
@@ -323,5 +327,19 @@ mod tests {
 
         assert_eq!(messages[0]["method"], "turn/started");
         assert_eq!(messages[1]["method"], "item/agentMessage/delta");
+    }
+
+    #[test]
+    fn reconnects_only_for_transport_failures() {
+        assert!(RpcCallError::Io("closed".into()).should_reconnect());
+        assert!(RpcCallError::Timeout.should_reconnect());
+        assert!(RpcCallError::Disconnected.should_reconnect());
+        assert!(!RpcCallError::Protocol("bad response".into()).should_reconnect());
+        assert!(!RpcCallError::Remote {
+            code: -32602,
+            message: "invalid params".into(),
+            data: None,
+        }
+        .should_reconnect());
     }
 }

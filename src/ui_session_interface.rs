@@ -841,6 +841,48 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    pub fn request_codex_threads(&self, request_id: String) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_list_threads(CodexListThreadsRequest::new());
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn request_codex_history(
+        &self,
+        request_id: String,
+        thread_id: String,
+        cursor: String,
+        limit: u32,
+    ) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_thread_history(CodexThreadHistoryRequest {
+            thread_id,
+            cursor,
+            limit,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn subscribe_codex_events(&self, request_id: String, thread_id: String, subscribe: bool) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_event_subscription(CodexEventSubscriptionRequest {
+            thread_id,
+            subscribe,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
     pub fn capture_displays(&self, add: Vec<i32>, sub: Vec<i32>, set: Vec<i32>) {
         let mut misc = Misc::new();
         misc.set_capture_displays(CaptureDisplays {
@@ -1756,6 +1798,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn printer_request(&self, id: i32, path: String);
     fn handle_screenshot_resp(&self, sid: String, msg: String);
     fn handle_terminal_response(&self, response: TerminalResponse);
+    fn handle_codex_read_response(&self, response: CodexReadResponse);
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {

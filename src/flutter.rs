@@ -3,6 +3,7 @@ use crate::{
     flutter_ffi::{EventToUI, SessionID},
     ui_session_interface::{io_loop, InvokeUiSession, Session},
 };
+use base::message_proto::*;
 use flutter_rust_bridge::StreamSink;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::dlopen::{
@@ -10,10 +11,9 @@ use hbb_common::dlopen::{
     Error as LibError,
 };
 use hbb_common::{
-    anyhow::anyhow, bail, config::LocalConfig, get_version_number, log,
-    rendezvous_proto::ConnType, ResultType,
+    anyhow::anyhow, bail, config::LocalConfig, get_version_number, log, rendezvous_proto::ConnType,
+    ResultType,
 };
-use base::message_proto::*;
 use serde::Serialize;
 use serde_json::json;
 #[cfg(target_os = "windows")]
@@ -111,7 +111,10 @@ pub extern "C" fn rustdesk_core_main() -> bool {
 
         // Native runners bypass Rust's startup, which normally ignores SIGPIPE.
         if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) } == libc::SIG_ERR {
-            eprintln!("Failed to ignore SIGPIPE: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "Failed to ignore SIGPIPE: {}",
+                std::io::Error::last_os_error()
+            );
             std::process::exit(1);
         }
     }
@@ -681,7 +684,8 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     /// unused in flutter, use switch_display or set_peer_info
-    fn set_display(&self, _x: i32, _y: i32, _w: i32, _h: i32, _cursor_embedded: bool, _scale: f64) {}
+    fn set_display(&self, _x: i32, _y: i32, _w: i32, _h: i32, _cursor_embedded: bool, _scale: f64) {
+    }
 
     fn update_privacy_mode(&self) {
         self.push_event::<&str>("update_privacy_mode", &[], &[]);
@@ -882,6 +886,7 @@ impl InvokeUiSession for FlutterHandler {
         let mut features: HashMap<&str, bool> = Default::default();
         for ref f in pi.features.iter() {
             features.insert("privacy_mode", f.privacy_mode);
+            features.insert("codex", f.codex);
         }
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {
@@ -1169,6 +1174,137 @@ impl InvokeUiSession for FlutterHandler {
                 log::warn!("Unhandled terminal response type");
             }
         }
+    }
+
+    fn handle_codex_read_response(&self, response: CodexReadResponse) {
+        use base::message_proto::codex_read_response::Union;
+
+        let request_id = response.request_id;
+        let event_data: Vec<(&str, serde_json::Value)> = match response.union {
+            Some(Union::ThreadList(list)) => vec![
+                ("type", json!("thread_list")),
+                ("request_id", json!(request_id)),
+                (
+                    "service_state",
+                    json!(codex_state_name(list.service_state.enum_value_or_default())),
+                ),
+                ("codex_version", json!(list.codex_version)),
+                (
+                    "threads",
+                    json!(list
+                        .threads
+                        .into_iter()
+                        .map(|thread| json!({
+                            "id": thread.id,
+                            "title": thread.title,
+                            "project": thread.project,
+                            "originator": thread.originator,
+                            "updated_at": thread.updated_at,
+                            "state": codex_state_name(thread.state.enum_value_or_default()),
+                        }))
+                        .collect::<Vec<_>>()),
+                ),
+            ],
+            Some(Union::ThreadHistory(history)) => vec![
+                ("type", json!("thread_history")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(history.thread_id)),
+                ("next_cursor", json!(history.next_cursor)),
+                (
+                    "items",
+                    json!(history
+                        .items
+                        .into_iter()
+                        .map(|item| json!({
+                            "id": item.id,
+                            "turn_id": item.turn_id,
+                            "kind": codex_history_kind_name(item.kind.enum_value_or_default()),
+                            "text": item.text,
+                            "detail": item.detail,
+                            "status": item.status,
+                        }))
+                        .collect::<Vec<_>>()),
+                ),
+            ],
+            Some(Union::Event(event)) => vec![
+                ("type", json!("event")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(event.thread_id)),
+                ("turn_id", json!(event.turn_id)),
+                ("item_id", json!(event.item_id)),
+                (
+                    "kind",
+                    json!(codex_event_kind_name(event.kind.enum_value_or_default())),
+                ),
+                (
+                    "state",
+                    json!(codex_state_name(event.state.enum_value_or_default())),
+                ),
+                (
+                    "history_kind",
+                    json!(codex_history_kind_name(
+                        event.history_kind.enum_value_or_default()
+                    )),
+                ),
+                ("text", json!(event.text)),
+                ("status", json!(event.status)),
+            ],
+            Some(Union::Error(error)) => vec![
+                ("type", json!("error")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(error.thread_id)),
+                ("message", json!(error.message)),
+            ],
+            None => return,
+            Some(_) => {
+                log::warn!("Unhandled Codex read response type");
+                return;
+            }
+        };
+        self.push_event_("codex_read_response", &event_data, &[], &[]);
+    }
+}
+
+fn codex_state_name(state: CodexState) -> &'static str {
+    match state {
+        CodexState::CodexUnavailable => "unavailable",
+        CodexState::CodexStarting => "starting",
+        CodexState::CodexReady => "ready",
+        CodexState::CodexResumable => "resumable",
+        CodexState::CodexIdle => "idle",
+        CodexState::CodexWorking => "working",
+        CodexState::CodexWaitingForApproval => "waiting_for_approval",
+        CodexState::CodexWaitingForInput => "waiting_for_input",
+        CodexState::CodexCompleted => "completed",
+        CodexState::CodexFailed => "failed",
+        CodexState::CodexDisconnected => "disconnected",
+    }
+}
+
+fn codex_history_kind_name(kind: CodexHistoryKind) -> &'static str {
+    match kind {
+        CodexHistoryKind::CodexHistoryUnknown => "unknown",
+        CodexHistoryKind::CodexHistoryUserMessage => "user_message",
+        CodexHistoryKind::CodexHistoryAgentMessage => "agent_message",
+        CodexHistoryKind::CodexHistoryPlan => "plan",
+        CodexHistoryKind::CodexHistoryReasoning => "reasoning",
+        CodexHistoryKind::CodexHistoryCommand => "command",
+        CodexHistoryKind::CodexHistoryFileChange => "file_change",
+        CodexHistoryKind::CodexHistoryTool => "tool",
+        CodexHistoryKind::CodexHistoryWebSearch => "web_search",
+        CodexHistoryKind::CodexHistoryStatus => "status",
+    }
+}
+
+fn codex_event_kind_name(kind: CodexEventKind) -> &'static str {
+    match kind {
+        CodexEventKind::CodexEventUnknown => "unknown",
+        CodexEventKind::CodexEventThreadState => "thread_state",
+        CodexEventKind::CodexEventItemStarted => "item_started",
+        CodexEventKind::CodexEventItemUpdated => "item_updated",
+        CodexEventKind::CodexEventItemCompleted => "item_completed",
+        CodexEventKind::CodexEventTurnStarted => "turn_started",
+        CodexEventKind::CodexEventTurnCompleted => "turn_completed",
     }
 }
 

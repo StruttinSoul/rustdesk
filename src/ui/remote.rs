@@ -14,12 +14,8 @@ use sciter::{
     Value,
 };
 
-use hbb_common::{
-    allow_err, log, rendezvous_proto::ConnType,
-};
-use base::{
-    fs::TransferJobMeta, message_proto::*,
-};
+use base::{fs::TransferJobMeta, message_proto::*};
+use hbb_common::{allow_err, log, rendezvous_proto::ConnType};
 
 use crate::{
     client::*,
@@ -146,7 +142,10 @@ impl InvokeUiSession for SciterHandler {
 
     fn set_display(&self, x: i32, y: i32, w: i32, h: i32, cursor_embedded: bool, scale: f64) {
         let scale = if scale <= 0.0 { 1.0 } else { scale };
-        self.call("setDisplay", &make_args!(x, y, w, h, cursor_embedded, scale));
+        self.call(
+            "setDisplay",
+            &make_args!(x, y, w, h, cursor_embedded, scale),
+        );
         // https://sciter.com/forums/topic/color_spaceiyuv-crash
         // Nothing spectacular in decoder – done on CPU side.
         // So if you can do BGRA translation on your side – the better.
@@ -416,6 +415,10 @@ impl InvokeUiSession for SciterHandler {
     fn handle_terminal_response(&self, _response: TerminalResponse) {
         // Terminal support is not implemented for Sciter UI
         // This is a stub implementation to satisfy the trait requirements
+    }
+
+    fn handle_codex_read_response(&self, _response: CodexReadResponse) {
+        // Codex read-only UI is implemented only in Flutter/mobile.
     }
 }
 

@@ -4,6 +4,7 @@ mod history;
 mod process;
 mod protocol;
 mod rpc;
+mod service;
 mod threads;
 
 pub use discovery::{discover_installation, CodexInstallation};
@@ -11,7 +12,11 @@ pub use events::{CodexEvent, CodexEventKind};
 pub use history::{CodexHistoryItem, CodexHistoryItemKind, CodexHistoryPage};
 pub use process::CodexConnectionMode;
 pub use protocol::CodexServerInfo;
+pub use service::is_available;
 pub use threads::{CodexThreadStatus, CodexThreadSummary};
+
+#[cfg(target_os = "windows")]
+pub(crate) use service::{disconnect_client, submit_read_request};
 
 use hbb_common::{bail, ResultType};
 use process::{connection_mode_order, managed_daemon_healthy, CodexProcess};
@@ -53,17 +58,16 @@ impl CodexBridge {
         self.connection_mode
     }
 
-    pub fn list_threads(&mut self) -> ResultType<Vec<CodexThreadSummary>> {
+    pub(crate) fn list_threads(&mut self) -> Result<Vec<CodexThreadSummary>, rpc::RpcCallError> {
         threads::list_threads(&mut self.protocol, Duration::from_secs(10))
-            .map_err(|error| hbb_common::anyhow::anyhow!(error.to_string()))
     }
 
-    pub fn thread_history(
+    pub(crate) fn thread_history(
         &mut self,
         thread_id: &str,
         cursor: Option<&str>,
         limit: u32,
-    ) -> ResultType<CodexHistoryPage> {
+    ) -> Result<CodexHistoryPage, rpc::RpcCallError> {
         history::list_history(
             &mut self.protocol,
             thread_id,
@@ -71,19 +75,15 @@ impl CodexBridge {
             limit,
             Duration::from_secs(10),
         )
-        .map_err(|error| hbb_common::anyhow::anyhow!(error.to_string()))
     }
 
-    pub fn drain_events(&mut self) -> ResultType<Vec<CodexEvent>> {
-        self.protocol
-            .drain_available()
-            .map(|messages| {
-                messages
-                    .iter()
-                    .filter_map(events::normalize_notification)
-                    .collect()
-            })
-            .map_err(|error| hbb_common::anyhow::anyhow!(error.to_string()))
+    pub(crate) fn drain_events(&mut self) -> Result<Vec<CodexEvent>, rpc::RpcCallError> {
+        self.protocol.drain_available().map(|messages| {
+            messages
+                .iter()
+                .filter_map(events::normalize_notification)
+                .collect()
+        })
     }
 
     fn connect_mode(

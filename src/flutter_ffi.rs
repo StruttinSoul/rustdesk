@@ -11,16 +11,13 @@ use crate::{
     input::*,
     ui_interface::{self, *},
 };
+use base::{config::keys, fs};
 use flutter_rust_bridge::{StreamSink, SyncReturn};
 use hbb_common::{
     config::{self, LocalConfig, PeerConfig, PeerInfoSerde},
     lazy_static, log,
     rendezvous_proto::ConnType,
     ResultType,
-};
-use base::{
-    config::keys,
-    fs,
 };
 use std::{
     collections::HashMap,
@@ -2904,9 +2901,58 @@ pub fn main_set_common(_key: String, _value: String) {
 
 pub fn session_set_common(session_id: SessionID, key: String, value: String) {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
-        if key == "continue-insecure-connection"
-        {
+        if key == "continue-insecure-connection" {
             s.continue_insecure_connection(value == "Y");
+            return;
+        }
+        if key == "codex-list-threads" {
+            s.request_codex_threads(value);
+            return;
+        }
+        if key == "codex-thread-history" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = payload
+                    .get("cursor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(50)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_history(request_id, thread_id, cursor, limit);
+            }
+            return;
+        }
+        if key == "codex-event-subscription" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let subscribe = payload
+                    .get("subscribe")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                s.subscribe_codex_events(request_id, thread_id, subscribe);
+            }
             return;
         }
     }

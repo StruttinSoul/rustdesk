@@ -41,6 +41,11 @@ pub fn discover_installation() -> ResultType<Option<CodexInstallation>> {
     }))
 }
 
+pub(crate) fn installation_present() -> bool {
+    select_existing_candidate(installation_candidates(), Path::is_file).is_some()
+        && codex_home_candidate().is_ok()
+}
+
 fn parse_version(output: &str) -> Option<String> {
     let mut parts = output.split_whitespace();
     let product = parts.next()?;
@@ -207,5 +212,15 @@ mod tests {
             select_existing_candidate(vec![PathBuf::from(r"C:\missing\codex.exe")], |_| false);
 
         assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn installation_presence_probe_does_not_require_version_execution() {
+        let selected =
+            select_existing_candidate(vec![PathBuf::from(r"C:\present\codex.exe")], |path| {
+                path == std::path::Path::new(r"C:\present\codex.exe")
+            });
+
+        assert!(selected.is_some());
     }
 }

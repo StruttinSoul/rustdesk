@@ -24,6 +24,11 @@ use crate::{
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::{common::DEVICE_NAME, flutter::connection_manager::start_channel};
+use base::{
+    config::keys,
+    fs::{self, can_enable_overwrite_detection, JobType},
+    message_proto::{option_message::BoolOption, permission_info::Permission},
+};
 use cidr_utils::cidr::IpCidr;
 #[cfg(target_os = "android")]
 use hbb_common::protobuf::EnumOrUnknown;
@@ -44,11 +49,6 @@ use hbb_common::{
         time::{self, Duration, Instant},
     },
     tokio_util::codec::{BytesCodec, Framed},
-};
-use base::{
-    config::keys,
-    fs::{self, can_enable_overwrite_detection, JobType},
-    message_proto::{option_message::BoolOption, permission_info::Permission},
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use scrap::android::{call_main_service_key_event, call_main_service_pointer_input};
@@ -2075,6 +2075,8 @@ impl Connection {
             privacy_mode: privacy_mode::is_privacy_mode_supported(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             terminal,
+            #[cfg(target_os = "windows")]
+            codex: self.is_remote() && crate::server::codex::is_available(),
             ..Default::default()
         })
         .into();
@@ -4051,12 +4053,28 @@ impl Connection {
                         self.refresh_video_display(Some(request.display as usize));
                     }
                 }
-                Some(message::Union::PortForwardChannel(ch)) => self.handle_port_forward_channel(ch),
+                Some(message::Union::PortForwardChannel(ch)) => {
+                    self.handle_port_forward_channel(ch)
+                }
                 Some(message::Union::TerminalAction(action)) => {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     allow_err!(self.handle_terminal_action(action).await);
                     #[cfg(any(target_os = "android", target_os = "ios"))]
                     log::warn!("Terminal action received but not supported on this platform");
+                }
+                Some(message::Union::CodexReadRequest(request)) => {
+                    #[cfg(target_os = "windows")]
+                    if self.is_authed_remote_conn() {
+                        if let Some(reply) = self.inner.tx.clone() {
+                            crate::server::codex::submit_read_request(
+                                self.inner.id,
+                                request,
+                                reply,
+                            );
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    let _ = request;
                 }
                 _ => {}
             }
@@ -6100,6 +6118,8 @@ impl Connection {
             Some(message::Union::ScreenshotResponse(_)) => "screenshot_response",
             Some(message::Union::TerminalAction(_)) => "terminal_action",
             Some(message::Union::TerminalResponse(_)) => "terminal_response",
+            Some(message::Union::CodexReadRequest(_)) => "codex_read_request",
+            Some(message::Union::CodexReadResponse(_)) => "codex_read_response",
             Some(message::Union::PortForwardChannel(_)) => "port_forward_channel",
             Some(message::Union::Misc(misc)) => Self::misc_message_family(misc),
             Some(_) => "message.other",
@@ -6664,6 +6684,9 @@ impl Default for PortableState {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        crate::server::codex::disconnect_client(self.inner.id);
+
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.release_pressed_modifiers();
 
@@ -7649,6 +7672,10 @@ mod test {
                         msg(|m| m.set_port_forward_channel(PortForwardChannel::new())),
                         Some("port_forward_channel"),
                     ),
+                    (
+                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
+                        Some("codex_read_request"),
+                    ),
                 ],
             ),
             (
@@ -7714,6 +7741,10 @@ mod test {
                         msg(|m| m.set_port_forward_channel(PortForwardChannel::new())),
                         Some("port_forward_channel"),
                     ),
+                    (
+                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
+                        Some("codex_read_request"),
+                    ),
                 ],
             ),
             (
@@ -7768,6 +7799,10 @@ mod test {
                         misc_msg(|m| m.set_switch_sides_request(SwitchSidesRequest::new())),
                         Some("misc.switch_sides_request"),
                     ),
+                    (
+                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
+                        Some("codex_read_request"),
+                    ),
                 ],
             ),
             (
@@ -7780,6 +7815,10 @@ mod test {
                     (msg(|m| m.set_terminal_action(TerminalAction::new())), None),
                     (
                         misc_msg(|m| m.set_switch_sides_request(SwitchSidesRequest::new())),
+                        None,
+                    ),
+                    (
+                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
                         None,
                     ),
                 ],
@@ -7817,6 +7856,10 @@ mod test {
                     (
                         msg(|m| m.set_port_forward_channel(PortForwardChannel::new())),
                         None,
+                    ),
+                    (
+                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
+                        Some("codex_read_request"),
                     ),
                 ],
             ),
