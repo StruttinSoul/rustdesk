@@ -124,7 +124,7 @@ fn is_internal_thread(value: &Value) -> bool {
             .is_some()
 }
 
-fn parse_status(status: &Value) -> CodexThreadStatus {
+pub(crate) fn parse_status(status: &Value) -> CodexThreadStatus {
     match status.get("type").and_then(Value::as_str) {
         Some("notLoaded") => CodexThreadStatus::Resumable,
         Some("idle") => CodexThreadStatus::Idle,

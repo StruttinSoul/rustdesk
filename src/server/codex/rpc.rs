@@ -3,7 +3,7 @@ use std::{
     collections::VecDeque,
     fmt,
     io::{BufRead, BufReader, Write},
-    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     thread,
     time::Duration,
 };
@@ -169,6 +169,19 @@ where
         self.pending.drain(..).collect()
     }
 
+    pub(crate) fn drain_available(&mut self) -> Result<Vec<Value>, RpcCallError> {
+        let mut messages: Vec<Value> = self.pending.drain(..).collect();
+        loop {
+            match self.receiver.try_recv() {
+                Ok(ReaderEvent::Message(message)) => messages.push(message),
+                Ok(ReaderEvent::Error(message)) => return Err(RpcCallError::Io(message)),
+                Err(TryRecvError::Empty) => return Ok(messages),
+                Err(TryRecvError::Disconnected) if !messages.is_empty() => return Ok(messages),
+                Err(TryRecvError::Disconnected) => return Err(RpcCallError::Disconnected),
+            }
+        }
+    }
+
     fn write_message(&mut self, message: &Value) -> Result<(), RpcCallError> {
         let mut encoded = serde_json::to_vec(message)
             .map_err(|error| RpcCallError::Protocol(error.to_string()))?;
@@ -280,5 +293,35 @@ mod tests {
 
         assert_eq!(error.code(), Some(-32601));
         assert!(error.to_string().contains("Method not found"));
+    }
+
+    #[test]
+    fn drain_available_reads_idle_notifications_without_dummy_request() {
+        let input = concat!(
+            "{\"method\":\"turn/started\",\"params\":{\"threadId\":\"thr_1\"}}\n",
+            "{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"hi\"}}\n"
+        );
+        let mut client = JsonRpcClient::from_streams(
+            Cursor::new(input.as_bytes().to_vec()),
+            SharedWriter::default(),
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let messages = loop {
+            let messages = client
+                .drain_available()
+                .expect("idle notifications should drain");
+            if messages.len() == 2 {
+                break messages;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader thread stalled"
+            );
+            std::thread::yield_now();
+        };
+
+        assert_eq!(messages[0]["method"], "turn/started");
+        assert_eq!(messages[1]["method"], "item/agentMessage/delta");
     }
 }

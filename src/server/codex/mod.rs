@@ -1,10 +1,14 @@
 mod discovery;
+mod events;
+mod history;
 mod process;
 mod protocol;
 mod rpc;
 mod threads;
 
 pub use discovery::{discover_installation, CodexInstallation};
+pub use events::{CodexEvent, CodexEventKind};
+pub use history::{CodexHistoryItem, CodexHistoryItemKind, CodexHistoryPage};
 pub use process::CodexConnectionMode;
 pub use protocol::CodexServerInfo;
 pub use threads::{CodexThreadStatus, CodexThreadSummary};
@@ -51,6 +55,34 @@ impl CodexBridge {
 
     pub fn list_threads(&mut self) -> ResultType<Vec<CodexThreadSummary>> {
         threads::list_threads(&mut self.protocol, Duration::from_secs(10))
+            .map_err(|error| hbb_common::anyhow::anyhow!(error.to_string()))
+    }
+
+    pub fn thread_history(
+        &mut self,
+        thread_id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> ResultType<CodexHistoryPage> {
+        history::list_history(
+            &mut self.protocol,
+            thread_id,
+            cursor,
+            limit,
+            Duration::from_secs(10),
+        )
+        .map_err(|error| hbb_common::anyhow::anyhow!(error.to_string()))
+    }
+
+    pub fn drain_events(&mut self) -> ResultType<Vec<CodexEvent>> {
+        self.protocol
+            .drain_available()
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter_map(events::normalize_notification)
+                    .collect()
+            })
             .map_err(|error| hbb_common::anyhow::anyhow!(error.to_string()))
     }
 

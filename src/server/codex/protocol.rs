@@ -133,6 +133,10 @@ where
     pub(crate) fn take_pending(&mut self) -> Vec<Value> {
         self.rpc.take_pending()
     }
+
+    pub(crate) fn drain_available(&mut self) -> Result<Vec<Value>, RpcCallError> {
+        self.rpc.drain_available()
+    }
 }
 
 fn required_string(value: &Value, field: &str) -> Result<String, RpcCallError> {
