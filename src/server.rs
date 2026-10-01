@@ -72,6 +72,7 @@ mod connection;
 mod login_failure_check;
 pub(crate) mod port_forward_mux;
 pub mod display_service;
+pub mod emulator;
 #[cfg(windows)]
 pub mod portable_service;
 mod service;
