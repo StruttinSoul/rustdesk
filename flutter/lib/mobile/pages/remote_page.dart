@@ -24,6 +24,7 @@ import '../../models/platform_model.dart';
 import '../../utils/image.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
+import 'codex_page.dart';
 
 final initText = '1' * 1024;
 
@@ -731,38 +732,54 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   }
 
   List<TTextMenu> _getMobileActionMenus() {
-    if (gFFI.ffiModel.pi.platform != kPeerPlatformAndroid ||
-        !gFFI.ffiModel.keyboard) {
-      return [];
+    final actions = <TTextMenu>[];
+    if (gFFI.ffiModel.pi.features.codex) {
+      actions.add(
+        TTextMenu(
+          child: const Text('Codex'),
+          trailingIcon: Icon(Icons.code, color: MyTheme.accent),
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => CodexPage(model: gFFI.codexModel),
+              ),
+            );
+          },
+        ),
+      );
     }
-    final enabled = versionCmp(gFFI.ffiModel.pi.version, '1.2.7') >= 0;
-    if (!enabled) return [];
-    return [
-      TTextMenu(
-        child: Text(translate('Back')),
-        onPressed: () => gFFI.inputModel.onMobileBack(),
-      ),
-      TTextMenu(
-        child: Text(translate('Home')),
-        onPressed: () => gFFI.inputModel.onMobileHome(),
-      ),
-      TTextMenu(
-        child: Text(translate('Apps')),
-        onPressed: () => gFFI.inputModel.onMobileApps(),
-      ),
-      TTextMenu(
-        child: Text(translate('Volume up')),
-        onPressed: () => gFFI.inputModel.onMobileVolumeUp(),
-      ),
-      TTextMenu(
-        child: Text(translate('Volume down')),
-        onPressed: () => gFFI.inputModel.onMobileVolumeDown(),
-      ),
-      TTextMenu(
-        child: Text(translate('Power')),
-        onPressed: () => gFFI.inputModel.onMobilePower(),
-      ),
-    ];
+
+    if (gFFI.ffiModel.pi.platform == kPeerPlatformAndroid &&
+        gFFI.ffiModel.keyboard &&
+        versionCmp(gFFI.ffiModel.pi.version, '1.2.7') >= 0) {
+      actions.addAll([
+        TTextMenu(
+          child: Text(translate('Back')),
+          onPressed: () => gFFI.inputModel.onMobileBack(),
+        ),
+        TTextMenu(
+          child: Text(translate('Home')),
+          onPressed: () => gFFI.inputModel.onMobileHome(),
+        ),
+        TTextMenu(
+          child: Text(translate('Apps')),
+          onPressed: () => gFFI.inputModel.onMobileApps(),
+        ),
+        TTextMenu(
+          child: Text(translate('Volume up')),
+          onPressed: () => gFFI.inputModel.onMobileVolumeUp(),
+        ),
+        TTextMenu(
+          child: Text(translate('Volume down')),
+          onPressed: () => gFFI.inputModel.onMobileVolumeDown(),
+        ),
+        TTextMenu(
+          child: Text(translate('Power')),
+          onPressed: () => gFFI.inputModel.onMobilePower(),
+        ),
+      ]);
+    }
+    return actions;
   }
 
   void showActions(String id) async {
