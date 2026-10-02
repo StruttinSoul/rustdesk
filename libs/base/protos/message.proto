@@ -998,7 +998,7 @@ message PortForwardChannel {
   }
 }
 
-// Read-only Codex control plane. The Windows peer translates these typed
+// Typed Codex control plane. The Windows peer translates these typed
 // requests to its local Codex app-server; raw app-server JSON-RPC is never
 // transported to the controller.
 enum CodexState {
@@ -1052,12 +1052,17 @@ message CodexEventSubscriptionRequest {
   bool subscribe = 2;
 }
 
+message CodexListApprovalsRequest {
+  string thread_id = 1;
+}
+
 message CodexReadRequest {
   string request_id = 1;
   oneof union {
     CodexListThreadsRequest list_threads = 2;
     CodexThreadHistoryRequest thread_history = 3;
     CodexEventSubscriptionRequest event_subscription = 4;
+    CodexListApprovalsRequest list_approvals = 5;
   }
 }
 
@@ -1083,6 +1088,45 @@ message CodexControlCapabilities {
   bool start_turn = 3;
   bool steer_turn = 4;
   bool interrupt_turn = 5;
+  bool approvals = 6;
+}
+
+enum CodexApprovalKind {
+  CodexApprovalUnknown = 0;
+  CodexApprovalCommand = 1;
+  CodexApprovalFileChange = 2;
+  CodexApprovalPermissions = 3;
+}
+
+enum CodexApprovalDecision {
+  CodexApprovalDecisionUnknown = 0;
+  CodexApprovalApprove = 1;
+  CodexApprovalDeny = 2;
+}
+
+message CodexApprovalRequest {
+  string approval_id = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  string item_id = 4;
+  CodexApprovalKind kind = 5;
+  string title = 6;
+  string summary = 7;
+  string reason = 8;
+  int64 started_at_ms = 9;
+  bool actionable = 10;
+}
+
+message CodexApprovalListResponse {
+  string thread_id = 1;
+  repeated CodexApprovalRequest approvals = 2;
+}
+
+message CodexApprovalResolved {
+  string approval_id = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  CodexApprovalDecision decision = 4;
 }
 
 message CodexHistoryItem {
@@ -1123,6 +1167,9 @@ message CodexReadResponse {
     CodexThreadHistoryResponse thread_history = 3;
     CodexEvent event = 4;
     CodexError error = 5;
+    CodexApprovalRequest approval = 6;
+    CodexApprovalListResponse approval_list = 7;
+    CodexApprovalResolved approval_resolved = 8;
   }
 }
 
@@ -1133,6 +1180,8 @@ enum CodexControlAction {
   CodexControlTurnStarted = 3;
   CodexControlTurnSteered = 4;
   CodexControlTurnInterrupted = 5;
+  CodexControlApprovalApproved = 6;
+  CodexControlApprovalDenied = 7;
 }
 
 message CodexResumeThreadRequest {
@@ -1162,6 +1211,13 @@ message CodexInterruptTurnRequest {
   string turn_id = 2;
 }
 
+message CodexRespondApprovalRequest {
+  string approval_id = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  CodexApprovalDecision decision = 4;
+}
+
 message CodexControlRequest {
   string request_id = 1;
   oneof union {
@@ -1170,6 +1226,7 @@ message CodexControlRequest {
     CodexStartTurnRequest start_turn = 4;
     CodexSteerTurnRequest steer_turn = 5;
     CodexInterruptTurnRequest interrupt_turn = 6;
+    CodexRespondApprovalRequest respond_approval = 7;
   }
 }
 

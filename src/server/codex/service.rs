@@ -14,16 +14,19 @@ pub fn is_available() -> bool {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::super::{
-        rpc::RpcCallError, CodexBridge, CodexEvent as BridgeEvent,
+        rpc::RpcCallError, CodexApproval as BridgeApproval,
+        CodexApprovalDecision as BridgeApprovalDecision, CodexApprovalKind as BridgeApprovalKind,
+        CodexBridge, CodexBridgeUpdate, CodexEvent as BridgeEvent,
         CodexEventKind as BridgeEventKind, CodexHistoryItemKind as BridgeHistoryKind,
-        CodexThreadStatus,
+        CodexResolvedApproval as BridgeResolvedApproval, CodexThreadStatus,
     };
     use crate::server::connection::Sender;
     use base::message_proto::{
         codex_control_request, codex_control_response, codex_read_request, codex_read_response,
-        CodexControlAction, CodexControlCapabilities, CodexControlRequest, CodexControlResponse,
-        CodexControlResult, CodexError, CodexEvent, CodexEventKind, CodexHistoryItem,
-        CodexHistoryKind, CodexReadRequest, CodexReadResponse, CodexState,
+        CodexApprovalDecision, CodexApprovalKind, CodexApprovalListResponse, CodexApprovalRequest,
+        CodexApprovalResolved, CodexControlAction, CodexControlCapabilities, CodexControlRequest,
+        CodexControlResponse, CodexControlResult, CodexError, CodexEvent, CodexEventKind,
+        CodexHistoryItem, CodexHistoryKind, CodexReadRequest, CodexReadResponse, CodexState,
         CodexThreadHistoryResponse, CodexThreadInfo, CodexThreadListResponse, Message,
     };
     use hbb_common::{log, tokio::time::Instant as TokioInstant};
@@ -38,6 +41,7 @@ mod windows {
     const MAX_REQUEST_ID_BYTES: usize = 128;
     const MAX_THREAD_ID_BYTES: usize = 256;
     const MAX_TURN_ID_BYTES: usize = 256;
+    const MAX_APPROVAL_ID_BYTES: usize = 256;
     const MAX_CURSOR_BYTES: usize = 4096;
     const MAX_INPUT_BYTES: usize = 131_072;
 
@@ -198,6 +202,7 @@ mod windows {
                                     start_turn: control.start_turn,
                                     steer_turn: control.steer_turn,
                                     interrupt_turn: control.interrupt_turn,
+                                    approvals: true,
                                     ..Default::default()
                                 },
                             ),
@@ -283,6 +288,38 @@ mod windows {
                     if thread_subscribers.is_empty() {
                         subscribers.remove(&subscription.thread_id);
                     }
+                }
+            }
+            Some(codex_read_request::Union::ListApprovals(list)) => {
+                if let Err(error) = validate_thread_id(&list.thread_id) {
+                    send_error(&reply, &request_id, error, &list.thread_id);
+                    return;
+                }
+                let thread_id = list.thread_id;
+                let result = with_bridge_read(bridge, codex_version, |bridge| {
+                    Ok(bridge.pending_approvals(&thread_id))
+                });
+                match result {
+                    Ok(approvals) => {
+                        send_response(
+                            &reply,
+                            CodexReadResponse {
+                                request_id,
+                                union: Some(codex_read_response::Union::ApprovalList(
+                                    CodexApprovalListResponse {
+                                        thread_id,
+                                        approvals: approvals
+                                            .into_iter()
+                                            .map(approval_message)
+                                            .collect(),
+                                        ..Default::default()
+                                    },
+                                )),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    Err(error) => send_error(&reply, &request_id, &error, &thread_id),
                 }
             }
             None => send_error(&reply, &request_id, "Codex read request is empty", ""),
@@ -429,6 +466,56 @@ mod windows {
                 })
                 .map_err(|error| (error, thread_id))
             }
+            Some(codex_control_request::Union::RespondApproval(approval)) => {
+                if let Err(error) = validate_approval_id(&approval.approval_id) {
+                    send_control_error(&reply, &request_id, error, &approval.thread_id);
+                    return;
+                }
+                if let Err(error) = validate_thread_id(&approval.thread_id) {
+                    send_control_error(&reply, &request_id, error, &approval.thread_id);
+                    return;
+                }
+                if let Err(error) = validate_turn_id(&approval.turn_id) {
+                    send_control_error(&reply, &request_id, error, &approval.thread_id);
+                    return;
+                }
+                let decision = match approval.decision.enum_value_or_default() {
+                    CodexApprovalDecision::CodexApprovalApprove => BridgeApprovalDecision::Approve,
+                    CodexApprovalDecision::CodexApprovalDeny => BridgeApprovalDecision::Deny,
+                    CodexApprovalDecision::CodexApprovalDecisionUnknown => {
+                        send_control_error(
+                            &reply,
+                            &request_id,
+                            "Codex approval decision is required",
+                            &approval.thread_id,
+                        );
+                        return;
+                    }
+                };
+                let approval_id = approval.approval_id;
+                let thread_id = approval.thread_id;
+                let turn_id = approval.turn_id;
+                with_bridge_mutation(bridge, codex_version, |bridge| {
+                    bridge.respond_to_approval(&approval_id, &thread_id, &turn_id, decision)
+                })
+                .map(|resolved| {
+                    broadcast_approval_resolved(subscribers, &resolved);
+                    control_result(
+                        match decision {
+                            BridgeApprovalDecision::Approve => {
+                                CodexControlAction::CodexControlApprovalApproved
+                            }
+                            BridgeApprovalDecision::Deny => {
+                                CodexControlAction::CodexControlApprovalDenied
+                            }
+                        },
+                        resolved.thread_id,
+                        resolved.turn_id,
+                        CodexState::CodexWorking,
+                    )
+                })
+                .map_err(|error| (error, thread_id))
+            }
             None => {
                 send_control_error(&reply, &request_id, "Codex control request is empty", "");
                 return;
@@ -567,21 +654,35 @@ mod windows {
         bridge: &mut Option<CodexBridge>,
         subscribers: &mut HashMap<String, HashMap<i32, Sender>>,
     ) {
-        if subscribers.is_empty() {
-            return;
-        }
         let Some(active) = bridge.as_mut() else {
             return;
         };
 
-        match active.drain_events() {
-            Ok(events) => {
-                for event in events {
-                    let Some(targets) = subscribers.get_mut(&event.thread_id) else {
-                        continue;
-                    };
-                    let response = event_response(event);
-                    targets.retain(|_, sender| send_response(sender, response.clone()));
+        match active.drain_updates() {
+            Ok(updates) => {
+                for update in updates {
+                    match update {
+                        CodexBridgeUpdate::Event(event) => {
+                            let Some(targets) = subscribers.get_mut(&event.thread_id) else {
+                                continue;
+                            };
+                            let response = event_response(event);
+                            targets.retain(|_, sender| send_response(sender, response.clone()));
+                        }
+                        CodexBridgeUpdate::ApprovalRequested(approval) => {
+                            let Some(targets) = subscribers.get_mut(&approval.thread_id) else {
+                                continue;
+                            };
+                            let response = CodexReadResponse {
+                                request_id: String::new(),
+                                union: Some(codex_read_response::Union::Approval(
+                                    approval_message(approval),
+                                )),
+                                ..Default::default()
+                            };
+                            targets.retain(|_, sender| send_response(sender, response.clone()));
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -634,6 +735,56 @@ mod windows {
             })),
             ..Default::default()
         }
+    }
+
+    fn approval_message(approval: BridgeApproval) -> CodexApprovalRequest {
+        CodexApprovalRequest {
+            approval_id: approval.id,
+            thread_id: approval.thread_id,
+            turn_id: approval.turn_id,
+            item_id: approval.item_id,
+            kind: match approval.kind {
+                BridgeApprovalKind::Command => CodexApprovalKind::CodexApprovalCommand,
+                BridgeApprovalKind::FileChange => CodexApprovalKind::CodexApprovalFileChange,
+                BridgeApprovalKind::Permissions => CodexApprovalKind::CodexApprovalPermissions,
+            }
+            .into(),
+            title: approval.title,
+            summary: approval.summary,
+            reason: approval.reason,
+            started_at_ms: approval.started_at_ms,
+            actionable: approval.actionable,
+            ..Default::default()
+        }
+    }
+
+    fn broadcast_approval_resolved(
+        subscribers: &mut HashMap<String, HashMap<i32, Sender>>,
+        resolved: &BridgeResolvedApproval,
+    ) {
+        let Some(targets) = subscribers.get_mut(&resolved.thread_id) else {
+            return;
+        };
+        let response = CodexReadResponse {
+            request_id: String::new(),
+            union: Some(codex_read_response::Union::ApprovalResolved(
+                CodexApprovalResolved {
+                    approval_id: resolved.id.clone(),
+                    thread_id: resolved.thread_id.clone(),
+                    turn_id: resolved.turn_id.clone(),
+                    decision: match resolved.decision {
+                        BridgeApprovalDecision::Approve => {
+                            CodexApprovalDecision::CodexApprovalApprove
+                        }
+                        BridgeApprovalDecision::Deny => CodexApprovalDecision::CodexApprovalDeny,
+                    }
+                    .into(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        targets.retain(|_, sender| send_response(sender, response.clone()));
     }
 
     fn send_error(reply: &Sender, request_id: &str, message: &str, thread_id: &str) {
@@ -716,6 +867,16 @@ mod windows {
             Err("Codex turn id is required")
         } else if turn_id.len() > MAX_TURN_ID_BYTES {
             Err("Codex turn id is too long")
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_approval_id(approval_id: &str) -> Result<(), &'static str> {
+        if approval_id.is_empty() {
+            Err("Codex approval id is required")
+        } else if approval_id.len() > MAX_APPROVAL_ID_BYTES {
+            Err("Codex approval id is too long")
         } else {
             Ok(())
         }

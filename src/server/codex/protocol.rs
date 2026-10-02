@@ -186,6 +186,14 @@ where
     pub(crate) fn drain_available(&mut self) -> Result<Vec<Value>, RpcCallError> {
         self.rpc.drain_available()
     }
+
+    pub(crate) fn respond_server_request(
+        &mut self,
+        request_id: Value,
+        result: Value,
+    ) -> Result<(), RpcCallError> {
+        self.rpc.respond(request_id, result)
+    }
 }
 
 fn required_string(value: &Value, field: &str) -> Result<String, RpcCallError> {

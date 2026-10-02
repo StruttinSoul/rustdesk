@@ -324,6 +324,218 @@ void main() {
     expect(created.project, 'RustDesk');
     expect(created.state, 'idle');
   });
+
+  test('reconciles remote approvals and prevents stale client replay',
+      () async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'codex_version': '0.155.1',
+      'control': {'approvals': true},
+      'threads': [
+        {
+          'id': 'thr_1',
+          'title': 'Approval task',
+          'project': 'RustDesk',
+          'originator': '',
+          'updated_at': 1,
+          'state': 'working',
+        }
+      ],
+    });
+
+    model.handleResponse({
+      'type': 'approval',
+      'approval': _approval('approval_old', 'cargo test old'),
+    });
+    expect(model.approvalsFor('thr_1').single.id, 'approval_old');
+    expect(model.threads.single.state, 'waiting_for_approval');
+
+    model.handleResponse({
+      'type': 'approval_list',
+      'request_id': 'approvals-1',
+      'thread_id': 'thr_1',
+      'approvals': [_approval('approval_live', 'cargo test codex')],
+    });
+    expect(model.approvalsFor('thr_1').single.id, 'approval_live');
+
+    final staleActionable = model.approvalsFor('thr_1').single;
+    model.handleResponse({
+      'type': 'approval_list',
+      'request_id': 'approvals-unknown-outcome',
+      'thread_id': 'thr_1',
+      'approvals': [
+        {..._approval('approval_live', 'cargo test codex'), 'actionable': false}
+      ],
+    });
+    final sentBeforeUnknownReplay = sent.length;
+    await model.respondToApproval(staleActionable, true);
+    expect(sent.length, sentBeforeUnknownReplay);
+    expect(model.errorFor('thr_1'), contains('no longer actionable'));
+
+    model.handleResponse({
+      'type': 'approval_list',
+      'request_id': 'approvals-2',
+      'thread_id': 'thr_1',
+      'approvals': [_approval('approval_live', 'cargo test codex')],
+    });
+    final live = model.approvalsFor('thr_1').single;
+    await model.respondToApproval(live, true);
+    final response = sent.last;
+    expect(response.key, 'codex-respond-approval');
+    final payload = jsonDecode(response.value);
+    expect(payload['approval_id'], 'approval_live');
+    expect(payload['thread_id'], 'thr_1');
+    expect(payload['turn_id'], 'turn_1');
+    expect(payload['decision'], 'approve');
+    expect(model.isApprovalPending('approval_live'), isTrue);
+
+    model.handleResponse({
+      'type': 'approval_resolved',
+      'approval_id': 'approval_live',
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'decision': 'approve',
+    });
+    model.handleControlResponse({
+      'type': 'result',
+      'request_id': payload['request_id'],
+      'action': 'approval_approved',
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'state': 'working',
+    });
+    expect(model.approvalsFor('thr_1'), isEmpty);
+
+    final sentBeforeReplay = sent.length;
+    await model.respondToApproval(live, false);
+    expect(sent.length, sentBeforeReplay);
+    expect(model.errorFor('thr_1'), contains('no longer active'));
+  });
+
+  test('approval control errors trigger immediate reconciliation', () async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'control': {'approvals': true},
+      'threads': [
+        {
+          'id': 'thr_1',
+          'title': 'Approval task',
+          'project': '',
+          'originator': '',
+          'updated_at': 1,
+          'state': 'waiting_for_approval',
+        }
+      ],
+    });
+    model.handleResponse({
+      'type': 'approval',
+      'approval': _approval('approval_1', 'cargo test'),
+    });
+
+    await model.respondToApproval(model.approvalsFor('thr_1').single, true);
+    final responsePayload = jsonDecode(sent.last.value);
+    model.handleControlResponse({
+      'type': 'error',
+      'request_id': responsePayload['request_id'],
+      'thread_id': 'thr_1',
+      'message': 'Codex app-server stream disconnected',
+    });
+
+    expect(sent.last.key, 'codex-list-approvals');
+    expect(model.errorFor('thr_1'), contains('disconnected'));
+  });
+
+  test('denies a current actionable approval with the deny decision', () async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'control': {'approvals': true},
+      'threads': [
+        {
+          'id': 'thr_1',
+          'title': 'Approval task',
+          'project': '',
+          'originator': '',
+          'updated_at': 1,
+          'state': 'waiting_for_approval',
+        }
+      ],
+    });
+    model.handleResponse({
+      'type': 'approval',
+      'approval': _approval('approval_deny', 'cargo test'),
+    });
+
+    await model.respondToApproval(model.approvalsFor('thr_1').single, false);
+
+    expect(sent.last.key, 'codex-respond-approval');
+    final payload = jsonDecode(sent.last.value);
+    expect(payload['approval_id'], 'approval_deny');
+    expect(payload['turn_id'], 'turn_1');
+    expect(payload['decision'], 'deny');
+  });
+
+  test('turn completion invalidates approval cards for that turn', () {
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (_, __) async {},
+    );
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'control': {'approvals': true},
+      'threads': [
+        {
+          'id': 'thr_1',
+          'title': 'Approval task',
+          'project': '',
+          'originator': '',
+          'updated_at': 1,
+          'state': 'waiting_for_approval',
+        }
+      ],
+    });
+    model.handleResponse({
+      'type': 'approval',
+      'approval': _approval('approval_1', 'cargo test'),
+    });
+    expect(model.approvalsFor('thr_1'), hasLength(1));
+
+    model.handleResponse({
+      'type': 'event',
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'item_id': '',
+      'kind': 'turn_completed',
+      'state': 'idle',
+      'history_kind': 'unknown',
+      'text': '',
+      'status': 'completed',
+    });
+
+    expect(model.approvalsFor('thr_1'), isEmpty);
+  });
 }
 
 Map<String, dynamic> _item(String id, String kind, String text) => {
@@ -333,4 +545,17 @@ Map<String, dynamic> _item(String id, String kind, String text) => {
       'text': text,
       'detail': '',
       'status': '',
+    };
+
+Map<String, dynamic> _approval(String id, String command) => {
+      'approval_id': id,
+      'thread_id': 'thr_1',
+      'turn_id': 'turn_1',
+      'item_id': 'item_approval',
+      'kind': 'command',
+      'title': 'Command approval',
+      'summary': command,
+      'reason': 'Run tests',
+      'started_at_ms': 123,
+      'actionable': true,
     };

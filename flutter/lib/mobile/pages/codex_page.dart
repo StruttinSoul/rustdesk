@@ -293,6 +293,7 @@ class _CodexThreadPageState extends State<CodexThreadPage> {
   Widget _buildThreadBody(BuildContext context, CodexThread thread) {
     final model = widget.model;
     final items = model.historyFor(thread.id);
+    final approvals = model.approvalsFor(thread.id);
     final loading = model.isHistoryLoading(thread.id);
     final error = model.errorFor(thread.id);
 
@@ -362,6 +363,19 @@ class _CodexThreadPageState extends State<CodexThreadPage> {
               ),
             ],
           ),
+        if (approvals.isNotEmpty)
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 280),
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+              itemCount: approvals.length,
+              itemBuilder: (context, index) => _ApprovalCard(
+                model: model,
+                approval: approvals[index],
+              ),
+            ),
+          ),
         Expanded(
           child: historyBody,
         ),
@@ -371,6 +385,95 @@ class _CodexThreadPageState extends State<CodexThreadPage> {
           controller: _composerController,
         ),
       ],
+    );
+  }
+}
+
+class _ApprovalCard extends StatelessWidget {
+  const _ApprovalCard({required this.model, required this.approval});
+
+  final CodexModel model;
+  final CodexApproval approval;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final pending = model.isApprovalPending(approval.id);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.approval_outlined, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    approval.title.isEmpty
+                        ? 'Codex needs approval'
+                        : approval.title,
+                    style: theme.textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
+            if (approval.summary.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              SelectableText(
+                approval.summary,
+                style: approval.kind == 'command'
+                    ? theme.textTheme.bodyMedium
+                        ?.copyWith(fontFamily: 'monospace')
+                    : theme.textTheme.bodyMedium,
+              ),
+            ],
+            if (approval.reason.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(approval.reason, style: theme.textTheme.bodySmall),
+            ],
+            const SizedBox(height: 12),
+            if (approval.actionable && model.canRespondToApprovals)
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: pending
+                          ? null
+                          : () => unawaited(
+                              model.respondToApproval(approval, false)),
+                      child: const Text('DENY'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: pending
+                          ? null
+                          : () => unawaited(
+                              model.respondToApproval(approval, true)),
+                      child: pending
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('APPROVE'),
+                    ),
+                  ),
+                ],
+              )
+            else
+              Text(
+                'Handle this approval in the Windows Codex app.',
+                style: theme.textTheme.bodySmall,
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

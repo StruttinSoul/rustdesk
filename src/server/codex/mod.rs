@@ -1,3 +1,4 @@
+mod approvals;
 mod control;
 mod discovery;
 mod events;
@@ -8,6 +9,9 @@ mod rpc;
 mod service;
 mod threads;
 
+pub use approvals::{
+    CodexApproval, CodexApprovalDecision, CodexApprovalKind, CodexResolvedApproval,
+};
 pub use discovery::{discover_installation, CodexInstallation};
 pub use events::{CodexEvent, CodexEventKind};
 pub use history::{CodexHistoryItem, CodexHistoryItemKind, CodexHistoryPage};
@@ -35,6 +39,12 @@ pub struct CodexBridge {
     server_info: CodexServerInfo,
     connection_mode: CodexConnectionMode,
     owned_threads: HashSet<String>,
+    approvals: approvals::PendingApprovals,
+}
+
+pub(crate) enum CodexBridgeUpdate {
+    Event(CodexEvent),
+    ApprovalRequested(CodexApproval),
 }
 
 impl CodexBridge {
@@ -139,6 +149,27 @@ impl CodexBridge {
         control::interrupt_turn(&mut self.protocol, thread_id, turn_id, CONTROL_TIMEOUT)
     }
 
+    pub(crate) fn pending_approvals(&self, thread_id: &str) -> Vec<CodexApproval> {
+        self.approvals.for_thread(thread_id)
+    }
+
+    pub(crate) fn respond_to_approval(
+        &mut self,
+        approval_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+        decision: CodexApprovalDecision,
+    ) -> Result<CodexResolvedApproval, rpc::RpcCallError> {
+        self.require_owned_thread(thread_id)?;
+        let response = self
+            .approvals
+            .begin_response(approval_id, thread_id, turn_id, decision)?;
+        self.protocol
+            .respond_server_request(response.rpc_id, response.result)?;
+        self.approvals.complete_response(approval_id);
+        Ok(response.resolved)
+    }
+
     fn require_owned_thread(&self, thread_id: &str) -> Result<(), rpc::RpcCallError> {
         require_owned_thread_id(&self.owned_threads, thread_id)
     }
@@ -158,13 +189,35 @@ impl CodexBridge {
         )
     }
 
+    pub(crate) fn drain_updates(&mut self) -> Result<Vec<CodexBridgeUpdate>, rpc::RpcCallError> {
+        let mut updates = Vec::new();
+        for message in self.protocol.drain_available()? {
+            if let Some(request) = rpc::server_request(&message) {
+                if let Some(approval) = self.approvals.register(request, &self.owned_threads) {
+                    updates.push(CodexBridgeUpdate::ApprovalRequested(approval));
+                }
+                continue;
+            }
+            if let Some(event) = events::normalize_notification(&message) {
+                if event.kind == CodexEventKind::TurnCompleted && !event.turn_id.is_empty() {
+                    self.approvals
+                        .remove_for_turn(&event.thread_id, &event.turn_id);
+                }
+                updates.push(CodexBridgeUpdate::Event(event));
+            }
+        }
+        Ok(updates)
+    }
+
     pub(crate) fn drain_events(&mut self) -> Result<Vec<CodexEvent>, rpc::RpcCallError> {
-        self.protocol.drain_available().map(|messages| {
-            messages
-                .iter()
-                .filter_map(events::normalize_notification)
-                .collect()
-        })
+        Ok(self
+            .drain_updates()?
+            .into_iter()
+            .filter_map(|update| match update {
+                CodexBridgeUpdate::Event(event) => Some(event),
+                CodexBridgeUpdate::ApprovalRequested(_) => None,
+            })
+            .collect())
     }
 
     fn connect_mode(
@@ -201,6 +254,7 @@ impl CodexBridge {
             server_info,
             connection_mode,
             owned_threads: HashSet::new(),
+            approvals: approvals::PendingApprovals::default(),
         })
     }
 }
@@ -238,6 +292,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::{thread, time::Instant};
 
     #[test]
@@ -354,5 +409,117 @@ mod tests {
             interrupted,
             "interrupted turn completion event was not observed"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a local Codex installation and authenticated user session; creates an ephemeral approval-gated turn"]
+    fn codex_local_approval_smoke() {
+        let installation = discover_installation()
+            .expect("local Codex discovery should run")
+            .expect("Codex must be installed for this ignored test");
+        let mut bridge =
+            CodexBridge::connect(&installation).expect("local Codex bridge should connect");
+
+        let result = bridge
+            .protocol
+            .request(
+                protocol::CodexMethod::ThreadStart,
+                json!({
+                    "ephemeral": true,
+                    "approvalPolicy": "untrusted",
+                    "approvalsReviewer": "user"
+                }),
+                CONTROL_TIMEOUT,
+            )
+            .expect("ephemeral approval smoke thread should start");
+        let thread_id = result
+            .get("thread")
+            .and_then(|thread| thread.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .expect("thread/start should return a thread id")
+            .to_owned();
+        assert_eq!(result.get("approvalPolicy"), Some(&json!("untrusted")));
+        assert_eq!(result.get("approvalsReviewer"), Some(&json!("user")));
+        bridge.owned_threads.insert(thread_id.clone());
+
+        let turn = bridge
+            .start_turn(
+                &thread_id,
+                "Run exactly this harmless command once, wait for it to finish, then reply with its output: powershell -NoProfile -Command \"Write-Output checkpoint5-approval-smoke\". Do not inspect or modify files.",
+            )
+            .expect("approval smoke turn should start");
+        let turn_id = turn.turn_id;
+
+        let approval_deadline = Instant::now() + Duration::from_secs(45);
+        let mut observed = Vec::new();
+        let approval = loop {
+            let mut found = None;
+            for update in bridge
+                .drain_updates()
+                .expect("Codex approval events should remain readable")
+            {
+                match update {
+                    CodexBridgeUpdate::ApprovalRequested(approval) => {
+                        observed.push(format!("approval:{:?}", approval.kind));
+                        if approval.thread_id == thread_id && approval.turn_id == turn_id {
+                            found = Some(approval);
+                            break;
+                        }
+                    }
+                    CodexBridgeUpdate::Event(event) => observed.push(format!(
+                        "event:{:?}:{}:{}",
+                        event.kind, event.status, event.turn_id
+                    )),
+                }
+            }
+            if let Some(approval) = found {
+                break approval;
+            }
+            if Instant::now() >= approval_deadline {
+                panic!("harmless command approval was not observed; updates={observed:?}");
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+
+        assert_eq!(approval.kind, CodexApprovalKind::Command);
+        assert!(approval.actionable);
+        assert_eq!(bridge.pending_approvals(&thread_id).len(), 1);
+
+        let resolved = bridge
+            .respond_to_approval(
+                &approval.id,
+                &thread_id,
+                &turn_id,
+                CodexApprovalDecision::Approve,
+            )
+            .expect("harmless command approval should be accepted");
+        assert_eq!(resolved.id, approval.id);
+        assert_eq!(resolved.decision, CodexApprovalDecision::Approve);
+        assert!(bridge.pending_approvals(&thread_id).is_empty());
+
+        let completion_deadline = Instant::now() + Duration::from_secs(60);
+        let mut completed = false;
+        while Instant::now() < completion_deadline && !completed {
+            for update in bridge
+                .drain_updates()
+                .expect("Codex events should remain readable after approval")
+            {
+                if let CodexBridgeUpdate::Event(event) = update {
+                    if event.thread_id == thread_id
+                        && event.turn_id == turn_id
+                        && event.kind == CodexEventKind::TurnCompleted
+                    {
+                        assert_ne!(event.status, "failed", "approved turn failed");
+                        completed = true;
+                        break;
+                    }
+                }
+            }
+            if !completed {
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        assert!(completed, "approved turn did not continue to completion");
     }
 }

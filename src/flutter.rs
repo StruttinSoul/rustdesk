@@ -1200,6 +1200,7 @@ impl InvokeUiSession for FlutterHandler {
                             "start_turn": control.start_turn,
                             "steer_turn": control.steer_turn,
                             "interrupt_turn": control.interrupt_turn,
+                            "approvals": control.approvals,
                         }))
                         .unwrap_or_else(|| json!({}))),
                 ),
@@ -1262,6 +1263,37 @@ impl InvokeUiSession for FlutterHandler {
                 ),
                 ("text", json!(event.text)),
                 ("status", json!(event.status)),
+            ],
+            Some(Union::Approval(approval)) => vec![
+                ("type", json!("approval")),
+                ("request_id", json!(request_id)),
+                ("approval", json!(codex_approval_json(approval))),
+            ],
+            Some(Union::ApprovalList(list)) => vec![
+                ("type", json!("approval_list")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(list.thread_id)),
+                (
+                    "approvals",
+                    json!(list
+                        .approvals
+                        .into_iter()
+                        .map(codex_approval_json)
+                        .collect::<Vec<_>>()),
+                ),
+            ],
+            Some(Union::ApprovalResolved(resolved)) => vec![
+                ("type", json!("approval_resolved")),
+                ("request_id", json!(request_id)),
+                ("approval_id", json!(resolved.approval_id)),
+                ("thread_id", json!(resolved.thread_id)),
+                ("turn_id", json!(resolved.turn_id)),
+                (
+                    "decision",
+                    json!(codex_approval_decision_name(
+                        resolved.decision.enum_value_or_default()
+                    )),
+                ),
             ],
             Some(Union::Error(error)) => vec![
                 ("type", json!("error")),
@@ -1340,6 +1372,40 @@ fn codex_control_action_name(action: CodexControlAction) -> &'static str {
         CodexControlAction::CodexControlTurnStarted => "turn_started",
         CodexControlAction::CodexControlTurnSteered => "turn_steered",
         CodexControlAction::CodexControlTurnInterrupted => "turn_interrupted",
+        CodexControlAction::CodexControlApprovalApproved => "approval_approved",
+        CodexControlAction::CodexControlApprovalDenied => "approval_denied",
+    }
+}
+
+fn codex_approval_json(approval: CodexApprovalRequest) -> serde_json::Value {
+    json!({
+        "approval_id": approval.approval_id,
+        "thread_id": approval.thread_id,
+        "turn_id": approval.turn_id,
+        "item_id": approval.item_id,
+        "kind": codex_approval_kind_name(approval.kind.enum_value_or_default()),
+        "title": approval.title,
+        "summary": approval.summary,
+        "reason": approval.reason,
+        "started_at_ms": approval.started_at_ms,
+        "actionable": approval.actionable,
+    })
+}
+
+fn codex_approval_kind_name(kind: CodexApprovalKind) -> &'static str {
+    match kind {
+        CodexApprovalKind::CodexApprovalUnknown => "unknown",
+        CodexApprovalKind::CodexApprovalCommand => "command",
+        CodexApprovalKind::CodexApprovalFileChange => "file_change",
+        CodexApprovalKind::CodexApprovalPermissions => "permissions",
+    }
+}
+
+fn codex_approval_decision_name(decision: CodexApprovalDecision) -> &'static str {
+    match decision {
+        CodexApprovalDecision::CodexApprovalDecisionUnknown => "unknown",
+        CodexApprovalDecision::CodexApprovalApprove => "approve",
+        CodexApprovalDecision::CodexApprovalDeny => "deny",
     }
 }
 

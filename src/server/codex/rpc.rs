@@ -57,6 +57,13 @@ enum ReaderEvent {
     Error(String),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RpcServerRequest {
+    pub id: Value,
+    pub method: String,
+    pub params: Value,
+}
+
 pub(crate) struct JsonRpcClient<W: Write> {
     writer: W,
     receiver: Receiver<ReaderEvent>,
@@ -169,6 +176,14 @@ where
         self.write_message(&message)
     }
 
+    pub(crate) fn respond(&mut self, request_id: Value, result: Value) -> Result<(), RpcCallError> {
+        let response = json!({
+            "id": request_id,
+            "result": result,
+        });
+        self.write_message(&response)
+    }
+
     pub(crate) fn take_pending(&mut self) -> Vec<Value> {
         self.pending.drain(..).collect()
     }
@@ -202,6 +217,19 @@ where
         }
         self.pending.push_back(message);
     }
+}
+
+pub(crate) fn server_request(message: &Value) -> Option<RpcServerRequest> {
+    let method = message.get("method")?.as_str()?.to_owned();
+    let id = message.get("id")?.clone();
+    if !matches!(id, Value::String(_) | Value::Number(_)) {
+        return None;
+    }
+    Some(RpcServerRequest {
+        id,
+        method,
+        params: message.get("params").cloned().unwrap_or_else(|| json!({})),
+    })
 }
 
 fn response_id(message: &Value) -> Option<u64> {
@@ -344,5 +372,51 @@ mod tests {
             data: None,
         }
         .should_reconnect());
+    }
+
+    #[test]
+    fn identifies_server_request_and_writes_response_with_same_id() {
+        let input = concat!(
+            "{\"id\":73,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"thr_1\"}}\n"
+        );
+        let output = SharedWriter::default();
+        let output_copy = output.clone();
+        let mut client =
+            JsonRpcClient::from_streams(Cursor::new(input.as_bytes().to_vec()), output);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let request = loop {
+            let messages = client
+                .drain_available()
+                .expect("server request should remain readable");
+            if let Some(request) = messages.iter().find_map(server_request) {
+                break request;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader thread stalled"
+            );
+            std::thread::yield_now();
+        };
+
+        assert_eq!(request.id, json!(73));
+        assert_eq!(request.method, "item/commandExecution/requestApproval");
+        client
+            .respond(request.id, json!({"decision":"accept"}))
+            .expect("server response should write");
+
+        let written = String::from_utf8(output_copy.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            written,
+            "{\"id\":73,\"result\":{\"decision\":\"accept\"}}\n"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_server_request_ids() {
+        assert!(server_request(&json!({"id": null, "method": "x"})).is_none());
+        assert!(server_request(&json!({"id": true, "method": "x"})).is_none());
+        assert!(server_request(&json!({"id": {"bad": true}, "method": "x"})).is_none());
+        assert!(server_request(&json!({"method": "x"})).is_none());
     }
 }

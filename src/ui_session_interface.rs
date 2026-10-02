@@ -883,6 +883,18 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    pub fn request_codex_approvals(&self, request_id: String, thread_id: String) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_list_approvals(CodexListApprovalsRequest {
+            thread_id,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
     pub fn resume_codex_thread(&self, request_id: String, thread_id: String) {
         let mut request = CodexControlRequest::new();
         request.request_id = request_id;
@@ -946,6 +958,33 @@ impl<T: InvokeUiSession> Session<T> {
         request.set_interrupt_turn(CodexInterruptTurnRequest {
             thread_id,
             turn_id,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_control_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn respond_codex_approval(
+        &self,
+        request_id: String,
+        approval_id: String,
+        thread_id: String,
+        turn_id: String,
+        approve: bool,
+    ) {
+        let mut request = CodexControlRequest::new();
+        request.request_id = request_id;
+        request.set_respond_approval(CodexRespondApprovalRequest {
+            approval_id,
+            thread_id,
+            turn_id,
+            decision: if approve {
+                CodexApprovalDecision::CodexApprovalApprove
+            } else {
+                CodexApprovalDecision::CodexApprovalDeny
+            }
+            .into(),
             ..Default::default()
         });
         let mut msg_out = Message::new();

@@ -2955,6 +2955,22 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
             }
             return;
         }
+        if key == "codex-list-approvals" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                s.request_codex_approvals(request_id, thread_id);
+            }
+            return;
+        }
         if key == "codex-resume-thread" {
             if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
                 let request_id = payload
@@ -3052,6 +3068,37 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
                     .unwrap_or_default()
                     .to_owned();
                 s.interrupt_codex_turn(request_id, thread_id, turn_id);
+            }
+            return;
+        }
+        if key == "codex-respond-approval" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let approval_id = payload
+                    .get("approval_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let approve = payload
+                    .get("decision")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|decision| decision == "approve")
+                    .unwrap_or(false);
+                s.respond_codex_approval(request_id, approval_id, thread_id, turn_id, approve);
             }
             return;
         }

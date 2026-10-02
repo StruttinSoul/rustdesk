@@ -87,16 +87,57 @@ class CodexHistoryItem {
       );
 }
 
+class CodexApproval {
+  const CodexApproval({
+    required this.id,
+    required this.threadId,
+    required this.turnId,
+    required this.itemId,
+    required this.kind,
+    required this.title,
+    required this.summary,
+    required this.reason,
+    required this.startedAtMs,
+    required this.actionable,
+  });
+
+  final String id;
+  final String threadId;
+  final String turnId;
+  final String itemId;
+  final String kind;
+  final String title;
+  final String summary;
+  final String reason;
+  final int startedAtMs;
+  final bool actionable;
+
+  factory CodexApproval.fromJson(Map<String, dynamic> json) => CodexApproval(
+        id: _asString(json['approval_id']),
+        threadId: _asString(json['thread_id']),
+        turnId: _asString(json['turn_id']),
+        itemId: _asString(json['item_id']),
+        kind: _asString(json['kind']),
+        title: _asString(json['title']),
+        summary: _asString(json['summary']),
+        reason: _asString(json['reason']),
+        startedAtMs: _asInt(json['started_at_ms']),
+        actionable: _asBool(json['actionable']),
+      );
+}
+
 class _PendingCodexControl {
   const _PendingCodexControl({
     required this.action,
     required this.threadId,
     this.workspaceThreadId = '',
+    this.approvalId = '',
   });
 
   final String action;
   final String threadId;
   final String workspaceThreadId;
+  final String approvalId;
 }
 
 class CodexModel with ChangeNotifier {
@@ -123,6 +164,7 @@ class CodexModel with ChangeNotifier {
   final Map<String, String> _activeTurnIds = {};
   final Map<String, String> _startingTurnIds = {};
   final Map<String, _PendingCodexControl> _pendingControlRequests = {};
+  final Map<String, List<CodexApproval>> _approvals = {};
 
   List<CodexThread> threads = const [];
   String serviceState = 'unavailable';
@@ -137,6 +179,7 @@ class CodexModel with ChangeNotifier {
   bool canStartTurn = false;
   bool canSteerTurn = false;
   bool canInterruptTurn = false;
+  bool canRespondToApprovals = false;
   int _requestSerial = 0;
 
   List<CodexHistoryItem> historyFor(String threadId) =>
@@ -153,6 +196,12 @@ class CodexModel with ChangeNotifier {
             pending.threadId == threadId ||
             pending.workspaceThreadId == threadId,
       );
+
+  List<CodexApproval> approvalsFor(String threadId) =>
+      List.unmodifiable(_approvals[threadId] ?? const []);
+
+  bool isApprovalPending(String approvalId) => _pendingControlRequests.values
+      .any((pending) => pending.approvalId == approvalId);
 
   bool get isStartingThread => _pendingControlRequests.values
       .any((pending) => pending.action == 'start_thread');
@@ -173,7 +222,8 @@ class CodexModel with ChangeNotifier {
       canStartThread ||
       canStartTurn ||
       canSteerTurn ||
-      canInterruptTurn;
+      canInterruptTurn ||
+      canRespondToApprovals;
 
   Future<void> listThreads() async {
     final requestId = _nextRequestId('threads');
@@ -245,7 +295,24 @@ class CodexModel with ChangeNotifier {
         _subscribedThreadId = threadId;
       }
     }
+    await loadApprovals(threadId);
     await loadHistory(threadId, reset: true);
+  }
+
+  Future<void> loadApprovals(String threadId) async {
+    if (threadId.isEmpty) return;
+    final requestId = _nextRequestId('approvals');
+    try {
+      await _commandSender(
+        'codex-list-approvals',
+        jsonEncode({'request_id': requestId, 'thread_id': threadId}),
+      );
+    } catch (e) {
+      _setControlError(
+        threadId,
+        'Unable to refresh Codex approvals: $e',
+      );
+    }
   }
 
   Future<void> resumeThread(String threadId) async {
@@ -339,6 +406,51 @@ class CodexModel with ChangeNotifier {
     );
   }
 
+  Future<void> respondToApproval(CodexApproval approval, bool approve) async {
+    if (approval.id.isEmpty || isApprovalPending(approval.id)) {
+      return;
+    }
+    final current = approvalsFor(approval.threadId)
+        .where((candidate) => candidate.id == approval.id)
+        .toList(growable: false);
+    if (current.isEmpty) {
+      _setControlError(
+          approval.threadId, 'This Codex approval is no longer active.');
+      return;
+    }
+    final authoritative = current.single;
+    if (authoritative.turnId != approval.turnId ||
+        authoritative.itemId != approval.itemId) {
+      _setControlError(approval.threadId,
+          'This Codex approval has changed; refresh it first.');
+      return;
+    }
+    if (!authoritative.actionable) {
+      _setControlError(
+          approval.threadId, 'This Codex approval is no longer actionable.');
+      return;
+    }
+    if (!canRespondToApprovals) {
+      _setControlError(
+          approval.threadId, 'Remote Codex approvals are unavailable.');
+      return;
+    }
+    await _sendControl(
+      'codex-respond-approval',
+      _PendingCodexControl(
+        action: 'respond_approval',
+        threadId: authoritative.threadId,
+        approvalId: authoritative.id,
+      ),
+      {
+        'approval_id': authoritative.id,
+        'thread_id': authoritative.threadId,
+        'turn_id': authoritative.turnId,
+        'decision': approve ? 'approve' : 'deny',
+      },
+    );
+  }
+
   void leaveThread(String threadId) {
     if (selectedThreadId == threadId) {
       selectedThreadId = null;
@@ -361,6 +473,17 @@ class CodexModel with ChangeNotifier {
       case 'event':
         _applyEvent(event);
         break;
+      case 'approval':
+        _applyApproval(event['approval']);
+        break;
+      case 'approval_list':
+        _applyApprovalList(event);
+        break;
+      case 'approval_resolved':
+        _removeApproval(
+            _asString(event['thread_id']), _asString(event['approval_id']));
+        notifyListeners();
+        break;
       case 'error':
         _applyError(event);
         break;
@@ -381,6 +504,9 @@ class CodexModel with ChangeNotifier {
       _setControlError(
           threadId, message.isEmpty ? 'Codex control failed.' : message,
           notify: false);
+      if (pending?.action == 'respond_approval' && threadId.isNotEmpty) {
+        unawaited(loadApprovals(threadId));
+      }
       notifyListeners();
       return;
     }
@@ -447,6 +573,12 @@ class CodexModel with ChangeNotifier {
           }
         }
         break;
+      case 'approval_approved':
+      case 'approval_denied':
+        if (pending?.approvalId.isNotEmpty ?? false) {
+          _removeApproval(threadId, pending!.approvalId);
+        }
+        break;
       case 'unknown':
         break;
     }
@@ -472,11 +604,13 @@ class CodexModel with ChangeNotifier {
     _activeTurnIds.clear();
     _startingTurnIds.clear();
     _pendingControlRequests.clear();
+    _approvals.clear();
     canResumeThread = false;
     canStartThread = false;
     canStartTurn = false;
     canSteerTurn = false;
     canInterruptTurn = false;
+    canRespondToApprovals = false;
     notifyListeners();
   }
 
@@ -493,12 +627,14 @@ class CodexModel with ChangeNotifier {
       canStartTurn = _asBool(rawControl['start_turn']);
       canSteerTurn = _asBool(rawControl['steer_turn']);
       canInterruptTurn = _asBool(rawControl['interrupt_turn']);
+      canRespondToApprovals = _asBool(rawControl['approvals']);
     } else {
       canResumeThread = false;
       canStartThread = false;
       canStartTurn = false;
       canSteerTurn = false;
       canInterruptTurn = false;
+      canRespondToApprovals = false;
     }
     final rawThreads = event['threads'];
     threads = rawThreads is List
@@ -511,6 +647,58 @@ class CodexModel with ChangeNotifier {
         : const [];
     error = '';
     notifyListeners();
+  }
+
+  void _applyApproval(dynamic rawApproval) {
+    if (rawApproval is! Map) return;
+    final approval = CodexApproval.fromJson(
+      rawApproval.map((key, value) => MapEntry(key.toString(), value)),
+    );
+    if (approval.id.isEmpty || approval.threadId.isEmpty) return;
+    final approvals = List<CodexApproval>.from(
+      _approvals[approval.threadId] ?? const [],
+    );
+    final index =
+        approvals.indexWhere((candidate) => candidate.id == approval.id);
+    if (index >= 0) {
+      approvals[index] = approval;
+    } else {
+      approvals.add(approval);
+    }
+    approvals.sort((a, b) => a.startedAtMs.compareTo(b.startedAtMs));
+    _approvals[approval.threadId] = approvals;
+    _updateThreadState(approval.threadId, 'waiting_for_approval');
+    notifyListeners();
+  }
+
+  void _applyApprovalList(Map<String, dynamic> event) {
+    final threadId = _asString(event['thread_id']);
+    if (threadId.isEmpty) return;
+    final rawApprovals = event['approvals'];
+    final approvals = rawApprovals is List
+        ? rawApprovals
+            .whereType<Map>()
+            .map((approval) => CodexApproval.fromJson(
+                  approval.map((key, value) => MapEntry(key.toString(), value)),
+                ))
+            .where((approval) => approval.id.isNotEmpty)
+            .toList(growable: false)
+        : const <CodexApproval>[];
+    _approvals[threadId] = approvals;
+    notifyListeners();
+  }
+
+  void _removeApproval(String threadId, String approvalId) {
+    if (threadId.isEmpty || approvalId.isEmpty) return;
+    final current = _approvals[threadId];
+    if (current == null) return;
+    final next =
+        current.where((approval) => approval.id != approvalId).toList();
+    if (next.isEmpty) {
+      _approvals.remove(threadId);
+    } else {
+      _approvals[threadId] = next;
+    }
   }
 
   void _applyThreadHistory(Map<String, dynamic> event) {
@@ -556,6 +744,17 @@ class CodexModel with ChangeNotifier {
       final activeTurnId = _activeTurnIds[threadId];
       if (turnId.isEmpty || activeTurnId == turnId) {
         _activeTurnIds.remove(threadId);
+      }
+      final currentApprovals = _approvals[threadId];
+      if (currentApprovals != null) {
+        final remaining = currentApprovals
+            .where((approval) => turnId.isEmpty || approval.turnId != turnId)
+            .toList(growable: false);
+        if (remaining.isEmpty) {
+          _approvals.remove(threadId);
+        } else {
+          _approvals[threadId] = remaining;
+        }
       }
     }
 
@@ -703,6 +902,9 @@ class CodexModel with ChangeNotifier {
         'Unable to send Codex control request: $e',
         notify: false,
       );
+      if (pending.action == 'respond_approval' && pending.threadId.isNotEmpty) {
+        unawaited(loadApprovals(pending.threadId));
+      }
       notifyListeners();
     }
   }

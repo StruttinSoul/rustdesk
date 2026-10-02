@@ -164,4 +164,66 @@ void main() {
     await tester.pump();
     expect(sent.last.key, 'codex-interrupt-turn');
   });
+
+  testWidgets('shows a live approval card and sends approve action',
+      (tester) async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+
+    await tester.pumpWidget(MaterialApp(home: CodexPage(model: model)));
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'codex_version': '0.155.1',
+      'control': {'start_turn': true, 'approvals': true},
+      'threads': [
+        {
+          'id': 'thr_1',
+          'title': 'Approval task',
+          'project': 'RustDesk',
+          'originator': '',
+          'updated_at': 1,
+          'state': 'idle',
+        }
+      ],
+    });
+    await tester.pump();
+    await tester.tap(find.text('Approval task'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    model.handleResponse({
+      'type': 'approval',
+      'approval': {
+        'approval_id': 'approval_1',
+        'thread_id': 'thr_1',
+        'turn_id': 'turn_1',
+        'item_id': 'item_1',
+        'kind': 'command',
+        'title': 'Command approval',
+        'summary': 'cargo test codex',
+        'reason': 'Run the Codex tests',
+        'started_at_ms': 123,
+        'actionable': true,
+      },
+    });
+    await tester.pump();
+
+    expect(find.text('Command approval'), findsOneWidget);
+    expect(find.text('cargo test codex'), findsOneWidget);
+    expect(find.text('DENY'), findsOneWidget);
+    expect(find.text('APPROVE'), findsOneWidget);
+
+    await tester.tap(find.text('APPROVE'));
+    await tester.pump();
+    final response =
+        sent.lastWhere((command) => command.key == 'codex-respond-approval');
+    final payload = jsonDecode(response.value);
+    expect(payload['approval_id'], 'approval_1');
+    expect(payload['decision'], 'approve');
+  });
 }
