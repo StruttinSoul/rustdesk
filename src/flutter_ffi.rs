@@ -2715,6 +2715,12 @@ pub fn main_get_common(key: String) -> String {
         return ui_interface::is_permanent_password_set().to_string();
     } else if key == "local-permanent-password-set" {
         return ui_interface::is_local_permanent_password_set().to_string();
+    } else if key == "bluestacks-inventory" {
+        #[cfg(target_os = "windows")]
+        return crate::server::emulator::bluestacks::management_inventory_json();
+        #[cfg(not(target_os = "windows"))]
+        return r#"{"ok":false,"error":"BlueStacks management is only available on Windows"}"#
+            .to_owned();
     } else {
         if key.starts_with("download-data-") {
             let id = key.replace("download-data-", "");
@@ -2771,6 +2777,30 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
 }
 
 pub fn main_set_common(_key: String, _value: String) {
+    #[cfg(target_os = "windows")]
+    if _key == "bluestacks-action" {
+        let payload = _value.clone();
+        std::thread::spawn(move || {
+            let result = crate::server::emulator::bluestacks::handle_action_json(&payload);
+            let result_value =
+                serde_json::from_str::<serde_json::Value>(&result).unwrap_or_else(|error| {
+                    serde_json::json!({
+                        "ok": false,
+                        "action": "invalid",
+                        "error": format!("failed to decode BlueStacks action result: {error}"),
+                    })
+                });
+            let data = HashMap::from([
+                ("name", serde_json::json!("bluestacks-action-result")),
+                ("result", result_value),
+            ]);
+            let _res = flutter::push_global_event(
+                flutter::APP_TYPE_MAIN,
+                serde_json::ser::to_string(&data).unwrap_or_default(),
+            );
+        });
+        return;
+    }
     #[cfg(target_os = "windows")]
     if _key == "install-printer" && crate::platform::is_win_10_or_greater() {
         std::thread::spawn(move || {

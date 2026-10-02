@@ -622,7 +622,7 @@ pub struct BlueStacksComponent {
     pub install_location: String,
     pub classification: ComponentClassification,
     pub can_remove: bool,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, default)]
     uninstall_command: String,
 }
 
@@ -677,6 +677,153 @@ pub struct LaunchReport {
     pub message: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CleanupSupport {
+    pub disable_gameplay_ads: bool,
+    pub disable_smart_downloads: bool,
+    pub disable_store_on_start: bool,
+    pub disable_desktop_notifications: bool,
+    pub disable_app_shortcuts: bool,
+    pub disable_optional_startup: bool,
+    pub hide_desktop_shortcuts: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksInstallationInventory {
+    pub version: String,
+    pub install_dir: String,
+    pub data_dir: String,
+    pub user_defined_dir: String,
+    pub config_path: String,
+    pub player_path: String,
+    pub adb_path: String,
+    pub multi_instance_manager_path: String,
+    pub multi_instance_manager_available: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksInstanceInventory {
+    pub id: String,
+    pub display_name: String,
+    pub android_flavor: String,
+    pub android_version: String,
+    pub running: bool,
+    pub adb_enabled: bool,
+    pub adb_port: Option<u16>,
+    pub notifications_enabled: Option<bool>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub dpi: Option<u32>,
+    pub default_package: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksInventory {
+    pub installed: bool,
+    pub installation: BlueStacksInstallationInventory,
+    pub hypervisor: String,
+    pub instances: Vec<BlueStacksInstanceInventory>,
+    pub services: Vec<BlueStacksService>,
+    pub startup_entries: Vec<BlueStacksStartupEntry>,
+    pub shortcuts: Vec<BlueStacksShortcut>,
+    pub components: Vec<BlueStacksComponent>,
+    pub cleanup_support: CleanupSupport,
+    pub selected_cleanup: Option<CleanupSelection>,
+    pub last_cleanup_version: String,
+    pub cleanup_needs_reapply: bool,
+    pub restore_available: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum BlueStacksAction {
+    RefreshInventory,
+    ApplyProfile {
+        profile: CleanupProfile,
+        #[serde(default)]
+        selection: Option<CleanupSelection>,
+    },
+    Restore,
+    SetDefaultApp {
+        instance_id: String,
+        package: String,
+    },
+    LaunchDefaultApp {
+        instance_id: String,
+    },
+    InspectAndroidPackages {
+        instance_id: String,
+    },
+    DisableOptionalAndroidPackage {
+        instance_id: String,
+        package: String,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    RemoveOptionalComponent {
+        component_id: String,
+        #[serde(default)]
+        confirmed: bool,
+    },
+}
+
+impl BlueStacksAction {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::RefreshInventory => "refresh_inventory",
+            Self::ApplyProfile { .. } => "apply_profile",
+            Self::Restore => "restore",
+            Self::SetDefaultApp { .. } => "set_default_app",
+            Self::LaunchDefaultApp { .. } => "launch_default_app",
+            Self::InspectAndroidPackages { .. } => "inspect_android_packages",
+            Self::DisableOptionalAndroidPackage { .. } => "disable_optional_android_package",
+            Self::RemoveOptionalComponent { .. } => "remove_optional_component",
+        }
+    }
+
+    fn validate_confirmation(&self) -> ResultType<()> {
+        match self {
+            Self::DisableOptionalAndroidPackage { confirmed, .. }
+            | Self::RemoveOptionalComponent { confirmed, .. }
+                if !confirmed =>
+            {
+                bail!("this BlueStacks action requires explicit confirmation")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksActionResult {
+    pub ok: bool,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl BlueStacksActionResult {
+    fn success(action: &str, data: serde_json::Value) -> Self {
+        Self {
+            ok: true,
+            action: action.to_owned(),
+            data: Some(data),
+            error: None,
+        }
+    }
+
+    fn failure(action: &str, error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            action: action.to_owned(),
+            data: None,
+            error: Some(error.into()),
+        }
+    }
+}
+
 fn load_cleanup_journal() -> CleanupJournal {
     serde_json::from_str(&Config::get_option(OPTION_CLEANUP_JOURNAL)).unwrap_or_default()
 }
@@ -693,6 +840,217 @@ fn load_default_apps() -> DefaultApps {
 fn save_default_apps(apps: &DefaultApps) {
     let encoded = serde_json::to_string(apps).unwrap_or_default();
     Config::set_option(OPTION_DEFAULT_APPS.to_owned(), encoded);
+}
+
+pub fn management_inventory() -> ResultType<BlueStacksInventory> {
+    let Some(provider) = BlueStacksProvider::detect()? else {
+        return Ok(BlueStacksInventory::default());
+    };
+    let document = provider.read_config()?;
+    let instances = provider.instances()?;
+    let services = enumerate_services();
+    let startup_entries = enumerate_startup_entries();
+    let shortcuts = enumerate_shortcuts();
+    let components = enumerate_components();
+    let default_apps = load_default_apps();
+    let last_cleanup_version = Config::get_option(OPTION_CLEANUP_VERSION);
+    let selected_cleanup =
+        serde_json::from_str::<CleanupSelection>(&Config::get_option(OPTION_CLEANUP_SELECTION))
+            .ok();
+    let cleanup_journal = load_cleanup_journal();
+    let cleanup_support = CleanupSupport {
+        disable_gameplay_ads: document.values.contains_key("bst.enable_programmatic_ads"),
+        disable_smart_downloads: document.values.contains_key("bst.enable_smart_downloads"),
+        disable_store_on_start: document.values.contains_key("bst.launch_store_on_boot"),
+        disable_desktop_notifications: document
+            .values
+            .keys()
+            .any(|key| key.starts_with("bst.instance.") && key.ends_with(".enable_notifications")),
+        disable_app_shortcuts: document.values.contains_key("bst.create_desktop_shortcuts"),
+        disable_optional_startup: startup_entries.iter().any(|entry| entry.safe_to_disable),
+        hide_desktop_shortcuts: shortcuts
+            .iter()
+            .any(|shortcut| shortcut.recommended_cleanup),
+    };
+    let instance_inventory = instances
+        .into_iter()
+        .map(|instance| BlueStacksInstanceInventory {
+            default_package: default_apps
+                .get(&instance.id)
+                .unwrap_or_default()
+                .to_owned(),
+            id: instance.id,
+            display_name: instance.display_name,
+            android_flavor: instance.android_flavor.unwrap_or_default(),
+            android_version: instance.android_version.unwrap_or_default(),
+            running: instance.running,
+            adb_enabled: instance.adb_enabled,
+            adb_port: instance.adb_port,
+            notifications_enabled: instance.notifications_enabled,
+            width: instance.width,
+            height: instance.height,
+            dpi: instance.dpi,
+        })
+        .collect();
+    let installation = BlueStacksInstallationInventory {
+        version: provider.installation.version.clone(),
+        install_dir: provider
+            .installation
+            .install_dir
+            .to_string_lossy()
+            .into_owned(),
+        data_dir: provider
+            .installation
+            .data_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        user_defined_dir: provider
+            .installation
+            .user_defined_dir
+            .to_string_lossy()
+            .into_owned(),
+        config_path: provider
+            .installation
+            .config_path
+            .to_string_lossy()
+            .into_owned(),
+        player_path: provider
+            .installation
+            .player_path()
+            .to_string_lossy()
+            .into_owned(),
+        adb_path: provider
+            .installation
+            .adb_path()
+            .to_string_lossy()
+            .into_owned(),
+        multi_instance_manager_path: provider
+            .installation
+            .multi_instance_manager_path()
+            .to_string_lossy()
+            .into_owned(),
+        multi_instance_manager_available: provider
+            .installation
+            .multi_instance_manager_path()
+            .is_file(),
+    };
+    Ok(BlueStacksInventory {
+        installed: true,
+        cleanup_needs_reapply: cleanup_needs_reapply(
+            &last_cleanup_version,
+            &provider.installation.version,
+        ),
+        installation,
+        hypervisor: document
+            .get("bst.status.hypervisor")
+            .unwrap_or_default()
+            .to_owned(),
+        instances: instance_inventory,
+        services,
+        startup_entries,
+        shortcuts,
+        components,
+        cleanup_support,
+        selected_cleanup,
+        last_cleanup_version,
+        restore_available: !cleanup_journal.is_empty(),
+    })
+}
+
+pub fn management_inventory_json() -> String {
+    let value = match management_inventory() {
+        Ok(inventory) => serde_json::json!({"ok": true, "inventory": inventory}),
+        Err(error) => serde_json::json!({"ok": false, "error": error.to_string()}),
+    };
+    serde_json::to_string(&value).unwrap_or_else(|error| {
+        format!(r#"{{"ok":false,"error":"failed to serialize BlueStacks inventory: {error}"}}"#)
+    })
+}
+
+fn execute_action(action: &BlueStacksAction) -> ResultType<serde_json::Value> {
+    action.validate_confirmation()?;
+    match action {
+        BlueStacksAction::RefreshInventory => Ok(serde_json::to_value(management_inventory()?)?),
+        BlueStacksAction::ApplyProfile { profile, selection } => {
+            let selection = match profile {
+                CleanupProfile::Custom => selection.clone().ok_or_else(|| {
+                    hbb_common::anyhow::anyhow!(
+                        "custom BlueStacks cleanup requires an explicit selection"
+                    )
+                })?,
+                CleanupProfile::Standard | CleanupProfile::CleanGaming => {
+                    CleanupSelection::for_profile(*profile)
+                }
+            };
+            let report = apply_cleanup(selection)?;
+            Ok(serde_json::json!({
+                "report": report,
+                "inventory": management_inventory()?,
+            }))
+        }
+        BlueStacksAction::Restore => {
+            let report = restore_cleanup()?;
+            Ok(serde_json::json!({
+                "report": report,
+                "inventory": management_inventory()?,
+            }))
+        }
+        BlueStacksAction::SetDefaultApp {
+            instance_id,
+            package,
+        } => {
+            set_default_app(instance_id, package)?;
+            Ok(serde_json::json!({
+                "instance_id": instance_id,
+                "package": package,
+                "inventory": management_inventory()?,
+            }))
+        }
+        BlueStacksAction::LaunchDefaultApp { instance_id } => {
+            Ok(serde_json::to_value(launch_default_app(instance_id)?)?)
+        }
+        BlueStacksAction::InspectAndroidPackages { instance_id } => {
+            Ok(serde_json::to_value(android_packages(instance_id)?)?)
+        }
+        BlueStacksAction::DisableOptionalAndroidPackage {
+            instance_id,
+            package,
+            ..
+        } => {
+            disable_optional_android_package(instance_id, package)?;
+            Ok(serde_json::to_value(android_packages(instance_id)?)?)
+        }
+        BlueStacksAction::RemoveOptionalComponent { component_id, .. } => {
+            remove_optional_component(component_id)?;
+            Ok(serde_json::json!({
+                "component_id": component_id,
+                "manual_reinstall_required_for_restore": true,
+                "message": "The registered BlueStacks uninstaller was started. Reinstall this optional component manually if you later want it back.",
+            }))
+        }
+    }
+}
+
+pub fn handle_action_json(payload: &str) -> String {
+    let action = match serde_json::from_str::<BlueStacksAction>(payload) {
+        Ok(action) => action,
+        Err(error) => {
+            return serde_json::to_string(&BlueStacksActionResult::failure(
+                "invalid",
+                format!("invalid BlueStacks action payload: {error}"),
+            ))
+            .unwrap_or_default();
+        }
+    };
+    let action_name = action.name();
+    let result = match execute_action(&action) {
+        Ok(data) => BlueStacksActionResult::success(action_name, data),
+        Err(error) => BlueStacksActionResult::failure(action_name, error.to_string()),
+    };
+    serde_json::to_string(&result).unwrap_or_else(|error| {
+        format!(r#"{{"ok":false,"action":"{action_name}","error":"failed to serialize BlueStacks action result: {error}"}}"#)
+    })
 }
 
 fn write_config_document(path: &Path, document: &BlueStacksConfigDocument) -> ResultType<()> {
@@ -2219,6 +2577,64 @@ bst.status.hypervisor="hyperv"
         assert_eq!(journal.startup_changes.len(), 2);
         assert!(journal.startup_changes.iter().any(|change| change.registry_view == "32"));
         assert!(journal.startup_changes.iter().any(|change| change.registry_view == "64"));
+    }
+
+    #[test]
+    fn parses_bluestacks_bridge_actions_from_tagged_json() {
+        let apply: BlueStacksAction =
+            serde_json::from_str(r#"{"action":"apply_profile","profile":"clean_gaming"}"#)
+                .unwrap();
+        assert!(matches!(
+            apply,
+            BlueStacksAction::ApplyProfile {
+                profile: CleanupProfile::CleanGaming,
+                selection: None
+            }
+        ));
+
+        let inspect: BlueStacksAction = serde_json::from_str(
+            r#"{"action":"inspect_android_packages","instance_id":"Nougat32"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            inspect,
+            BlueStacksAction::InspectAndroidPackages { ref instance_id }
+                if instance_id == "Nougat32"
+        ));
+
+        assert!(
+            serde_json::from_str::<BlueStacksAction>(r#"{"action":"delete_everything"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn serializes_bluestacks_bridge_action_result_as_structured_json() {
+        let result = BlueStacksActionResult::success(
+            "set_default_app",
+            serde_json::json!({"instance_id":"Nougat32","package":"com.example.game"}),
+        );
+        let value = serde_json::to_value(result).unwrap();
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["action"], "set_default_app");
+        assert_eq!(value["data"]["instance_id"], "Nougat32");
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn destructive_bridge_actions_require_explicit_confirmation() {
+        let unconfirmed: BlueStacksAction = serde_json::from_str(
+            r#"{"action":"remove_optional_component","component_id":"filesystem|C:\\BlueStacks X","confirmed":false}"#,
+        )
+        .unwrap();
+        assert!(unconfirmed.validate_confirmation().is_err());
+
+        let confirmed: BlueStacksAction = serde_json::from_str(
+            r#"{"action":"remove_optional_component","component_id":"filesystem|C:\\BlueStacks X","confirmed":true}"#,
+        )
+        .unwrap();
+        assert!(confirmed.validate_confirmation().is_ok());
     }
 
     #[test]
