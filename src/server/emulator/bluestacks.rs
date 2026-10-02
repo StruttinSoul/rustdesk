@@ -2,17 +2,32 @@ use super::{
     AdbEndpoint, EmulatorCapabilities, EmulatorDisplay, EmulatorOrientation, EmulatorProvider,
     EmulatorRuntimeState, EmulatorState, EmulatorTarget, ProviderId,
 };
-use hbb_common::{bail, log, ResultType};
+use hbb_common::{bail, config::Config, log, ResultType};
+use serde_derive::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 use winreg::{enums::*, RegKey};
 
 const PROVIDER_ID: &str = "bluestacks";
 const BLUESTACKS_REGISTRY_PATH: &str = r"SOFTWARE\BlueStacks_nxt";
+const WINDOWS_RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+const WINDOWS_UNINSTALL_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+const WINDOWS_SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
+const OPTION_CLEANUP_JOURNAL: &str = "emulator-bluestacks-cleanup-journal";
+const OPTION_CLEANUP_VERSION: &str = "emulator-bluestacks-cleanup-version";
+const OPTION_CLEANUP_SELECTION: &str = "emulator-bluestacks-cleanup-selection";
+const OPTION_DEFAULT_APPS: &str = "emulator-bluestacks-default-apps";
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(90);
+const DEFAULT_LAUNCH_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlueStacksInstallation {
@@ -81,6 +96,1514 @@ impl BlueStacksConfigDocument {
     fn render(&self) -> String {
         self.source.clone()
     }
+
+    fn set_existing(&mut self, key: &str, value: &str) -> bool {
+        if !self.values.contains_key(key) {
+            return false;
+        }
+        if self.get(key) == Some(value) {
+            return true;
+        }
+
+        let mut rendered = String::with_capacity(self.source.len());
+        let mut replaced = false;
+        for chunk in self.source.split_inclusive('\n') {
+            let (line, ending) = if let Some(line) = chunk.strip_suffix("\r\n") {
+                (line, "\r\n")
+            } else if let Some(line) = chunk.strip_suffix('\n') {
+                (line, "\n")
+            } else {
+                (chunk, "")
+            };
+            let matches_key = line
+                .split_once('=')
+                .map(|(candidate, _)| candidate.trim() == key)
+                .unwrap_or(false);
+            if matches_key {
+                rendered.push_str(key);
+                rendered.push_str("=\"");
+                rendered.push_str(value);
+                rendered.push('"');
+                rendered.push_str(ending);
+                replaced = true;
+            } else {
+                rendered.push_str(line);
+                rendered.push_str(ending);
+            }
+        }
+        if !replaced {
+            return false;
+        }
+        self.source = rendered;
+        self.values.insert(key.to_owned(), value.to_owned());
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupProfile {
+    Standard,
+    CleanGaming,
+    Custom,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CleanupSelection {
+    pub disable_gameplay_ads: bool,
+    pub disable_smart_downloads: bool,
+    pub disable_store_on_start: bool,
+    pub disable_desktop_notifications: bool,
+    pub disable_app_shortcuts: bool,
+    pub disable_optional_startup: bool,
+    pub hide_desktop_shortcuts: bool,
+    /// Destructive choices intentionally remain outside all profile presets.
+    pub remove_optional_components: bool,
+    /// Android cleanup is review-driven rather than a profile side effect.
+    pub disable_optional_android_apps: bool,
+}
+
+impl CleanupSelection {
+    pub fn for_profile(profile: CleanupProfile) -> Self {
+        match profile {
+            CleanupProfile::Standard => Self {
+                disable_gameplay_ads: true,
+                disable_smart_downloads: true,
+                disable_store_on_start: true,
+                ..Default::default()
+            },
+            CleanupProfile::CleanGaming => Self {
+                disable_gameplay_ads: true,
+                disable_smart_downloads: true,
+                disable_store_on_start: true,
+                disable_desktop_notifications: true,
+                disable_app_shortcuts: true,
+                disable_optional_startup: true,
+                hide_desktop_shortcuts: true,
+                ..Default::default()
+            },
+            CleanupProfile::Custom => Self::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ConfigChange {
+    pub key: String,
+    pub original_value: String,
+    pub applied_value: String,
+}
+
+impl ConfigChange {
+    fn new(key: &str, original_value: &str, applied_value: &str) -> Self {
+        Self {
+            key: key.to_owned(),
+            original_value: original_value.to_owned(),
+            applied_value: applied_value.to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StartupChange {
+    pub hive: String,
+    pub key_path: String,
+    pub value_name: String,
+    pub original_command: String,
+    #[serde(default)]
+    pub registry_view: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ShortcutChange {
+    pub original_path: String,
+    pub disabled_path: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemovedComponentRecord {
+    pub id: String,
+    pub display_name: String,
+    pub version: String,
+    pub install_location: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CleanupJournal {
+    #[serde(default)]
+    pub config_changes: Vec<ConfigChange>,
+    #[serde(default)]
+    pub startup_changes: Vec<StartupChange>,
+    #[serde(default)]
+    pub shortcut_changes: Vec<ShortcutChange>,
+    #[serde(default)]
+    pub disabled_android_packages: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub removed_components: Vec<RemovedComponentRecord>,
+}
+
+impl CleanupJournal {
+    fn record_config_change(&mut self, key: &str, original_value: &str, applied_value: &str) {
+        if self.config_changes.iter().any(|change| change.key == key) {
+            return;
+        }
+        self.config_changes
+            .push(ConfigChange::new(key, original_value, applied_value));
+    }
+
+    fn record_startup_change(&mut self, entry: &BlueStacksStartupEntry) {
+        if self.startup_changes.iter().any(|change| {
+            change.hive == entry.hive
+                && change.key_path == entry.key_path
+                && change.value_name == entry.value_name
+                && change.registry_view == entry.registry_view
+        }) {
+            return;
+        }
+        self.startup_changes.push(StartupChange {
+            hive: entry.hive.clone(),
+            key_path: entry.key_path.clone(),
+            value_name: entry.value_name.clone(),
+            original_command: entry.command.clone(),
+            registry_view: entry.registry_view.clone(),
+        });
+    }
+
+    fn is_empty(&self) -> bool {
+        self.config_changes.is_empty()
+            && self.startup_changes.is_empty()
+            && self.shortcut_changes.is_empty()
+            && self
+                .disabled_android_packages
+                .values()
+                .all(|packages| packages.is_empty())
+            && self.removed_components.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct RestoreConfigReport {
+    restored: Vec<String>,
+    skipped_conflicts: Vec<String>,
+}
+
+fn restore_config_changes(
+    document: &mut BlueStacksConfigDocument,
+    journal: &CleanupJournal,
+) -> RestoreConfigReport {
+    let mut report = RestoreConfigReport::default();
+    for change in &journal.config_changes {
+        match document.get(&change.key) {
+            Some(current) if current == change.applied_value => {
+                if document.set_existing(&change.key, &change.original_value) {
+                    report.restored.push(change.key.clone());
+                }
+            }
+            Some(current) if current == change.original_value => {
+                // Already restored outside this tool; no action required.
+            }
+            Some(_) => report.skipped_conflicts.push(change.key.clone()),
+            None => report.skipped_conflicts.push(change.key.clone()),
+        }
+    }
+    report
+}
+
+fn apply_config_cleanup(
+    document: &mut BlueStacksConfigDocument,
+    selection: &CleanupSelection,
+    journal: &mut CleanupJournal,
+) -> Vec<String> {
+    let mut desired = Vec::<(String, &'static str)>::new();
+    if selection.disable_gameplay_ads {
+        desired.push(("bst.enable_programmatic_ads".to_owned(), "0"));
+    }
+    if selection.disable_smart_downloads {
+        desired.push(("bst.enable_smart_downloads".to_owned(), "0"));
+    }
+    if selection.disable_store_on_start {
+        desired.push(("bst.launch_store_on_boot".to_owned(), "0"));
+    }
+    if selection.disable_app_shortcuts {
+        desired.push(("bst.create_desktop_shortcuts".to_owned(), "0"));
+    }
+    if selection.disable_desktop_notifications {
+        desired.extend(
+            document
+                .values
+                .keys()
+                .filter(|key| {
+                    key.starts_with("bst.instance.") && key.ends_with(".enable_notifications")
+                })
+                .cloned()
+                .map(|key| (key, "0")),
+        );
+    }
+
+    let mut changed = Vec::new();
+    for (key, applied_value) in desired {
+        let Some(original_value) = document.get(&key).map(str::to_owned) else {
+            continue;
+        };
+        if original_value == applied_value {
+            continue;
+        }
+        journal.record_config_change(&key, &original_value, applied_value);
+        if document.set_existing(&key, applied_value) {
+            changed.push(key);
+        }
+    }
+    changed
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentClassification {
+    Required,
+    FeatureSpecific,
+    Optional,
+    PromotionalFrontend,
+    Unknown,
+}
+
+fn classify_component(display_name: &str) -> ComponentClassification {
+    let normalized = display_name.trim().to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "bluestacks" | "bluestacks 5" | "bluestacks app player"
+    ) {
+        ComponentClassification::Required
+    } else if normalized.contains("bluestacks services") {
+        ComponentClassification::FeatureSpecific
+    } else if normalized == "bluestacks x" || normalized.starts_with("bluestacks x ") {
+        ComponentClassification::PromotionalFrontend
+    } else if normalized.contains("bluestacks ai") || normalized.contains("blueai") {
+        ComponentClassification::Optional
+    } else {
+        ComponentClassification::Unknown
+    }
+}
+
+fn classify_service(name: &str, display_name: &str, image_path: &str) -> ComponentClassification {
+    let normalized = format!("{name} {display_name} {image_path}").to_ascii_lowercase();
+    if normalized.contains("bluestacks hypervisor")
+        || normalized.contains("bluestacksdrv")
+        || normalized.contains("bstkdrv")
+        || normalized.contains("bstksvc")
+    {
+        ComponentClassification::Required
+    } else {
+        ComponentClassification::Unknown
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AndroidPackageClassification {
+    ProtectedSystem,
+    ProtectedGoogle,
+    ProtectedBlueStacks,
+    UserInstalled,
+    OptionalPromotional,
+    Unknown,
+}
+
+fn classify_android_package(
+    package: &str,
+    user_installed: bool,
+) -> AndroidPackageClassification {
+    let package = package.trim().to_ascii_lowercase();
+    if package == "com.uncube.gamevantage" {
+        return AndroidPackageClassification::OptionalPromotional;
+    }
+    if package == "com.android.vending" || package.starts_with("com.google.") {
+        return AndroidPackageClassification::ProtectedGoogle;
+    }
+    if package == "android"
+        || package.starts_with("com.android.")
+        || package.starts_with("org.chromium.")
+    {
+        return AndroidPackageClassification::ProtectedSystem;
+    }
+    if package.starts_with("com.bluestacks.")
+        || package.starts_with("com.bst.")
+        || package.starts_with("com.nowgg.bluestacks")
+    {
+        return AndroidPackageClassification::ProtectedBlueStacks;
+    }
+    if user_installed {
+        AndroidPackageClassification::UserInstalled
+    } else {
+        AndroidPackageClassification::Unknown
+    }
+}
+
+fn validate_android_disable(package: &str, user_installed: bool) -> ResultType<()> {
+    if classify_android_package(package, user_installed)
+        != AndroidPackageClassification::OptionalPromotional
+    {
+        bail!("Android package '{package}' is protected or not approved for cleanup");
+    }
+    Ok(())
+}
+
+fn cleanup_needs_reapply(last_applied_version: &str, current_version: &str) -> bool {
+    !last_applied_version.trim().is_empty()
+        && !current_version.trim().is_empty()
+        && last_applied_version.trim() != current_version.trim()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StartupEntryClassification {
+    pub classification: ComponentClassification,
+    pub safe_to_disable: bool,
+}
+
+fn classify_startup_entry(name: &str, command: &str) -> StartupEntryClassification {
+    let combined = format!("{} {}", name, command).to_ascii_lowercase();
+    if combined.contains("updater") || combined.contains("bstksvc") {
+        return StartupEntryClassification {
+            classification: ComponentClassification::Required,
+            safe_to_disable: false,
+        };
+    }
+    if combined.contains("bluestacks services") || combined.contains("bluestacksservices") {
+        return StartupEntryClassification {
+            classification: ComponentClassification::FeatureSpecific,
+            safe_to_disable: true,
+        };
+    }
+    if combined.contains("bluestacks x") || combined.contains("bluestacksx") {
+        return StartupEntryClassification {
+            classification: ComponentClassification::PromotionalFrontend,
+            safe_to_disable: true,
+        };
+    }
+    if combined.contains("blueai") || combined.contains("bluestacks ai") {
+        return StartupEntryClassification {
+            classification: ComponentClassification::Optional,
+            safe_to_disable: true,
+        };
+    }
+    StartupEntryClassification {
+        classification: ComponentClassification::Unknown,
+        safe_to_disable: false,
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct RestorePathReport {
+    restored: Vec<String>,
+    skipped_conflicts: Vec<String>,
+}
+
+fn disabled_shortcut_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".rustdesk-disabled");
+    PathBuf::from(value)
+}
+
+fn disable_shortcut(path: &Path, journal: &mut CleanupJournal) -> ResultType<bool> {
+    if journal
+        .shortcut_changes
+        .iter()
+        .any(|change| Path::new(&change.original_path) == path)
+    {
+        return Ok(false);
+    }
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let disabled_path = disabled_shortcut_path(path);
+    if disabled_path.exists() {
+        bail!(
+            "cannot hide BlueStacks shortcut '{}' because '{}' already exists",
+            path.display(),
+            disabled_path.display()
+        );
+    }
+    fs::rename(path, &disabled_path)?;
+    journal.shortcut_changes.push(ShortcutChange {
+        original_path: path.to_string_lossy().into_owned(),
+        disabled_path: disabled_path.to_string_lossy().into_owned(),
+    });
+    Ok(true)
+}
+
+fn restore_shortcut_changes(journal: &mut CleanupJournal) -> ResultType<RestorePathReport> {
+    let mut report = RestorePathReport::default();
+    let mut retained = Vec::new();
+    for change in journal.shortcut_changes.drain(..) {
+        let original = PathBuf::from(&change.original_path);
+        let disabled = PathBuf::from(&change.disabled_path);
+        if original.exists() {
+            if disabled.exists() {
+                report.skipped_conflicts.push(change.original_path.clone());
+                retained.push(change);
+            } else {
+                report.restored.push(change.original_path);
+            }
+            continue;
+        }
+        if disabled.exists() {
+            fs::rename(&disabled, &original)?;
+            report.restored.push(change.original_path);
+        } else {
+            report.skipped_conflicts.push(change.original_path.clone());
+            retained.push(change);
+        }
+    }
+    journal.shortcut_changes = retained;
+    Ok(report)
+}
+
+fn parse_package_list(output: &str) -> BTreeSet<String> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("package:"))
+        .map(str::trim)
+        .filter(|package| !package.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DefaultApps {
+    #[serde(default)]
+    packages: BTreeMap<String, String>,
+}
+
+impl DefaultApps {
+    fn set(&mut self, instance_id: &str, package: &str) -> ResultType<()> {
+        // Reuse the same strict package validation as direct launch.
+        let _ = direct_launch_args(instance_id, package)?;
+        self.packages
+            .insert(instance_id.to_owned(), package.to_owned());
+        Ok(())
+    }
+
+    fn get(&self, instance_id: &str) -> Option<&str> {
+        self.packages.get(instance_id).map(String::as_str)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutLocation {
+    Desktop,
+    StartMenu,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksShortcut {
+    pub path: String,
+    pub name: String,
+    pub location: ShortcutLocation,
+    pub recommended_cleanup: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksStartupEntry {
+    pub id: String,
+    pub hive: String,
+    pub key_path: String,
+    pub registry_view: String,
+    pub value_name: String,
+    pub command: String,
+    pub classification: ComponentClassification,
+    pub safe_to_disable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksComponent {
+    pub id: String,
+    pub display_name: String,
+    pub version: String,
+    pub install_location: String,
+    pub classification: ComponentClassification,
+    pub can_remove: bool,
+    #[serde(skip_serializing)]
+    uninstall_command: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksService {
+    pub name: String,
+    pub display_name: String,
+    pub image_path: String,
+    pub classification: ComponentClassification,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AndroidPackageInfo {
+    pub package: String,
+    pub classification: AndroidPackageClassification,
+    pub user_installed: bool,
+    pub disabled: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AndroidPackageInventory {
+    pub instance_id: String,
+    pub available: bool,
+    pub message: String,
+    pub packages: Vec<AndroidPackageInfo>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CleanupApplyReport {
+    pub changed_config_keys: Vec<String>,
+    pub disabled_startup_entries: Vec<String>,
+    pub hidden_shortcuts: Vec<String>,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CleanupRestoreReport {
+    pub restored_config_keys: Vec<String>,
+    pub restored_startup_entries: Vec<String>,
+    pub restored_shortcuts: Vec<String>,
+    pub restored_android_packages: Vec<String>,
+    pub manual_reinstall_components: Vec<String>,
+    pub skipped_conflicts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LaunchReport {
+    pub instance_id: String,
+    pub package: String,
+    pub started_instance: bool,
+    pub adb_verified: bool,
+    pub message: String,
+}
+
+fn load_cleanup_journal() -> CleanupJournal {
+    serde_json::from_str(&Config::get_option(OPTION_CLEANUP_JOURNAL)).unwrap_or_default()
+}
+
+fn save_cleanup_journal(journal: &CleanupJournal) {
+    let encoded = serde_json::to_string(journal).unwrap_or_default();
+    Config::set_option(OPTION_CLEANUP_JOURNAL.to_owned(), encoded);
+}
+
+fn load_default_apps() -> DefaultApps {
+    serde_json::from_str(&Config::get_option(OPTION_DEFAULT_APPS)).unwrap_or_default()
+}
+
+fn save_default_apps(apps: &DefaultApps) {
+    let encoded = serde_json::to_string(apps).unwrap_or_default();
+    Config::set_option(OPTION_DEFAULT_APPS.to_owned(), encoded);
+}
+
+fn write_config_document(path: &Path, document: &BlueStacksConfigDocument) -> ResultType<()> {
+    let temp = path.with_extension("conf.rustdesk-tmp");
+    let backup = path.with_extension("conf.rustdesk-backup");
+    if temp.exists() || backup.exists() {
+        bail!(
+            "BlueStacks config staging files already exist beside '{}'; refusing to overwrite them",
+            path.display()
+        );
+    }
+    fs::write(&temp, document.render())?;
+    fs::rename(path, &backup)?;
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::rename(&backup, path);
+        let _ = fs::remove_file(&temp);
+        return Err(error.into());
+    }
+    fs::remove_file(&backup)?;
+    Ok(())
+}
+
+fn registry_root(hive: &str) -> Option<RegKey> {
+    match hive {
+        "HKCU" => Some(RegKey::predef(HKEY_CURRENT_USER)),
+        "HKLM" => Some(RegKey::predef(HKEY_LOCAL_MACHINE)),
+        _ => None,
+    }
+}
+
+fn registry_view_flags(view: &str, write: bool) -> u32 {
+    let base = if write { KEY_READ | KEY_WRITE } else { KEY_READ };
+    match view {
+        "64" => base | KEY_WOW64_64KEY,
+        "32" => base | KEY_WOW64_32KEY,
+        _ => base,
+    }
+}
+
+fn enumerate_startup_entries() -> Vec<BlueStacksStartupEntry> {
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (hive_name, root) in [
+        ("HKCU", RegKey::predef(HKEY_CURRENT_USER)),
+        ("HKLM", RegKey::predef(HKEY_LOCAL_MACHINE)),
+    ] {
+        for view in ["64", "32", "default"] {
+            let Ok(key) = root.open_subkey_with_flags(
+                WINDOWS_RUN_KEY,
+                registry_view_flags(view, false),
+            ) else {
+                continue;
+            };
+            for value in key.enum_values().flatten() {
+                let value_name = value.0;
+                let Ok(command) = key.get_value::<String, _>(&value_name) else {
+                    continue;
+                };
+                let lower = format!("{} {}", value_name, command).to_ascii_lowercase();
+                if !lower.contains("bluestacks") && !lower.contains("blueai") {
+                    continue;
+                }
+                let identity_key = format!(
+                    "{hive_name}|{WINDOWS_RUN_KEY}|{}|{}",
+                    value_name.to_ascii_lowercase(),
+                    command.to_ascii_lowercase()
+                );
+                if !seen.insert(identity_key) {
+                    continue;
+                }
+                let identity = format!("{hive_name}|{view}|{WINDOWS_RUN_KEY}|{value_name}");
+                let classified = classify_startup_entry(&value_name, &command);
+                entries.push(BlueStacksStartupEntry {
+                    id: identity,
+                    hive: hive_name.to_owned(),
+                    key_path: WINDOWS_RUN_KEY.to_owned(),
+                    registry_view: view.to_owned(),
+                    value_name,
+                    command,
+                    classification: classified.classification,
+                    safe_to_disable: classified.safe_to_disable,
+                });
+            }
+        }
+    }
+    entries
+}
+
+fn disable_startup_entry(
+    entry: &BlueStacksStartupEntry,
+    journal: &mut CleanupJournal,
+) -> ResultType<bool> {
+    if !entry.safe_to_disable {
+        bail!("startup entry '{}' is not approved for cleanup", entry.value_name);
+    }
+    let Some(root) = registry_root(&entry.hive) else {
+        bail!("unsupported startup registry hive '{}': refusing change", entry.hive);
+    };
+    let key = root.open_subkey_with_flags(
+        &entry.key_path,
+        registry_view_flags(&entry.registry_view, true),
+    )?;
+    let current = match key.get_value::<String, _>(&entry.value_name) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    if current != entry.command {
+        bail!(
+            "startup entry '{}' changed since inventory; refusing cleanup",
+            entry.value_name
+        );
+    }
+    journal.record_startup_change(entry);
+    key.delete_value(&entry.value_name)?;
+    Ok(true)
+}
+
+fn restore_startup_changes(journal: &mut CleanupJournal) -> ResultType<RestorePathReport> {
+    let mut report = RestorePathReport::default();
+    let mut retained = Vec::new();
+    for change in journal.startup_changes.drain(..) {
+        let Some(root) = registry_root(&change.hive) else {
+            report.skipped_conflicts.push(change.value_name.clone());
+            retained.push(change);
+            continue;
+        };
+        let Ok(key) = root.open_subkey_with_flags(
+            &change.key_path,
+            registry_view_flags(&change.registry_view, true),
+        ) else {
+            report.skipped_conflicts.push(change.value_name.clone());
+            retained.push(change);
+            continue;
+        };
+        match key.get_value::<String, _>(&change.value_name) {
+            Ok(current) if current == change.original_command => {
+                report.restored.push(change.value_name);
+            }
+            Ok(_) => {
+                report.skipped_conflicts.push(change.value_name.clone());
+                retained.push(change);
+            }
+            Err(_) => {
+                key.set_value(&change.value_name, &change.original_command)?;
+                report.restored.push(change.value_name);
+            }
+        }
+    }
+    journal.startup_changes = retained;
+    Ok(report)
+}
+
+fn collect_bluestacks_shortcuts(
+    root: &Path,
+    location: ShortcutLocation,
+    output: &mut Vec<BlueStacksShortcut>,
+) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_bluestacks_shortcuts(&path, location, output);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if !lower.ends_with(".lnk") || !lower.contains("bluestacks") {
+            continue;
+        }
+        let recommended_cleanup = location == ShortcutLocation::Desktop
+            && matches!(lower.as_str(), "bluestacks 5.lnk" | "bluestacks manager.lnk");
+        output.push(BlueStacksShortcut {
+            path: path.to_string_lossy().into_owned(),
+            name: name.to_owned(),
+            location,
+            recommended_cleanup,
+        });
+    }
+}
+
+fn enumerate_shortcuts() -> Vec<BlueStacksShortcut> {
+    let mut shortcuts = Vec::new();
+    if let Some(public) = std::env::var_os("PUBLIC") {
+        collect_bluestacks_shortcuts(
+            &PathBuf::from(public).join("Desktop"),
+            ShortcutLocation::Desktop,
+            &mut shortcuts,
+        );
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        collect_bluestacks_shortcuts(
+            &PathBuf::from(profile).join("Desktop"),
+            ShortcutLocation::Desktop,
+            &mut shortcuts,
+        );
+    }
+    if let Some(program_data) = std::env::var_os("ProgramData") {
+        collect_bluestacks_shortcuts(
+            &PathBuf::from(program_data)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs"),
+            ShortcutLocation::StartMenu,
+            &mut shortcuts,
+        );
+    }
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        collect_bluestacks_shortcuts(
+            &PathBuf::from(app_data)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs"),
+            ShortcutLocation::StartMenu,
+            &mut shortcuts,
+        );
+    }
+    shortcuts.sort_by(|left, right| left.path.cmp(&right.path));
+    shortcuts.dedup_by(|left, right| left.path.eq_ignore_ascii_case(&right.path));
+    shortcuts
+}
+
+fn enumerate_components() -> Vec<BlueStacksComponent> {
+    let mut components = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (hive_name, root) in [
+        ("HKCU", RegKey::predef(HKEY_CURRENT_USER)),
+        ("HKLM", RegKey::predef(HKEY_LOCAL_MACHINE)),
+    ] {
+        for view in ["64", "32", "default"] {
+            let Ok(uninstall) = root.open_subkey_with_flags(
+                WINDOWS_UNINSTALL_KEY,
+                registry_view_flags(view, false),
+            ) else {
+                continue;
+            };
+            for subkey_name in uninstall.enum_keys().flatten() {
+                let Ok(subkey) = uninstall.open_subkey_with_flags(&subkey_name, KEY_READ) else {
+                    continue;
+                };
+                let Ok(display_name) = subkey.get_value::<String, _>("DisplayName") else {
+                    continue;
+                };
+                let lower = display_name.to_ascii_lowercase();
+                if !lower.contains("bluestacks") && !lower.contains("blueai") {
+                    continue;
+                }
+                let classification = classify_component(&display_name);
+                let uninstall_command = subkey
+                    .get_value::<String, _>("QuietUninstallString")
+                    .or_else(|_| subkey.get_value::<String, _>("UninstallString"))
+                    .unwrap_or_default();
+                let identity_key = format!(
+                    "{hive_name}|{}|{}|{}",
+                    subkey_name.to_ascii_lowercase(),
+                    display_name.to_ascii_lowercase(),
+                    uninstall_command.to_ascii_lowercase()
+                );
+                if !seen.insert(identity_key) {
+                    continue;
+                }
+                let id = format!("{hive_name}|{view}|{subkey_name}");
+                let can_remove = matches!(
+                    classification,
+                    ComponentClassification::Optional
+                        | ComponentClassification::PromotionalFrontend
+                ) && !uninstall_command.trim().is_empty();
+                components.push(BlueStacksComponent {
+                    id,
+                    display_name,
+                    version: subkey
+                        .get_value::<String, _>("DisplayVersion")
+                        .unwrap_or_default(),
+                    install_location: subkey
+                        .get_value::<String, _>("InstallLocation")
+                        .unwrap_or_default(),
+                    classification,
+                    can_remove,
+                    uninstall_command,
+                });
+            }
+        }
+    }
+    if !components.iter().any(|component| {
+        component
+            .display_name
+            .trim()
+            .eq_ignore_ascii_case("BlueStacks X")
+    }) {
+        let mut candidates = Vec::new();
+        for variable in ["ProgramFiles(x86)", "ProgramFiles"] {
+            if let Some(root) = std::env::var_os(variable) {
+                candidates.push(PathBuf::from(root).join("BlueStacks X"));
+            }
+        }
+        candidates.extend(
+            hbb_common::sysinfo::System::new_all()
+                .processes()
+                .values()
+                .filter(|process| process.name().eq_ignore_ascii_case("BlueStacks X.exe"))
+                .filter_map(|process| process.exe().parent().map(Path::to_path_buf)),
+        );
+        let mut seen_paths = BTreeSet::new();
+        for candidate in candidates {
+            let identity = candidate.to_string_lossy().to_ascii_lowercase();
+            if !seen_paths.insert(identity) {
+                continue;
+            }
+            if let Some(component) = bluestacks_x_component_from_dir(&candidate) {
+                components.push(component);
+                break;
+            }
+        }
+    }
+    components.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    components
+}
+
+fn bluestacks_x_component_from_dir(install_dir: &Path) -> Option<BlueStacksComponent> {
+    let executable = install_dir.join("BlueStacks X.exe");
+    let uninstaller = install_dir.join("BlueStacksXUninstaller.exe");
+    if !executable.is_file() || !uninstaller.is_file() {
+        return None;
+    }
+    Some(BlueStacksComponent {
+        id: format!("filesystem|{}", install_dir.to_string_lossy()),
+        display_name: "BlueStacks X".to_owned(),
+        version: String::new(),
+        install_location: install_dir.to_string_lossy().into_owned(),
+        classification: ComponentClassification::PromotionalFrontend,
+        can_remove: true,
+        uninstall_command: format!("\"{}\"", uninstaller.display()),
+    })
+}
+
+fn parse_registered_uninstall_command(command: &str) -> ResultType<(PathBuf, Vec<String>)> {
+    let command = command.trim();
+    if command.is_empty() {
+        bail!("registered uninstaller command is empty")
+    }
+    if command.chars().any(|ch| matches!(ch, '&' | '|' | '<' | '>' | '^' | '\n' | '\r')) {
+        bail!("registered uninstaller contains shell metacharacters")
+    }
+
+    let (program, remainder) = if let Some(rest) = command.strip_prefix('"') {
+        let Some(end) = rest.find('"') else {
+            bail!("registered uninstaller has an unterminated quoted executable path")
+        };
+        (rest[..end].to_owned(), rest[end + 1..].trim())
+    } else {
+        let lower = command.to_ascii_lowercase();
+        let Some(end) = lower.find(".exe") else {
+            bail!("registered uninstaller does not name an executable")
+        };
+        (
+            command[..end + 4].trim().to_owned(),
+            command[end + 4..].trim(),
+        )
+    };
+    let program_path = PathBuf::from(&program);
+    let file_name = program_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(file_name.as_str(), "cmd.exe" | "powershell.exe" | "pwsh.exe" | "wscript.exe" | "cscript.exe") {
+        bail!("script/shell uninstallers are not accepted")
+    }
+    if !program_path.is_absolute() && file_name != "msiexec.exe" {
+        bail!("registered uninstaller executable path is not absolute")
+    }
+
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in remainder.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            ch if ch.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if quoted {
+        bail!("registered uninstaller has unterminated argument quoting")
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok((program_path, args))
+}
+
+fn validate_component_removal(component: &BlueStacksComponent) -> ResultType<()> {
+    if !component.can_remove {
+        bail!("component '{}' is not marked removable", component.display_name)
+    }
+    if !matches!(
+        component.classification,
+        ComponentClassification::Optional | ComponentClassification::PromotionalFrontend
+    ) {
+        bail!(
+            "component '{}' is required, feature-specific, or unknown and cannot be removed",
+            component.display_name
+        )
+    }
+    if component.uninstall_command.trim().is_empty() {
+        bail!("component '{}' has no registered uninstaller", component.display_name)
+    }
+    Ok(())
+}
+
+fn enumerate_services() -> Vec<BlueStacksService> {
+    let root = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let Ok(services) = root.open_subkey_with_flags(WINDOWS_SERVICES_KEY, KEY_READ) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for name in services.enum_keys().flatten() {
+        let Ok(service) = services.open_subkey_with_flags(&name, KEY_READ) else {
+            continue;
+        };
+        let display_name = service
+            .get_value::<String, _>("DisplayName")
+            .unwrap_or_else(|_| name.clone());
+        let image_path = service.get_value::<String, _>("ImagePath").unwrap_or_default();
+        let lower = format!("{} {} {}", name, display_name, image_path).to_ascii_lowercase();
+        if !lower.contains("bluestacks") && !lower.contains("bstksvc") {
+            continue;
+        }
+        let classification = classify_service(&name, &display_name, &image_path);
+        result.push(BlueStacksService {
+            name,
+            display_name,
+            image_path,
+            classification,
+        });
+    }
+    result
+}
+
+#[derive(Debug)]
+struct TimedCommandOutput {
+    success: bool,
+    timed_out: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_command_with_timeout(program: &Path, args: &[String]) -> ResultType<TimedCommandOutput> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                pipe.read_to_end(&mut stdout)?;
+            }
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_end(&mut stderr)?;
+            }
+            return Ok(TimedCommandOutput {
+                success: status.success(),
+                timed_out: false,
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            });
+        }
+        if started.elapsed() >= COMMAND_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(TimedCommandOutput {
+                success: false,
+                timed_out: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL);
+    }
+}
+
+fn run_adb(
+    provider: &BlueStacksProvider,
+    instance: &BlueStacksInstanceInfo,
+    args: &[&str],
+) -> ResultType<String> {
+    if !instance.adb_enabled {
+        bail!("BlueStacks ADB access is disabled")
+    }
+    let port = instance
+        .adb_port
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks ADB port is unavailable"))?;
+    let serial = format!("127.0.0.1:{port}");
+    let mut command_args = vec!["-s".to_owned(), serial.clone()];
+    command_args.extend(args.iter().map(|arg| (*arg).to_owned()));
+    let output = run_command_with_timeout(&provider.installation.adb_path(), &command_args)?;
+    if output.timed_out {
+        bail!("BlueStacks ADB command timed out for {serial}")
+    }
+    if !output.success {
+        let error = output.stderr.trim().to_owned();
+        bail!(
+            "BlueStacks ADB command failed for {serial}: {}",
+            if error.is_empty() { "non-zero exit status" } else { &error }
+        );
+    }
+    Ok(output.stdout)
+}
+
+fn find_instance(
+    provider: &BlueStacksProvider,
+    instance_id: &str,
+) -> ResultType<BlueStacksInstanceInfo> {
+    provider
+        .instances()?
+        .into_iter()
+        .find(|instance| instance.id == instance_id)
+        .ok_or_else(|| {
+            hbb_common::anyhow::anyhow!("BlueStacks instance '{instance_id}' does not exist")
+        })
+}
+
+pub fn android_packages(instance_id: &str) -> ResultType<AndroidPackageInventory> {
+    let provider = BlueStacksProvider::detect()?
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
+    let instance = find_instance(&provider, instance_id)?;
+    if !instance.adb_enabled || instance.adb_port.is_none() {
+        return Ok(AndroidPackageInventory {
+            instance_id: instance_id.to_owned(),
+            available: false,
+            message: "ADB is disabled in BlueStacks; Android packages were not inspected".to_owned(),
+            packages: Vec::new(),
+        });
+    }
+    let system = parse_package_list(&run_adb(
+        &provider,
+        &instance,
+        &["shell", "pm", "list", "packages", "-s"],
+    )?);
+    let user = parse_package_list(&run_adb(
+        &provider,
+        &instance,
+        &["shell", "pm", "list", "packages", "-3"],
+    )?);
+    let disabled = parse_package_list(&run_adb(
+        &provider,
+        &instance,
+        &["shell", "pm", "list", "packages", "-d"],
+    )?);
+    let mut all = system.clone();
+    all.extend(user.iter().cloned());
+    let packages = all
+        .into_iter()
+        .map(|package| AndroidPackageInfo {
+            classification: classify_android_package(&package, user.contains(&package)),
+            user_installed: user.contains(&package),
+            disabled: disabled.contains(&package),
+            package,
+        })
+        .collect();
+    Ok(AndroidPackageInventory {
+        instance_id: instance_id.to_owned(),
+        available: true,
+        message: String::new(),
+        packages,
+    })
+}
+
+pub fn disable_optional_android_package(instance_id: &str, package: &str) -> ResultType<()> {
+    let provider = BlueStacksProvider::detect()?
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
+    let instance = find_instance(&provider, instance_id)?;
+    let inventory = android_packages(instance_id)?;
+    let info = inventory
+        .packages
+        .iter()
+        .find(|info| info.package == package)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("Android package '{package}' was not found"))?;
+    validate_android_disable(package, info.user_installed)?;
+    if info.disabled {
+        return Ok(());
+    }
+    let _ = run_adb(
+        &provider,
+        &instance,
+        &["shell", "pm", "disable-user", "--user", "0", package],
+    )?;
+    let mut journal = load_cleanup_journal();
+    let packages = journal
+        .disabled_android_packages
+        .entry(instance_id.to_owned())
+        .or_default();
+    if !packages.iter().any(|item| item == package) {
+        packages.push(package.to_owned());
+    }
+    save_cleanup_journal(&journal);
+    log::info!("BlueStacks cleanup disabled Android package {package} on {instance_id}");
+    Ok(())
+}
+
+pub fn set_default_app(instance_id: &str, package: &str) -> ResultType<()> {
+    let provider = BlueStacksProvider::detect()?
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
+    let _ = find_instance(&provider, instance_id)?;
+    let mut apps = load_default_apps();
+    apps.set(instance_id, package)?;
+    save_default_apps(&apps);
+    Ok(())
+}
+
+pub fn remove_optional_component(component_id: &str) -> ResultType<()> {
+    let component = enumerate_components()
+        .into_iter()
+        .find(|component| component.id == component_id)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks component '{component_id}' was not found"))?;
+    validate_component_removal(&component)?;
+    let (mut program, args) = parse_registered_uninstall_command(&component.uninstall_command)?;
+    if program
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("msiexec.exe"))
+        .unwrap_or(false)
+        && !program.is_absolute()
+    {
+        let system_root = std::env::var_os("SystemRoot")
+            .ok_or_else(|| hbb_common::anyhow::anyhow!("SystemRoot is unavailable"))?;
+        program = PathBuf::from(system_root)
+            .join("System32")
+            .join("msiexec.exe");
+    }
+    if !program.is_file() {
+        bail!(
+            "registered uninstaller '{}' does not exist; refusing removal",
+            program.display()
+        )
+    }
+    Command::new(&program).args(&args).spawn()?;
+    let mut journal = load_cleanup_journal();
+    if !journal
+        .removed_components
+        .iter()
+        .any(|record| record.id == component.id)
+    {
+        journal.removed_components.push(RemovedComponentRecord {
+            id: component.id.clone(),
+            display_name: component.display_name.clone(),
+            version: component.version.clone(),
+            install_location: component.install_location.clone(),
+        });
+        save_cleanup_journal(&journal);
+    }
+    log::info!(
+        "BlueStacks cleanup started registered uninstaller for optional component {}",
+        component.display_name
+    );
+    Ok(())
+}
+
+fn wait_for_android_ready(
+    provider: &BlueStacksProvider,
+    instance_id: &str,
+    timeout: Duration,
+) -> ResultType<BlueStacksInstanceInfo> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let instance = find_instance(provider, instance_id)?;
+        if instance.running && instance.adb_enabled && instance.adb_port.is_some() {
+            if run_adb(provider, &instance, &["get-state"])
+                .map(|output| output.trim().eq_ignore_ascii_case("device"))
+                .unwrap_or(false)
+                && run_adb(
+                    provider,
+                    &instance,
+                    &["shell", "getprop", "sys.boot_completed"],
+                )
+                .map(|output| output.trim() == "1")
+                .unwrap_or(false)
+            {
+                return Ok(instance);
+            }
+        }
+        if Instant::now() >= deadline {
+            bail!("BlueStacks instance '{instance_id}' did not become Android-ready before timeout")
+        }
+        thread::sleep(DEFAULT_LAUNCH_POLL_INTERVAL);
+    }
+}
+
+pub fn launch_default_app(instance_id: &str) -> ResultType<LaunchReport> {
+    let provider = BlueStacksProvider::detect()?
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
+    let apps = load_default_apps();
+    let package = apps
+        .get(instance_id)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("no default app is configured for BlueStacks instance '{instance_id}'"))?
+        .to_owned();
+    let target = provider
+        .discover()?
+        .into_iter()
+        .find(|target| target.provider_instance_id == instance_id)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks instance '{instance_id}' does not exist"))?;
+    let started_instance = target.state == EmulatorState::Stopped;
+    let instance = find_instance(&provider, instance_id)?;
+
+    if !instance.adb_enabled || instance.adb_port.is_none() {
+        provider.launch_package(&target, &package)?;
+        return Ok(LaunchReport {
+            instance_id: instance_id.to_owned(),
+            package,
+            started_instance,
+            adb_verified: false,
+            message: "Launch requested through BlueStacks; ADB is disabled so Android boot/package verification was skipped".to_owned(),
+        });
+    }
+
+    if started_instance {
+        provider.start(&target)?;
+    }
+    let ready = wait_for_android_ready(&provider, instance_id, DEFAULT_LAUNCH_TIMEOUT)?;
+    let package_path = run_adb(
+        &provider,
+        &ready,
+        &["shell", "pm", "path", &package],
+    )?;
+    if !package_path.lines().any(|line| line.trim().starts_with("package:")) {
+        bail!(
+            "default Android package '{package}' is not installed on BlueStacks instance '{instance_id}'"
+        )
+    }
+    let refreshed_target = provider
+        .discover()?
+        .into_iter()
+        .find(|target| target.provider_instance_id == instance_id)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks instance '{instance_id}' disappeared before app launch"))?;
+    provider.launch_package(&refreshed_target, &package)?;
+    Ok(LaunchReport {
+        instance_id: instance_id.to_owned(),
+        package,
+        started_instance,
+        adb_verified: true,
+        message: "Android boot and package availability verified; app launch requested through BlueStacks".to_owned(),
+    })
+}
+
+pub fn apply_cleanup(selection: CleanupSelection) -> ResultType<CleanupApplyReport> {
+    if selection.remove_optional_components || selection.disable_optional_android_apps {
+        bail!("destructive component/package actions cannot be applied through a cleanup profile")
+    }
+    let provider = BlueStacksProvider::detect()?
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
+    let instances = provider.instances()?;
+    if instances.iter().any(|instance| instance.running) {
+        bail!("stop all BlueStacks instances before applying cleanup settings")
+    }
+
+    let mut report = CleanupApplyReport {
+        version: provider.installation.version.clone(),
+        ..Default::default()
+    };
+    let mut journal = load_cleanup_journal();
+    let mut document = provider.read_config()?;
+    report.changed_config_keys = apply_config_cleanup(&mut document, &selection, &mut journal);
+    if !report.changed_config_keys.is_empty() {
+        write_config_document(&provider.installation.config_path, &document)?;
+        save_cleanup_journal(&journal);
+        for key in &report.changed_config_keys {
+            log::info!("BlueStacks cleanup changed config key {key}");
+        }
+    }
+
+    if selection.disable_optional_startup {
+        for entry in enumerate_startup_entries()
+            .into_iter()
+            .filter(|entry| entry.safe_to_disable)
+        {
+            if disable_startup_entry(&entry, &mut journal)? {
+                report.disabled_startup_entries.push(entry.value_name.clone());
+                save_cleanup_journal(&journal);
+                log::info!("BlueStacks cleanup disabled startup entry {}", entry.value_name);
+            }
+        }
+    }
+
+    if selection.hide_desktop_shortcuts {
+        for shortcut in enumerate_shortcuts()
+            .into_iter()
+            .filter(|shortcut| shortcut.recommended_cleanup)
+        {
+            let path = PathBuf::from(&shortcut.path);
+            if disable_shortcut(&path, &mut journal)? {
+                report.hidden_shortcuts.push(shortcut.path.clone());
+                save_cleanup_journal(&journal);
+                log::info!("BlueStacks cleanup hid desktop shortcut {}", shortcut.path);
+            }
+        }
+    }
+
+    Config::set_option(
+        OPTION_CLEANUP_SELECTION.to_owned(),
+        serde_json::to_string(&selection).unwrap_or_default(),
+    );
+    Config::set_option(
+        OPTION_CLEANUP_VERSION.to_owned(),
+        provider.installation.version.clone(),
+    );
+    Ok(report)
+}
+
+pub fn restore_cleanup() -> ResultType<CleanupRestoreReport> {
+    let provider = BlueStacksProvider::detect()?
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
+    let mut journal = load_cleanup_journal();
+    let mut report = CleanupRestoreReport::default();
+
+    if !journal.config_changes.is_empty() {
+        let mut document = provider.read_config()?;
+        let config_report = restore_config_changes(&mut document, &journal);
+        if !config_report.restored.is_empty() {
+            write_config_document(&provider.installation.config_path, &document)?;
+            report.restored_config_keys = config_report.restored.clone();
+            let restored: BTreeSet<_> = config_report.restored.into_iter().collect();
+            journal
+                .config_changes
+                .retain(|change| !restored.contains(&change.key));
+        }
+        report
+            .skipped_conflicts
+            .extend(config_report.skipped_conflicts);
+        save_cleanup_journal(&journal);
+    }
+
+    let startup_report = restore_startup_changes(&mut journal)?;
+    report.restored_startup_entries = startup_report.restored;
+    report
+        .skipped_conflicts
+        .extend(startup_report.skipped_conflicts);
+    save_cleanup_journal(&journal);
+
+    let shortcut_report = restore_shortcut_changes(&mut journal)?;
+    report.restored_shortcuts = shortcut_report.restored;
+    report
+        .skipped_conflicts
+        .extend(shortcut_report.skipped_conflicts);
+    save_cleanup_journal(&journal);
+
+    let disabled_snapshot = journal.disabled_android_packages.clone();
+    for (instance_id, packages) in disabled_snapshot {
+        let Ok(instance) = find_instance(&provider, &instance_id) else {
+            report
+                .skipped_conflicts
+                .push(format!("{instance_id}: Android instance missing"));
+            continue;
+        };
+        if !instance.adb_enabled {
+            report
+                .skipped_conflicts
+                .push(format!("{instance_id}: ADB disabled"));
+            continue;
+        }
+        for package in packages {
+            let inventory = android_packages(&instance_id)?;
+            let Some(info) = inventory.packages.iter().find(|info| info.package == package) else {
+                report.skipped_conflicts.push(format!("{instance_id}:{package}"));
+                continue;
+            };
+            if info.disabled {
+                let _ = run_adb(
+                    &provider,
+                    &instance,
+                    &["shell", "pm", "enable", &package],
+                )?;
+            }
+            report
+                .restored_android_packages
+                .push(format!("{instance_id}:{package}"));
+            if let Some(recorded) = journal.disabled_android_packages.get_mut(&instance_id) {
+                recorded.retain(|item| item != &package);
+            }
+            save_cleanup_journal(&journal);
+        }
+    }
+    journal
+        .disabled_android_packages
+        .retain(|_, packages| !packages.is_empty());
+    save_cleanup_journal(&journal);
+
+    report.manual_reinstall_components = journal
+        .removed_components
+        .iter()
+        .map(|record| record.display_name.clone())
+        .collect();
+
+    if journal.is_empty() {
+        Config::set_option(OPTION_CLEANUP_JOURNAL.to_owned(), String::new());
+        Config::set_option(OPTION_CLEANUP_VERSION.to_owned(), String::new());
+        Config::set_option(OPTION_CLEANUP_SELECTION.to_owned(), String::new());
+    }
+    Ok(report)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -632,6 +2155,354 @@ bst.status.hypervisor="hyperv"
     }
 
     #[test]
+    fn standard_and_clean_gaming_profiles_select_only_reversible_cleanup() {
+        let standard = CleanupSelection::for_profile(CleanupProfile::Standard);
+        assert!(standard.disable_gameplay_ads);
+        assert!(standard.disable_smart_downloads);
+        assert!(standard.disable_store_on_start);
+        assert!(!standard.disable_desktop_notifications);
+        assert!(!standard.disable_optional_startup);
+        assert!(!standard.hide_desktop_shortcuts);
+
+        let clean = CleanupSelection::for_profile(CleanupProfile::CleanGaming);
+        assert!(clean.disable_gameplay_ads);
+        assert!(clean.disable_smart_downloads);
+        assert!(clean.disable_store_on_start);
+        assert!(clean.disable_desktop_notifications);
+        assert!(clean.disable_app_shortcuts);
+        assert!(clean.disable_optional_startup);
+        assert!(clean.hide_desktop_shortcuts);
+        assert!(!clean.remove_optional_components);
+        assert!(!clean.disable_optional_android_apps);
+    }
+
+    #[test]
+    fn config_editor_changes_only_keys_present_in_current_release() {
+        let mut document = BlueStacksConfigDocument::parse(CURRENT_CONF).unwrap();
+
+        assert!(document.set_existing("bst.enable_programmatic_ads", "0"));
+        assert!(!document.set_existing("bst.feature.future_setting", "0"));
+        assert_eq!(document.get("bst.enable_programmatic_ads"), Some("0"));
+        assert!(!document.render().contains("bst.feature.future_setting"));
+        assert!(document.render().contains("bst.enable_programmatic_ads=\"0\""));
+    }
+
+    #[test]
+    fn cleanup_journal_preserves_first_original_value_across_reapply() {
+        let mut journal = CleanupJournal::default();
+        journal.record_config_change("bst.enable_programmatic_ads", "1", "0");
+        journal.record_config_change("bst.enable_programmatic_ads", "9", "0");
+
+        assert_eq!(journal.config_changes.len(), 1);
+        assert_eq!(journal.config_changes[0].original_value, "1");
+        assert_eq!(journal.config_changes[0].applied_value, "0");
+    }
+
+    #[test]
+    fn startup_journal_keeps_same_run_value_from_distinct_registry_views() {
+        let mut journal = CleanupJournal::default();
+        let entry = |registry_view: &str| BlueStacksStartupEntry {
+            id: format!("HKLM|{registry_view}|{WINDOWS_RUN_KEY}|BlueStacks X"),
+            hive: "HKLM".to_owned(),
+            key_path: WINDOWS_RUN_KEY.to_owned(),
+            registry_view: registry_view.to_owned(),
+            value_name: "BlueStacks X".to_owned(),
+            command: r#""C:\Program Files (x86)\BlueStacks X\BlueStacks X.exe" --hidden"#.to_owned(),
+            classification: ComponentClassification::PromotionalFrontend,
+            safe_to_disable: true,
+        };
+
+        journal.record_startup_change(&entry("32"));
+        journal.record_startup_change(&entry("64"));
+        journal.record_startup_change(&entry("64"));
+
+        assert_eq!(journal.startup_changes.len(), 2);
+        assert!(journal.startup_changes.iter().any(|change| change.registry_view == "32"));
+        assert!(journal.startup_changes.iter().any(|change| change.registry_view == "64"));
+    }
+
+    #[test]
+    fn restore_skips_config_value_changed_manually_after_cleanup() {
+        let raw = "bst.enable_programmatic_ads=\"2\"\nbst.enable_smart_downloads=\"0\"\n";
+        let mut document = BlueStacksConfigDocument::parse(raw).unwrap();
+        let journal = CleanupJournal {
+            config_changes: vec![
+                ConfigChange::new("bst.enable_programmatic_ads", "1", "0"),
+                ConfigChange::new("bst.enable_smart_downloads", "1", "0"),
+            ],
+            ..Default::default()
+        };
+
+        let report = restore_config_changes(&mut document, &journal);
+
+        assert_eq!(report.restored, vec!["bst.enable_smart_downloads"]);
+        assert_eq!(report.skipped_conflicts, vec!["bst.enable_programmatic_ads"]);
+        assert_eq!(document.get("bst.enable_programmatic_ads"), Some("2"));
+        assert_eq!(document.get("bst.enable_smart_downloads"), Some("1"));
+    }
+
+    #[test]
+    fn clean_gaming_applies_supported_user_settings_but_not_feature_flags() {
+        let raw = format!(
+            "{}bst.create_desktop_shortcuts=\"1\"\nbst.feature.programmatic_ads=\"1\"\n",
+            CURRENT_CONF
+        );
+        let mut document = BlueStacksConfigDocument::parse(&raw).unwrap();
+        let mut journal = CleanupJournal::default();
+        let changed = apply_config_cleanup(
+            &mut document,
+            &CleanupSelection::for_profile(CleanupProfile::CleanGaming),
+            &mut journal,
+        );
+
+        assert!(changed.contains(&"bst.enable_programmatic_ads".to_owned()));
+        assert!(changed.contains(&"bst.launch_store_on_boot".to_owned()));
+        assert!(changed.contains(&"bst.create_desktop_shortcuts".to_owned()));
+        assert!(changed.contains(&"bst.instance.Nougat32.enable_notifications".to_owned()));
+        assert_eq!(document.get("bst.feature.programmatic_ads"), Some("1"));
+        assert!(!journal.config_changes.is_empty());
+    }
+
+    #[test]
+    fn classifies_bluestacks_components_conservatively() {
+        assert_eq!(
+            classify_component("BlueStacks"),
+            ComponentClassification::Required
+        );
+        assert_eq!(
+            classify_component("BlueStacks 5"),
+            ComponentClassification::Required
+        );
+        assert_eq!(
+            classify_component("BlueStacks Services"),
+            ComponentClassification::FeatureSpecific
+        );
+        assert_eq!(
+            classify_component("BlueStacks X"),
+            ComponentClassification::PromotionalFrontend
+        );
+        assert_eq!(
+            classify_component("BlueStacks AI"),
+            ComponentClassification::Optional
+        );
+        assert_eq!(
+            classify_component("BlueStacks Future Helper"),
+            ComponentClassification::Unknown
+        );
+    }
+
+    #[test]
+    fn protects_bluestacks_hypervisor_and_runtime_services() {
+        assert_eq!(
+            classify_service(
+                "BlueStacksDrv_nxt",
+                "BlueStacks Hypervisor_nxt",
+                r"\??\C:\Program Files\BlueStacks_nxt\BstkDrv_nxt.sys",
+            ),
+            ComponentClassification::Required
+        );
+        assert_eq!(
+            classify_service("BstkSVC", "BlueStacks Service", r"C:\BlueStacks\BstkSVC.exe"),
+            ComponentClassification::Required
+        );
+        assert_eq!(
+            classify_service("FutureSvc", "Future helper", r"C:\Future\helper.exe"),
+            ComponentClassification::Unknown
+        );
+    }
+
+    #[test]
+    fn android_cleanup_protects_core_and_only_allows_known_promotional_package() {
+        for package in [
+            "android",
+            "com.android.vending",
+            "com.google.android.gms",
+            "com.google.android.webview",
+            "com.bluestacks.settings",
+            "com.bst.instance",
+        ] {
+            assert!(matches!(
+                classify_android_package(package, false),
+                AndroidPackageClassification::ProtectedSystem
+                    | AndroidPackageClassification::ProtectedGoogle
+                    | AndroidPackageClassification::ProtectedBlueStacks
+            ));
+            assert!(validate_android_disable(package, false).is_err());
+        }
+
+        assert_eq!(
+            classify_android_package("com.uncube.gamevantage", true),
+            AndroidPackageClassification::OptionalPromotional
+        );
+        assert!(validate_android_disable("com.uncube.gamevantage", true).is_ok());
+        assert_eq!(
+            classify_android_package("com.example.usergame", true),
+            AndroidPackageClassification::UserInstalled
+        );
+        assert!(validate_android_disable("com.example.usergame", true).is_err());
+        assert_eq!(
+            classify_android_package("com.vendor.unknownsystem", false),
+            AndroidPackageClassification::Unknown
+        );
+    }
+
+    #[test]
+    fn version_change_requests_reapply_without_blocking_update() {
+        assert!(!cleanup_needs_reapply("5.22.280.1026", "5.22.280.1026"));
+        assert!(cleanup_needs_reapply("5.22.280.1026", "5.22.300.1000"));
+        assert!(!cleanup_needs_reapply("", "5.22.300.1000"));
+    }
+
+    #[test]
+    fn only_known_optional_startup_helpers_are_safe_to_disable() {
+        let services = classify_startup_entry(
+            "electron.app.BlueStacks Services",
+            r#""C:\Users\me\bluestacks-services\BlueStacksServices.exe" --hidden"#,
+        );
+        assert_eq!(services.classification, ComponentClassification::FeatureSpecific);
+        assert!(services.safe_to_disable);
+
+        let x = classify_startup_entry(
+            "BlueStacks X",
+            r#""C:\Program Files (x86)\BlueStacks X\BlueStacks X.exe" --hidden"#,
+        );
+        assert_eq!(x.classification, ComponentClassification::PromotionalFrontend);
+        assert!(x.safe_to_disable);
+
+        let updater = classify_startup_entry(
+            "BlueStacks Updater",
+            r#""C:\Program Files\BlueStacks_nxt\BlueStacksUpdater.exe""#,
+        );
+        assert!(!updater.safe_to_disable);
+    }
+
+    #[test]
+    fn shortcut_disable_is_idempotent_and_restore_refuses_conflict() {
+        let dir = temp_dir("shortcut-journal");
+        fs::create_dir_all(&dir).unwrap();
+        let shortcut = dir.join("BlueStacks 5.lnk");
+        fs::write(&shortcut, b"shortcut").unwrap();
+        let mut journal = CleanupJournal::default();
+
+        let disabled = disable_shortcut(&shortcut, &mut journal).unwrap();
+        assert!(disabled);
+        assert!(!shortcut.exists());
+        assert_eq!(journal.shortcut_changes.len(), 1);
+        assert!(!disable_shortcut(&shortcut, &mut journal).unwrap());
+        assert_eq!(journal.shortcut_changes.len(), 1);
+
+        fs::write(&shortcut, b"user replacement").unwrap();
+        let report = restore_shortcut_changes(&mut journal).unwrap();
+        assert!(report.restored.is_empty());
+        assert_eq!(report.skipped_conflicts.len(), 1);
+        assert_eq!(journal.shortcut_changes.len(), 1);
+        assert_eq!(fs::read(&shortcut).unwrap(), b"user replacement");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shortcut_restore_reverses_only_our_hidden_file() {
+        let dir = temp_dir("shortcut-restore");
+        fs::create_dir_all(&dir).unwrap();
+        let shortcut = dir.join("BlueStacks Manager.lnk");
+        fs::write(&shortcut, b"shortcut").unwrap();
+        let mut journal = CleanupJournal::default();
+
+        assert!(disable_shortcut(&shortcut, &mut journal).unwrap());
+        let report = restore_shortcut_changes(&mut journal).unwrap();
+
+        assert_eq!(report.restored.len(), 1);
+        assert!(report.skipped_conflicts.is_empty());
+        assert!(shortcut.exists());
+        assert!(journal.shortcut_changes.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parses_adb_package_lists_without_accepting_noise() {
+        let packages = parse_package_list(
+            "package:com.android.vending\r\npackage:com.uncube.gamevantage\r\nerror: ignored\r\n",
+        );
+        assert_eq!(
+            packages,
+            BTreeSet::from([
+                "com.android.vending".to_owned(),
+                "com.uncube.gamevantage".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn cleanup_journal_and_default_apps_round_trip_json() {
+        let mut journal = CleanupJournal::default();
+        journal.record_config_change("bst.enable_programmatic_ads", "1", "0");
+        journal
+            .disabled_android_packages
+            .insert("Nougat32".to_owned(), vec!["com.uncube.gamevantage".to_owned()]);
+        let encoded = serde_json::to_string(&journal).unwrap();
+        let decoded: CleanupJournal = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, journal);
+
+        let mut apps = DefaultApps::default();
+        apps.set("Nougat32", "com.nexon.maplem.global").unwrap();
+        assert_eq!(apps.get("Nougat32"), Some("com.nexon.maplem.global"));
+        assert!(apps.set("Nougat32", "bad package & calc").is_err());
+    }
+
+    #[test]
+    fn parses_registered_uninstaller_without_shell_interpretation() {
+        let (program, args) = parse_registered_uninstall_command(
+            r#""C:\Program Files (x86)\BlueStacks X\Uninstall.exe" --uninstall --silent"#,
+        )
+        .unwrap();
+        assert_eq!(program, PathBuf::from(r"C:\Program Files (x86)\BlueStacks X\Uninstall.exe"));
+        assert_eq!(args, vec!["--uninstall", "--silent"]);
+        assert!(parse_registered_uninstall_command("cmd.exe /c del C:\\important").is_err());
+        assert!(parse_registered_uninstall_command(
+            r#""C:\Program Files\BlueStacks\Uninstall.exe" & calc.exe"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn component_uninstall_guard_rejects_required_and_unknown_components() {
+        let component = |classification| BlueStacksComponent {
+            id: "test".to_owned(),
+            display_name: "Test".to_owned(),
+            version: String::new(),
+            install_location: String::new(),
+            classification,
+            can_remove: true,
+            uninstall_command: r#""C:\Temp\uninstall.exe""#.to_owned(),
+        };
+        assert!(validate_component_removal(&component(ComponentClassification::Required)).is_err());
+        assert!(validate_component_removal(&component(ComponentClassification::Unknown)).is_err());
+        assert!(validate_component_removal(&component(ComponentClassification::Optional)).is_ok());
+        assert!(validate_component_removal(&component(ComponentClassification::PromotionalFrontend)).is_ok());
+    }
+
+    #[test]
+    fn detects_bluestacks_x_only_when_player_and_vendor_uninstaller_are_present() {
+        let dir = temp_dir("bluestacks-x");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("BlueStacks X.exe"), b"").unwrap();
+        assert!(bluestacks_x_component_from_dir(&dir).is_none());
+
+        fs::write(dir.join("BlueStacksXUninstaller.exe"), b"").unwrap();
+        let component = bluestacks_x_component_from_dir(&dir).unwrap();
+        assert_eq!(component.display_name, "BlueStacks X");
+        assert_eq!(
+            component.classification,
+            ComponentClassification::PromotionalFrontend
+        );
+        assert!(component.can_remove);
+        assert!(component
+            .uninstall_command
+            .contains("BlueStacksXUninstaller.exe"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires a local BlueStacks 5 installation; read-only"]
     fn detects_and_discovers_real_local_bluestacks_installation() {
         let provider = BlueStacksProvider::detect()
@@ -651,6 +2522,29 @@ bst.status.hypervisor="hyperv"
                 target.capabilities
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires a local BlueStacks 5 installation; read-only"]
+    fn inventories_real_local_bluestacks_management_surfaces() {
+        let provider = BlueStacksProvider::detect()
+            .unwrap()
+            .expect("BlueStacks 5 should be installed");
+        let components = enumerate_components();
+        let startup = enumerate_startup_entries();
+        let shortcuts = enumerate_shortcuts();
+        let services = enumerate_services();
+
+        println!("BlueStacks {}", provider.installation.version);
+        println!("components={components:#?}");
+        println!("startup={startup:#?}");
+        println!("shortcuts={shortcuts:#?}");
+        println!("services={services:#?}");
+
+        assert!(components.iter().any(|component| {
+            component.classification == ComponentClassification::Required
+        }));
+        assert!(shortcuts.iter().any(|shortcut| shortcut.name.eq_ignore_ascii_case("BlueStacks 5.lnk")));
     }
 
     fn temp_dir(suffix: &str) -> PathBuf {
