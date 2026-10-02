@@ -667,6 +667,26 @@ class BlueStacksModel with ChangeNotifier {
   String _actionSummary(String action, Map<String, dynamic> data) {
     switch (action) {
       case 'apply_profile':
+        final report = _asMap(data['report']);
+        final skipped = _asList(report['skipped_actions'])
+            .map(_asMap)
+            .where((item) => _asString(item['target']).isNotEmpty)
+            .toList(growable: false);
+        if (skipped.isNotEmpty) {
+          final adminTargets = skipped
+              .where((item) => _asBool(item['requires_admin']))
+              .map((item) => _asString(item['target']))
+              .toList(growable: false);
+          final targets = skipped
+              .map((item) => _asString(item['target']))
+              .take(3)
+              .join(', ');
+          final more = skipped.length > 3 ? ', …' : '';
+          if (adminTargets.isNotEmpty) {
+            return 'BlueStacks cleanup settings applied, but some items were left unchanged because administrator access is required: $targets$more';
+          }
+          return 'BlueStacks cleanup settings applied, but some items were left unchanged: $targets$more';
+        }
         return 'BlueStacks cleanup settings applied.';
       case 'restore':
         final report = _asMap(data['report']);

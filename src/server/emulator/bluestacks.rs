@@ -537,6 +537,45 @@ fn disable_shortcut(path: &Path, journal: &mut CleanupJournal) -> ResultType<boo
     Ok(true)
 }
 
+fn apply_recommended_shortcut_cleanup(
+    shortcuts: Vec<BlueStacksShortcut>,
+    journal: &mut CleanupJournal,
+    report: &mut CleanupApplyReport,
+) -> ResultType<()> {
+    for shortcut in shortcuts
+        .into_iter()
+        .filter(|shortcut| shortcut.recommended_cleanup)
+    {
+        let path = PathBuf::from(&shortcut.path);
+        match disable_shortcut(&path, journal) {
+            Ok(true) => {
+                report.hidden_shortcuts.push(shortcut.path.clone());
+                save_cleanup_journal(journal);
+                log::info!("BlueStacks cleanup hid desktop shortcut {}", shortcut.path);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let requires_admin = error
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(std::io::Error::raw_os_error)
+                    == Some(5);
+                log::warn!(
+                    "BlueStacks cleanup skipped desktop shortcut {}: {}",
+                    shortcut.path,
+                    error
+                );
+                report.skipped_actions.push(CleanupSkippedAction {
+                    action: "hide_desktop_shortcut".to_owned(),
+                    target: shortcut.path,
+                    error: error.to_string(),
+                    requires_admin,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn restore_shortcut_changes(journal: &mut CleanupJournal) -> ResultType<RestorePathReport> {
     let mut report = RestorePathReport::default();
     let mut retained = Vec::new();
@@ -658,10 +697,19 @@ pub struct AndroidPackageInventory {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CleanupSkippedAction {
+    pub action: String,
+    pub target: String,
+    pub error: String,
+    pub requires_admin: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CleanupApplyReport {
     pub changed_config_keys: Vec<String>,
     pub disabled_startup_entries: Vec<String>,
     pub hidden_shortcuts: Vec<String>,
+    pub skipped_actions: Vec<CleanupSkippedAction>,
     pub version: String,
 }
 
@@ -1894,17 +1942,7 @@ pub fn apply_cleanup(selection: CleanupSelection) -> ResultType<CleanupApplyRepo
     }
 
     if selection.hide_desktop_shortcuts {
-        for shortcut in enumerate_shortcuts()
-            .into_iter()
-            .filter(|shortcut| shortcut.recommended_cleanup)
-        {
-            let path = PathBuf::from(&shortcut.path);
-            if disable_shortcut(&path, &mut journal)? {
-                report.hidden_shortcuts.push(shortcut.path.clone());
-                save_cleanup_journal(&journal);
-                log::info!("BlueStacks cleanup hid desktop shortcut {}", shortcut.path);
-            }
-        }
+        apply_recommended_shortcut_cleanup(enumerate_shortcuts(), &mut journal, &mut report)?;
     }
 
     Config::set_option(
@@ -3007,6 +3045,58 @@ bst.status.hypervisor="hyperv"
         assert!(shortcut.exists());
         assert!(journal.shortcut_changes.is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shortcut_cleanup_skips_a_failed_rename_and_continues() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = temp_dir("shortcut-partial");
+        fs::create_dir_all(&dir).unwrap();
+        let blocked = dir.join("BlueStacks 5.lnk");
+        let writable = dir.join("BlueStacks Manager.lnk");
+        fs::write(&blocked, b"blocked shortcut").unwrap();
+        fs::write(&writable, b"writable shortcut").unwrap();
+
+        // Deny delete sharing so Windows rejects the first rename. This gives
+        // the cleanup loop a deterministic per-item filesystem failure.
+        let lock = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&blocked)
+            .unwrap();
+        let shortcuts = vec![
+            BlueStacksShortcut {
+                path: blocked.to_string_lossy().into_owned(),
+                name: "BlueStacks 5.lnk".to_owned(),
+                location: ShortcutLocation::Desktop,
+                recommended_cleanup: true,
+            },
+            BlueStacksShortcut {
+                path: writable.to_string_lossy().into_owned(),
+                name: "BlueStacks Manager.lnk".to_owned(),
+                location: ShortcutLocation::Desktop,
+                recommended_cleanup: true,
+            },
+        ];
+        let mut journal = CleanupJournal::default();
+        let mut report = CleanupApplyReport::default();
+
+        let result = apply_recommended_shortcut_cleanup(shortcuts, &mut journal, &mut report);
+        let writable_hidden = disabled_shortcut_path(&writable).exists();
+        let report_json = serde_json::to_value(&report).unwrap();
+        drop(lock);
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(result.is_ok(), "one shortcut failure should not abort cleanup");
+        assert!(writable_hidden, "cleanup should continue to later shortcuts");
+        assert_eq!(journal.shortcut_changes.len(), 1);
+        assert_eq!(report.hidden_shortcuts.len(), 1);
+        assert_eq!(
+            report_json["skipped_actions"][0]["target"],
+            blocked.to_string_lossy().as_ref()
+        );
     }
 
     #[test]

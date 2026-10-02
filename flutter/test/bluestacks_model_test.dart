@@ -176,4 +176,32 @@ void main() {
 
     expect(model.lastActionMessage, contains('Nougat32: ADB disabled'));
   });
+
+  test('cleanup summary surfaces skipped actions that require admin', () async {
+    final model = BlueStacksModel(
+      inventoryReader: () async => '{"ok":true,"inventory":{}}',
+      actionSender: (_) async {},
+    );
+
+    await model.applyProfile();
+    await model.handleActionResult({
+      'ok': true,
+      'action': 'apply_profile',
+      'data': {
+        'report': {
+          'skipped_actions': [
+            {
+              'action': 'hide_desktop_shortcut',
+              'target': r'C:\Users\Public\Desktop\BlueStacks 5.lnk',
+              'error': 'Access is denied. (os error 5)',
+              'requires_admin': true,
+            }
+          ],
+        },
+      },
+    });
+
+    expect(model.lastActionMessage, contains('administrator'));
+    expect(model.lastActionMessage, contains('BlueStacks 5.lnk'));
+  });
 }
