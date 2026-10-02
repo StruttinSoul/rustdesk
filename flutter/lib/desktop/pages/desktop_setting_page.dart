@@ -3016,6 +3016,27 @@ class _BlueStacksSettingsState extends State<_BlueStacksSettings> {
             ),
         ],
       ).marginOnly(top: 8),
+      if (_model.actionPending)
+        _statusLine(
+          context,
+          Icons.sync,
+          'Applying BlueStacks changes…',
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      if (!_model.actionPending && _model.lastActionMessage.isNotEmpty)
+        _statusLine(
+          context,
+          Icons.check_circle_outline,
+          _model.lastActionMessage,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      if (!_model.actionPending && _model.error.isNotEmpty)
+        _statusLine(
+          context,
+          Icons.error_outline,
+          _model.error,
+          color: Theme.of(context).colorScheme.error,
+        ),
       _statusLine(
         context,
         Icons.shield_outlined,
