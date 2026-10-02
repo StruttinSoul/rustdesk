@@ -301,6 +301,7 @@ fn restore_config_changes(
             }
             Some(current) if current == change.original_value => {
                 // Already restored outside this tool; no action required.
+                report.restored.push(change.key.clone());
             }
             Some(_) => report.skipped_conflicts.push(change.key.clone()),
             None => report.skipped_conflicts.push(change.key.clone()),
@@ -465,6 +466,12 @@ fn classify_startup_entry(name: &str, command: &str) -> StartupEntryClassificati
         return StartupEntryClassification {
             classification: ComponentClassification::Required,
             safe_to_disable: false,
+        };
+    }
+    if combined.contains("hd-player.exe") && combined.contains("bluestacks") {
+        return StartupEntryClassification {
+            classification: ComponentClassification::FeatureSpecific,
+            safe_to_disable: true,
         };
     }
     if combined.contains("bluestacks services") || combined.contains("bluestacksservices") {
@@ -1600,6 +1607,28 @@ fn android_package_inventory_unavailable_reason(
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AndroidRestorePreparation {
+    Ready,
+    StartAndWait,
+}
+
+fn android_restore_preparation(
+    instance: &BlueStacksInstanceInfo,
+) -> ResultType<AndroidRestorePreparation> {
+    if !instance.adb_enabled {
+        bail!("ADB is disabled")
+    }
+    if instance.adb_port.is_none() {
+        bail!("ADB port is unavailable")
+    }
+    Ok(if instance.running {
+        AndroidRestorePreparation::Ready
+    } else {
+        AndroidRestorePreparation::StartAndWait
+    })
+}
+
 pub fn android_packages(instance_id: &str) -> ResultType<AndroidPackageInventory> {
     let provider = BlueStacksProvider::detect()?
         .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
@@ -1841,8 +1870,11 @@ pub fn apply_cleanup(selection: CleanupSelection) -> ResultType<CleanupApplyRepo
     let mut document = provider.read_config()?;
     report.changed_config_keys = apply_config_cleanup(&mut document, &selection, &mut journal);
     if !report.changed_config_keys.is_empty() {
-        write_config_document(&provider.installation.config_path, &document)?;
+        // Persist the restore record before touching BlueStacks' config. If the
+        // atomic swap fails at any point, restore can safely resolve entries
+        // that are still at their original values instead of losing history.
         save_cleanup_journal(&journal);
+        write_config_document(&provider.installation.config_path, &document)?;
         for key in &report.changed_config_keys {
             log::info!("BlueStacks cleanup changed config key {key}");
         }
@@ -1886,10 +1918,21 @@ pub fn apply_cleanup(selection: CleanupSelection) -> ResultType<CleanupApplyRepo
     Ok(report)
 }
 
+fn validate_restore_runtime_state(
+    journal: &CleanupJournal,
+    instances: &[BlueStacksInstanceInfo],
+) -> ResultType<()> {
+    if !journal.config_changes.is_empty() && instances.iter().any(|instance| instance.running) {
+        bail!("stop all BlueStacks instances before restoring BlueStacks configuration")
+    }
+    Ok(())
+}
+
 pub fn restore_cleanup() -> ResultType<CleanupRestoreReport> {
     let provider = BlueStacksProvider::detect()?
         .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
     let mut journal = load_cleanup_journal();
+    validate_restore_runtime_state(&journal, &provider.instances()?)?;
     let mut report = CleanupRestoreReport::default();
 
     if !journal.config_changes.is_empty() {
@@ -1925,17 +1968,38 @@ pub fn restore_cleanup() -> ResultType<CleanupRestoreReport> {
 
     let disabled_snapshot = journal.disabled_android_packages.clone();
     for (instance_id, packages) in disabled_snapshot {
-        let Ok(instance) = find_instance(&provider, &instance_id) else {
+        let Ok(mut instance) = find_instance(&provider, &instance_id) else {
             report
                 .skipped_conflicts
                 .push(format!("{instance_id}: Android instance missing"));
             continue;
         };
-        if !instance.adb_enabled {
-            report
-                .skipped_conflicts
-                .push(format!("{instance_id}: ADB disabled"));
-            continue;
+        let preparation = match android_restore_preparation(&instance) {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                report
+                    .skipped_conflicts
+                    .push(format!("{instance_id}: {error}"));
+                continue;
+            }
+        };
+        if preparation == AndroidRestorePreparation::StartAndWait {
+            let target = instance_to_target(&instance);
+            if let Err(error) = provider.start(&target) {
+                report
+                    .skipped_conflicts
+                    .push(format!("{instance_id}: failed to start for Android restore: {error}"));
+                continue;
+            }
+            match wait_for_android_ready(&provider, &instance_id, DEFAULT_LAUNCH_TIMEOUT) {
+                Ok(ready) => instance = ready,
+                Err(error) => {
+                    report.skipped_conflicts.push(format!(
+                        "{instance_id}: Android did not become ready for restore: {error}"
+                    ));
+                    continue;
+                }
+            }
         }
         for package in packages {
             let inventory = android_packages(&instance_id)?;
@@ -2691,6 +2755,77 @@ bst.status.hypervisor="hyperv"
     }
 
     #[test]
+    fn restore_treats_config_already_back_at_original_as_resolved() {
+        let mut document =
+            BlueStacksConfigDocument::parse("bst.enable_programmatic_ads=\"1\"\n").unwrap();
+        let journal = CleanupJournal {
+            config_changes: vec![ConfigChange::new(
+                "bst.enable_programmatic_ads",
+                "1",
+                "0",
+            )],
+            ..Default::default()
+        };
+
+        let report = restore_config_changes(&mut document, &journal);
+
+        assert_eq!(report.restored, vec!["bst.enable_programmatic_ads"]);
+        assert!(report.skipped_conflicts.is_empty());
+        assert_eq!(document.get("bst.enable_programmatic_ads"), Some("1"));
+    }
+
+    #[test]
+    fn android_restore_preparation_starts_only_stopped_adb_instances() {
+        let raw = CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
+        let document = BlueStacksConfigDocument::parse(&raw).unwrap();
+        let stopped = instances_from_config(&document, &[]).remove(0);
+        assert_eq!(
+            android_restore_preparation(&stopped).unwrap(),
+            AndroidRestorePreparation::StartAndWait
+        );
+
+        let running_commands = vec![vec![
+            "HD-Player.exe".to_owned(),
+            "--instance".to_owned(),
+            "Nougat32".to_owned(),
+        ]];
+        let running = instances_from_config(&document, &running_commands).remove(0);
+        assert_eq!(
+            android_restore_preparation(&running).unwrap(),
+            AndroidRestorePreparation::Ready
+        );
+
+        let adb_disabled = instances_from_config(
+            &BlueStacksConfigDocument::parse(CURRENT_CONF).unwrap(),
+            &[],
+        )
+        .remove(0);
+        assert!(android_restore_preparation(&adb_disabled).is_err());
+    }
+
+    #[test]
+    fn config_restore_refuses_to_run_while_an_instance_is_running() {
+        let document = BlueStacksConfigDocument::parse(CURRENT_CONF).unwrap();
+        let running_commands = vec![vec![
+            "HD-Player.exe".to_owned(),
+            "--instance".to_owned(),
+            "Nougat32".to_owned(),
+        ]];
+        let running = instances_from_config(&document, &running_commands);
+        let journal = CleanupJournal {
+            config_changes: vec![ConfigChange::new(
+                "bst.enable_programmatic_ads",
+                "1",
+                "0",
+            )],
+            ..Default::default()
+        };
+
+        assert!(validate_restore_runtime_state(&journal, &running).is_err());
+        assert!(validate_restore_runtime_state(&CleanupJournal::default(), &running).is_ok());
+    }
+
+    #[test]
     fn clean_gaming_applies_supported_user_settings_but_not_feature_flags() {
         let raw = format!(
             "{}bst.create_desktop_shortcuts=\"1\"\nbst.feature.programmatic_ads=\"1\"\n",
@@ -2817,6 +2952,13 @@ bst.status.hypervisor="hyperv"
         );
         assert_eq!(x.classification, ComponentClassification::PromotionalFrontend);
         assert!(x.safe_to_disable);
+
+        let player = classify_startup_entry(
+            "BlueStacks 5",
+            r#""C:\Program Files\BlueStacks_nxt\HD-Player.exe" --instance Nougat32"#,
+        );
+        assert_eq!(player.classification, ComponentClassification::FeatureSpecific);
+        assert!(player.safe_to_disable);
 
         let updater = classify_startup_entry(
             "BlueStacks Updater",

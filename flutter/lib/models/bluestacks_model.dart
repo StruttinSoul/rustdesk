@@ -671,6 +671,18 @@ class BlueStacksModel with ChangeNotifier {
       case 'restore':
         final report = _asMap(data['report']);
         final manual = _asList(report['manual_reinstall_components']);
+        final skipped = _asList(report['skipped_conflicts'])
+            .map(_asString)
+            .where((item) => item.isNotEmpty)
+            .toList(growable: false);
+        if (skipped.isNotEmpty) {
+          final details = skipped.take(3).join(', ');
+          final more = skipped.length > 3 ? ', …' : '';
+          final reinstall = manual.isNotEmpty
+              ? ' Removed optional components still require manual reinstall.'
+              : '';
+          return 'BlueStacks restore completed with unresolved items: $details$more.$reinstall';
+        }
         if (manual.isNotEmpty) {
           return 'Settings restored. Reinstall removed optional components manually if you want them back.';
         }

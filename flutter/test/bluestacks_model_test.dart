@@ -155,4 +155,25 @@ void main() {
     expect(sent.last['action'], 'disable_optional_android_package');
     expect(sent.last['confirmed'], isTrue);
   });
+
+  test('restore summary surfaces skipped conflicts', () async {
+    final model = BlueStacksModel(
+      inventoryReader: () async => '{"ok":true,"inventory":{}}',
+      actionSender: (_) async {},
+    );
+
+    await model.restore();
+    await model.handleActionResult({
+      'ok': true,
+      'action': 'restore',
+      'data': {
+        'report': {
+          'skipped_conflicts': ['Nougat32: ADB disabled'],
+          'manual_reinstall_components': <String>[],
+        },
+      },
+    });
+
+    expect(model.lastActionMessage, contains('Nougat32: ADB disabled'));
+  });
 }
