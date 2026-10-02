@@ -536,6 +536,48 @@ void main() {
 
     expect(model.approvalsFor('thr_1'), isEmpty);
   });
+
+  test('opens Windows Codex app when native attachment is unavailable',
+      () async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+
+    await model.listThreads();
+    final listRequestId = sent.single.value;
+    model.handleResponse({
+      'type': 'error',
+      'request_id': listRequestId,
+      'thread_id': '',
+      'message': 'Codex app-server is unavailable',
+    });
+    expect(model.error, contains('unavailable'));
+
+    final handoff = model.openWindowsApp();
+    final request = sent.last;
+    expect(request.key, 'codex-open-windows-app');
+    final payload = jsonDecode(request.value);
+    expect(payload['thread_id'], '');
+
+    var completed = false;
+    handoff.then((_) => completed = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(completed, isFalse);
+
+    model.handleControlResponse({
+      'type': 'result',
+      'request_id': payload['request_id'],
+      'action': 'windows_app_opened',
+      'thread_id': '',
+      'turn_id': '',
+      'state': 'ready',
+    });
+
+    expect(await handoff, isTrue);
+    expect(model.error, isEmpty);
+  });
 }
 
 Map<String, dynamic> _item(String id, String kind, String text) => {

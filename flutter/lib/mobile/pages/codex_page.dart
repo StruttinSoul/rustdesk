@@ -20,6 +20,25 @@ class _CodexPageState extends State<CodexPage> {
     unawaited(widget.model.listThreads());
   }
 
+  Future<void> _openWindowsApp() async {
+    final opened = await widget.model.openWindowsApp();
+    if (!mounted || !opened) return;
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _openThread(CodexThread thread) async {
+    final opened = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => CodexThreadPage(
+          model: widget.model,
+          thread: thread,
+        ),
+      ),
+    );
+    if (!mounted || opened != true) return;
+    Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -74,6 +93,8 @@ class _CodexPageState extends State<CodexPage> {
         message: model.error,
         actionLabel: 'Retry',
         onAction: () => unawaited(model.listThreads()),
+        secondaryActionLabel: 'OPEN WINDOWS APP',
+        onSecondaryAction: () => unawaited(_openWindowsApp()),
       );
     }
 
@@ -109,16 +130,7 @@ class _CodexPageState extends State<CodexPage> {
                       final thread = model.threads[index];
                       return _CodexThreadTile(
                         thread: thread,
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => CodexThreadPage(
-                                model: model,
-                                thread: thread,
-                              ),
-                            ),
-                          );
-                        },
+                        onTap: () => unawaited(_openThread(thread)),
                       );
                     },
                   ),
@@ -260,6 +272,12 @@ class _CodexThreadPageState extends State<CodexThreadPage> {
     });
   }
 
+  Future<void> _openWindowsApp() async {
+    final opened = await widget.model.openWindowsApp(widget.thread.id);
+    if (!mounted || !opened) return;
+    Navigator.of(context).pop(true);
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -383,6 +401,7 @@ class _CodexThreadPageState extends State<CodexThreadPage> {
           model: model,
           thread: thread,
           controller: _composerController,
+          onOpenWindowsApp: () => unawaited(_openWindowsApp()),
         ),
       ],
     );
@@ -483,38 +502,78 @@ class _ThreadControls extends StatelessWidget {
     required this.model,
     required this.thread,
     required this.controller,
+    required this.onOpenWindowsApp,
   });
 
   final CodexModel model;
   final CodexThread thread;
   final TextEditingController controller;
+  final VoidCallback onOpenWindowsApp;
 
   @override
   Widget build(BuildContext context) {
-    if (!model.hasInteractiveControl) return const SizedBox.shrink();
-
     final theme = Theme.of(context);
     final pending = model.isControlPending(thread.id);
+    final handoffPending = model.isWindowsAppHandoffPending(thread.id);
+    final handoffButton = SizedBox(
+      width: double.infinity,
+      height: 48,
+      child: OutlinedButton.icon(
+        onPressed: pending ? null : onOpenWindowsApp,
+        icon: handoffPending
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.open_in_new),
+        label: const Text('OPEN WINDOWS APP'),
+      ),
+    );
+
+    if (!model.hasInteractiveControl) {
+      return Material(
+        color: theme.colorScheme.surfaceContainerLow,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            child: handoffButton,
+          ),
+        ),
+      );
+    }
+
     if (model.needsNativeResume(thread.id)) {
-      return SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-          child: SizedBox(
-            width: double.infinity,
-            height: 48,
-            child: FilledButton.icon(
-              onPressed: pending
-                  ? null
-                  : () => unawaited(model.resumeThread(thread.id)),
-              icon: pending
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.play_arrow_outlined),
-              label: const Text('RESUME NATIVELY'),
+      return Material(
+        color: theme.colorScheme.surfaceContainerLow,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: FilledButton.icon(
+                    onPressed: pending
+                        ? null
+                        : () => unawaited(model.resumeThread(thread.id)),
+                    icon: pending && !handoffPending
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.play_arrow_outlined),
+                    label: const Text('RESUME NATIVELY'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                handoffButton,
+              ],
             ),
           ),
         ),
@@ -592,6 +651,8 @@ class _ThreadControls extends StatelessWidget {
                   ),
                 ),
               ],
+              const SizedBox(height: 8),
+              handoffButton,
             ],
           ),
         ),
@@ -758,6 +819,8 @@ class _CodexMessageState extends StatelessWidget {
     required this.message,
     this.actionLabel,
     this.onAction,
+    this.secondaryActionLabel,
+    this.onSecondaryAction,
   });
 
   final IconData icon;
@@ -765,6 +828,8 @@ class _CodexMessageState extends StatelessWidget {
   final String message;
   final String? actionLabel;
   final VoidCallback? onAction;
+  final String? secondaryActionLabel;
+  final VoidCallback? onSecondaryAction;
 
   @override
   Widget build(BuildContext context) {
@@ -794,6 +859,14 @@ class _CodexMessageState extends StatelessWidget {
               if (actionLabel != null && onAction != null) ...[
                 const SizedBox(height: 14),
                 FilledButton(onPressed: onAction, child: Text(actionLabel!)),
+              ],
+              if (secondaryActionLabel != null &&
+                  onSecondaryAction != null) ...[
+                const SizedBox(height: 8),
+                OutlinedButton(
+                  onPressed: onSecondaryAction,
+                  child: Text(secondaryActionLabel!),
+                ),
               ],
             ],
           ),

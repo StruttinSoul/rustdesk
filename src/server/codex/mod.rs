@@ -8,6 +8,8 @@ mod protocol;
 mod rpc;
 mod service;
 mod threads;
+#[cfg(target_os = "windows")]
+mod windows_app;
 
 pub use approvals::{
     CodexApproval, CodexApprovalDecision, CodexApprovalKind, CodexResolvedApproval,

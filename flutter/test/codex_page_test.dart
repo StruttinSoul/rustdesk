@@ -226,4 +226,105 @@ void main() {
     expect(payload['approval_id'], 'approval_1');
     expect(payload['decision'], 'approve');
   });
+
+  testWidgets('Windows app handoff returns to the remote desktop view',
+      (tester) async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Column(
+              children: [
+                const Text('Desktop'),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => CodexPage(model: model)),
+                  ),
+                  child: const Text('Open Codex'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open Codex'));
+    await tester.pump();
+    final listRequest =
+        sent.lastWhere((command) => command.key == 'codex-list-threads');
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': listRequest.value,
+      'service_state': 'ready',
+      'codex_version': '0.155.1',
+      'control': {},
+      'threads': [
+        {
+          'id': 'thr_desktop',
+          'title': 'Desktop-owned task',
+          'project': 'RustDesk',
+          'originator': 'codex_desktop',
+          'updated_at': 1,
+          'state': 'resumable',
+        }
+      ],
+    });
+    await tester.pump();
+
+    await tester.tap(find.text('Desktop-owned task'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('OPEN WINDOWS APP'), findsOneWidget);
+
+    await tester.tap(find.text('OPEN WINDOWS APP'));
+    await tester.pump();
+    final handoff =
+        sent.lastWhere((command) => command.key == 'codex-open-windows-app');
+    final payload = jsonDecode(handoff.value);
+    expect(payload['thread_id'], 'thr_desktop');
+
+    model.handleControlResponse({
+      'type': 'result',
+      'request_id': payload['request_id'],
+      'action': 'windows_app_opened',
+      'thread_id': 'thr_desktop',
+      'turn_id': '',
+      'state': 'ready',
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text('Desktop'), findsOneWidget);
+    expect(find.text('Desktop-owned task'), findsNothing);
+  });
+
+  testWidgets('offers Windows app handoff when Codex native attachment fails',
+      (tester) async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (key, value) async => sent.add((key: key, value: value)),
+    );
+
+    await tester.pumpWidget(MaterialApp(home: CodexPage(model: model)));
+    await tester.pump();
+    final listRequest =
+        sent.lastWhere((command) => command.key == 'codex-list-threads');
+    model.handleResponse({
+      'type': 'error',
+      'request_id': listRequest.value,
+      'thread_id': '',
+      'message': 'Codex app-server is unavailable',
+    });
+    await tester.pump();
+
+    expect(find.text('Codex is unavailable'), findsOneWidget);
+    expect(find.text('OPEN WINDOWS APP'), findsOneWidget);
+  });
 }

@@ -1374,6 +1374,7 @@ fn codex_control_action_name(action: CodexControlAction) -> &'static str {
         CodexControlAction::CodexControlTurnInterrupted => "turn_interrupted",
         CodexControlAction::CodexControlApprovalApproved => "approval_approved",
         CodexControlAction::CodexControlApprovalDenied => "approval_denied",
+        CodexControlAction::CodexControlWindowsAppOpened => "windows_app_opened",
     }
 }
 

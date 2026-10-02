@@ -1089,6 +1089,7 @@ message CodexControlCapabilities {
   bool steer_turn = 4;
   bool interrupt_turn = 5;
   bool approvals = 6;
+  bool open_windows_app = 7;
 }
 
 enum CodexApprovalKind {
@@ -1182,6 +1183,7 @@ enum CodexControlAction {
   CodexControlTurnInterrupted = 5;
   CodexControlApprovalApproved = 6;
   CodexControlApprovalDenied = 7;
+  CodexControlWindowsAppOpened = 8;
 }
 
 message CodexResumeThreadRequest {
@@ -1218,6 +1220,10 @@ message CodexRespondApprovalRequest {
   CodexApprovalDecision decision = 4;
 }
 
+message CodexOpenWindowsAppRequest {
+  string thread_id = 1;
+}
+
 message CodexControlRequest {
   string request_id = 1;
   oneof union {
@@ -1227,6 +1233,7 @@ message CodexControlRequest {
     CodexSteerTurnRequest steer_turn = 5;
     CodexInterruptTurnRequest interrupt_turn = 6;
     CodexRespondApprovalRequest respond_approval = 7;
+    CodexOpenWindowsAppRequest open_windows_app = 8;
   }
 }
 

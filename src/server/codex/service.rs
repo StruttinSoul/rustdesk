@@ -14,7 +14,7 @@ pub fn is_available() -> bool {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::super::{
-        rpc::RpcCallError, CodexApproval as BridgeApproval,
+        rpc::RpcCallError, windows_app, CodexApproval as BridgeApproval,
         CodexApprovalDecision as BridgeApprovalDecision, CodexApprovalKind as BridgeApprovalKind,
         CodexBridge, CodexBridgeUpdate, CodexEvent as BridgeEvent,
         CodexEventKind as BridgeEventKind, CodexHistoryItemKind as BridgeHistoryKind,
@@ -203,6 +203,7 @@ mod windows {
                                     steer_turn: control.steer_turn,
                                     interrupt_turn: control.interrupt_turn,
                                     approvals: true,
+                                    open_windows_app: true,
                                     ..Default::default()
                                 },
                             ),
@@ -515,6 +516,25 @@ mod windows {
                     )
                 })
                 .map_err(|error| (error, thread_id))
+            }
+            Some(codex_control_request::Union::OpenWindowsApp(open)) => {
+                if !open.thread_id.is_empty() {
+                    if let Err(error) = validate_thread_id(&open.thread_id) {
+                        send_control_error(&reply, &request_id, error, &open.thread_id);
+                        return;
+                    }
+                }
+                let thread_id = open.thread_id;
+                windows_app::open_windows_app()
+                    .map(|()| {
+                        control_result(
+                            CodexControlAction::CodexControlWindowsAppOpened,
+                            thread_id.clone(),
+                            String::new(),
+                            CodexState::CodexReady,
+                        )
+                    })
+                    .map_err(|error| (error, thread_id))
             }
             None => {
                 send_control_error(&reply, &request_id, "Codex control request is empty", "");
@@ -933,6 +953,7 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use hbb_common::protobuf::Message as _;
 
         #[test]
         fn rejects_empty_and_oversized_thread_ids() {
@@ -959,6 +980,28 @@ mod windows {
                 Err("Codex input is too long")
             );
             assert!(validate_input("continue checkpoint 4").is_ok());
+        }
+
+        #[test]
+        fn windows_app_handoff_request_round_trips_with_optional_thread_id() {
+            let mut request = CodexControlRequest::new();
+            request.request_id = "handoff-1".into();
+            request.set_open_windows_app(base::message_proto::CodexOpenWindowsAppRequest {
+                thread_id: "thr_desktop".into(),
+                ..Default::default()
+            });
+
+            let bytes = request
+                .write_to_bytes()
+                .expect("handoff request should serialize");
+            let decoded = CodexControlRequest::parse_from_bytes(&bytes)
+                .expect("handoff request should deserialize");
+
+            assert_eq!(decoded.request_id, "handoff-1");
+            let Some(codex_control_request::Union::OpenWindowsApp(open)) = decoded.union else {
+                panic!("expected Windows app handoff request");
+            };
+            assert_eq!(open.thread_id, "thr_desktop");
         }
 
         #[test]

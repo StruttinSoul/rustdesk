@@ -164,6 +164,7 @@ class CodexModel with ChangeNotifier {
   final Map<String, String> _activeTurnIds = {};
   final Map<String, String> _startingTurnIds = {};
   final Map<String, _PendingCodexControl> _pendingControlRequests = {};
+  final Map<String, Completer<bool>> _windowsAppHandoffCompleters = {};
   final Map<String, List<CodexApproval>> _approvals = {};
 
   List<CodexThread> threads = const [];
@@ -202,6 +203,10 @@ class CodexModel with ChangeNotifier {
 
   bool isApprovalPending(String approvalId) => _pendingControlRequests.values
       .any((pending) => pending.approvalId == approvalId);
+
+  bool isWindowsAppHandoffPending(String threadId) =>
+      _pendingControlRequests.values.any((pending) =>
+          pending.action == 'open_windows_app' && pending.threadId == threadId);
 
   bool get isStartingThread => _pendingControlRequests.values
       .any((pending) => pending.action == 'start_thread');
@@ -451,6 +456,42 @@ class CodexModel with ChangeNotifier {
     );
   }
 
+  Future<bool> openWindowsApp([String threadId = '']) async {
+    if (isWindowsAppHandoffPending(threadId)) return false;
+
+    final requestId = _nextRequestId('open_windows_app');
+    final pending =
+        _PendingCodexControl(action: 'open_windows_app', threadId: threadId);
+    final completer = Completer<bool>();
+    _pendingControlRequests[requestId] = pending;
+    _windowsAppHandoffCompleters[requestId] = completer;
+    if (threadId.isNotEmpty) {
+      _threadErrors.remove(threadId);
+    } else {
+      error = '';
+    }
+    notifyListeners();
+
+    try {
+      await _commandSender(
+        'codex-open-windows-app',
+        jsonEncode({'request_id': requestId, 'thread_id': threadId}),
+      );
+    } catch (e) {
+      _pendingControlRequests.remove(requestId);
+      _windowsAppHandoffCompleters.remove(requestId);
+      _setControlError(
+        threadId,
+        'Unable to open the Windows Codex app: $e',
+        notify: false,
+      );
+      if (!completer.isCompleted) completer.complete(false);
+      notifyListeners();
+    }
+
+    return completer.future;
+  }
+
   void leaveThread(String threadId) {
     if (selectedThreadId == threadId) {
       selectedThreadId = null;
@@ -493,6 +534,7 @@ class CodexModel with ChangeNotifier {
   void handleControlResponse(Map<String, dynamic> event) {
     final requestId = _asString(event['request_id']);
     final pending = _pendingControlRequests.remove(requestId);
+    final handoffCompleter = _windowsAppHandoffCompleters.remove(requestId);
     final type = _asString(event['type']);
     final responseThreadId = _asString(event['thread_id']);
     final threadId = responseThreadId.isNotEmpty
@@ -507,10 +549,16 @@ class CodexModel with ChangeNotifier {
       if (pending?.action == 'respond_approval' && threadId.isNotEmpty) {
         unawaited(loadApprovals(threadId));
       }
+      if (handoffCompleter != null && !handoffCompleter.isCompleted) {
+        handoffCompleter.complete(false);
+      }
       notifyListeners();
       return;
     }
     if (type != 'result') {
+      if (handoffCompleter != null && !handoffCompleter.isCompleted) {
+        handoffCompleter.complete(false);
+      }
       notifyListeners();
       return;
     }
@@ -579,8 +627,13 @@ class CodexModel with ChangeNotifier {
           _removeApproval(threadId, pending!.approvalId);
         }
         break;
+      case 'windows_app_opened':
+        break;
       case 'unknown':
         break;
+    }
+    if (handoffCompleter != null && !handoffCompleter.isCompleted) {
+      handoffCompleter.complete(action == 'windows_app_opened');
     }
     notifyListeners();
   }
@@ -604,6 +657,10 @@ class CodexModel with ChangeNotifier {
     _activeTurnIds.clear();
     _startingTurnIds.clear();
     _pendingControlRequests.clear();
+    for (final completer in _windowsAppHandoffCompleters.values) {
+      if (!completer.isCompleted) completer.complete(false);
+    }
+    _windowsAppHandoffCompleters.clear();
     _approvals.clear();
     canResumeThread = false;
     canStartThread = false;

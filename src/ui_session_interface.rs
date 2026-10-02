@@ -992,6 +992,18 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    pub fn open_codex_windows_app(&self, request_id: String, thread_id: String) {
+        let mut request = CodexControlRequest::new();
+        request.request_id = request_id;
+        request.set_open_windows_app(CodexOpenWindowsAppRequest {
+            thread_id,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_control_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
     pub fn capture_displays(&self, add: Vec<i32>, sub: Vec<i32>, set: Vec<i32>) {
         let mut misc = Misc::new();
         misc.set_capture_displays(CaptureDisplays {

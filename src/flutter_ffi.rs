@@ -3102,6 +3102,22 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
             }
             return;
         }
+        if key == "codex-open-windows-app" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                s.open_codex_windows_app(request_id, thread_id);
+            }
+            return;
+        }
     }
 }
 
