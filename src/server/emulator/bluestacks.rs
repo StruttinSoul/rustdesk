@@ -1586,15 +1586,29 @@ fn find_instance(
         })
 }
 
+fn android_package_inventory_unavailable_reason(
+    instance: &BlueStacksInstanceInfo,
+) -> Option<&'static str> {
+    if !instance.adb_enabled || instance.adb_port.is_none() {
+        return Some("ADB is disabled in BlueStacks; Android packages were not inspected");
+    }
+    if !instance.running {
+        return Some(
+            "BlueStacks instance is stopped; start it before inspecting Android packages",
+        );
+    }
+    None
+}
+
 pub fn android_packages(instance_id: &str) -> ResultType<AndroidPackageInventory> {
     let provider = BlueStacksProvider::detect()?
         .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks 5 is not installed"))?;
     let instance = find_instance(&provider, instance_id)?;
-    if !instance.adb_enabled || instance.adb_port.is_none() {
+    if let Some(message) = android_package_inventory_unavailable_reason(&instance) {
         return Ok(AndroidPackageInventory {
             instance_id: instance_id.to_owned(),
             available: false,
-            message: "ADB is disabled in BlueStacks; Android packages were not inspected".to_owned(),
+            message: message.to_owned(),
             packages: Vec::new(),
         });
     }
@@ -2510,6 +2524,25 @@ bst.status.hypervisor="hyperv"
             .as_deref()
             .unwrap_or_default()
             .contains("disabled"));
+    }
+
+    #[test]
+    fn android_package_inventory_requires_a_running_adb_instance() {
+        let raw = CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
+        let document = BlueStacksConfigDocument::parse(&raw).unwrap();
+        let stopped = instances_from_config(&document, &[]).remove(0);
+        assert_eq!(
+            android_package_inventory_unavailable_reason(&stopped),
+            Some("BlueStacks instance is stopped; start it before inspecting Android packages")
+        );
+
+        let running_commands = vec![vec![
+            "HD-Player.exe".to_owned(),
+            "--instance".to_owned(),
+            "Nougat32".to_owned(),
+        ]];
+        let running = instances_from_config(&document, &running_commands).remove(0);
+        assert_eq!(android_package_inventory_unavailable_reason(&running), None);
     }
 
     #[test]
