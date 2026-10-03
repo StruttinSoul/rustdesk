@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
+import 'host_management_model.dart';
 import 'platform_model.dart';
 
 typedef EmulatorCommandSender = Future<void> Function(String key, String value);
@@ -88,8 +89,13 @@ class EmulatorModel extends ChangeNotifier {
   bool dashboardSupported = false;
   bool dashboardActive = false;
   int _previewRequest = 0;
+  int _hostRequest = 0;
   Set<String> _previewTargets = {};
   final Map<String, RemotePreview> previews = {};
+  HostSystemSnapshot? hostSnapshot;
+  bool hostLoading = false;
+  String hostError = '';
+  String hostMessage = '';
   int get videoChannel => 0x40000000 | (guestSessionId & 0x3fffffff);
 
   RemotePreview? previewForChannel(int channel) {
@@ -226,10 +232,57 @@ class EmulatorModel extends ChangeNotifier {
     });
   }
 
+  Future<void> refreshHost() {
+    hostLoading = true;
+    hostError = '';
+    _hostRequest = ++_sequence;
+    notifyListeners();
+    return _send({'action': 'host_status', 'request_id': _hostRequest});
+  }
+
+  Future<void> endProcess(int pid) {
+    hostLoading = true;
+    hostError = '';
+    hostMessage = '';
+    _hostRequest = ++_sequence;
+    notifyListeners();
+    return _send({
+      'action': 'process_end',
+      'request_id': _hostRequest,
+      'pid': pid,
+    });
+  }
+
+  Future<void> recoverComponent(String component) {
+    hostLoading = true;
+    hostError = '';
+    hostMessage = '';
+    _hostRequest = ++_sequence;
+    notifyListeners();
+    return _send({
+      'action': 'recover',
+      'request_id': _hostRequest,
+      'component': component,
+    });
+  }
+
   void handleResponse(Map<String, dynamic> response) {
     if (_disposed || response['protocol_version'] != 1) return;
     final id = response['request_id'];
-    if (response['type'] == 'inventory' && id == _inventoryRequest) {
+    if (response['type'] == 'host' && id == _hostRequest) {
+      hostLoading = false;
+      final host = response['host'];
+      if (host is! Map) {
+        hostError = 'The PC returned an invalid system response.';
+      } else if (host['ok'] != true) {
+        hostError =
+            host['error']?.toString() ?? 'Host management request failed';
+      } else if (host['snapshot'] is Map) {
+        hostSnapshot = HostSystemSnapshot.fromMap(host['snapshot'] as Map);
+        hostMessage = host['message']?.toString() ?? '';
+        hostError = '';
+      }
+    } else if (response['type'] == 'inventory' && id == _inventoryRequest) {
       dashboardSupported = response['dashboard'] == true;
       _inventoryTimeout?.cancel();
       instances = (response['instances'] as List? ?? [])
@@ -311,9 +364,21 @@ class EmulatorModel extends ChangeNotifier {
         return;
       }
     } else if (response['type'] == 'error' &&
-        [_inventoryRequest, _selectionRequest, _desktopRequest, _previewRequest]
-            .contains(id)) {
-      error = response['error']?.toString() ?? 'Emulator request failed';
+        [
+          _inventoryRequest,
+          _selectionRequest,
+          _desktopRequest,
+          _previewRequest,
+          _hostRequest
+        ].contains(id)) {
+      final requestError =
+          response['error']?.toString() ?? 'Remote request failed';
+      if (id == _hostRequest) {
+        hostLoading = false;
+        hostError = requestError;
+      } else {
+        error = requestError;
+      }
       if (id == _inventoryRequest) {
         loading = false;
         _inventoryTimeout?.cancel();
@@ -336,9 +401,12 @@ class EmulatorModel extends ChangeNotifier {
     guestSessionId = width = height = 0;
     targetId = error = '';
     dashboardActive = false;
+    hostLoading = false;
+    hostSnapshot = null;
+    hostError = hostMessage = '';
     previews.clear();
     _previewTargets.clear();
-    _selectionRequest = _desktopRequest = _inventoryRequest = 0;
+    _selectionRequest = _desktopRequest = _inventoryRequest = _hostRequest = 0;
     notifyListeners();
   }
 

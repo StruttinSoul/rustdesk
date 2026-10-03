@@ -11,10 +11,11 @@ import '../../models/model.dart';
 import 'codex_page.dart';
 import 'emulator_page.dart';
 import 'file_manager_page.dart';
+import 'host_management_page.dart';
 import 'terminal_page.dart';
 import '../widgets/monitor_control_view.dart';
 
-enum _ConnectedPcSection { devices, files, powershell, codex }
+enum _ConnectedPcSection { devices, system, files, powershell, codex }
 
 class TargetDashboardPage extends StatefulWidget {
   const TargetDashboardPage({super.key, required this.ffi});
@@ -44,6 +45,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   int _chooserStart = 0;
   _ConnectedPcSection _section = _ConnectedPcSection.devices;
   bool _filesOpened = false;
+  bool _systemOpened = false;
   bool _powershellOpened = false;
   bool _codexOpened = false;
   EmulatorModel get model => widget.ffi.emulatorModel;
@@ -300,9 +302,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final filesAvailable = widget.ffi.ffiModel.permissions['file'] != false;
     final powershellAvailable =
         pi.platform == kPeerPlatformWindows && pi.features.terminal;
+    final hostManagementAvailable =
+        pi.platform == kPeerPlatformWindows && pi.features.hostManagement;
     final codexAvailable = pi.features.codex;
     final sections = <_ConnectedPcSection>[
       _ConnectedPcSection.devices,
+      if (hostManagementAvailable) _ConnectedPcSection.system,
       if (filesAvailable) _ConnectedPcSection.files,
       if (powershellAvailable) _ConnectedPcSection.powershell,
       if (codexAvailable) _ConnectedPcSection.codex,
@@ -314,6 +319,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         bind.sessionGetConnToken(sessionId: widget.ffi.sessionId);
     final pages = <Widget>[
       _devicesBody(),
+      if (hostManagementAvailable)
+        _systemOpened
+            ? HostManagementPage(
+                model: model,
+                active: activeSection == _ConnectedPcSection.system,
+                canControl: widget.ffi.ffiModel.keyboard &&
+                    !widget.ffi.ffiModel.viewOnly,
+              )
+            : const SizedBox.shrink(),
       if (filesAvailable)
         _filesOpened
             ? FileManagerPage(
@@ -384,6 +398,13 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                           _subscription = '';
                           unawaited(model.refresh());
                         }),
+            if (activeSection == _ConnectedPcSection.system)
+              IconButton(
+                  tooltip: 'Refresh system status',
+                  icon: const Icon(Icons.refresh),
+                  onPressed: model.hostLoading
+                      ? null
+                      : () => unawaited(model.refreshHost())),
           ],
         ),
         body: IndexedStack(
@@ -393,6 +414,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         bottomNavigationBar: ConnectedPcTabBar(
           currentIndex: sectionIndex,
           filesAvailable: filesAvailable,
+          hostManagementAvailable: hostManagementAvailable,
           powershellAvailable: powershellAvailable,
           codexAvailable: codexAvailable,
           onDestinationSelected: (index) {
@@ -401,6 +423,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             if (selected == activeSection) return;
             setState(() {
               _section = selected;
+              if (selected == _ConnectedPcSection.system) _systemOpened = true;
               if (selected == _ConnectedPcSection.files) _filesOpened = true;
               if (selected == _ConnectedPcSection.powershell) {
                 _powershellOpened = true;
@@ -662,6 +685,7 @@ class ConnectedPcTabBar extends StatelessWidget {
     super.key,
     required this.currentIndex,
     this.filesAvailable = false,
+    this.hostManagementAvailable = false,
     this.powershellAvailable = false,
     required this.codexAvailable,
     required this.onDestinationSelected,
@@ -669,6 +693,7 @@ class ConnectedPcTabBar extends StatelessWidget {
 
   final int currentIndex;
   final bool filesAvailable;
+  final bool hostManagementAvailable;
   final bool powershellAvailable;
   final bool codexAvailable;
   final ValueChanged<int> onDestinationSelected;
@@ -681,6 +706,12 @@ class ConnectedPcTabBar extends StatelessWidget {
         selectedIcon: Icon(Icons.devices_rounded),
         label: 'Devices',
       ),
+      if (hostManagementAvailable)
+        const NavigationDestination(
+          icon: Icon(Icons.monitor_heart_outlined),
+          selectedIcon: Icon(Icons.monitor_heart),
+          label: 'System',
+        ),
       if (filesAvailable)
         const NavigationDestination(
           icon: Icon(Icons.folder_outlined),

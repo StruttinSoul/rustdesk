@@ -11,6 +11,8 @@ pub mod ldplayer;
 pub mod guest_protocol;
 #[cfg(windows)]
 pub mod guest_runtime;
+#[cfg(windows)]
+pub mod host_management;
 pub mod remote;
 #[cfg(windows)]
 pub mod remote_windows;

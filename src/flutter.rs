@@ -899,6 +899,7 @@ impl InvokeUiSession for FlutterHandler {
             features.insert("codex", f.codex);
             features.insert("emulator", f.emulator);
             features.insert("target_dashboard", f.target_dashboard);
+            features.insert("host_management", f.host_management);
         }
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {
@@ -1356,6 +1357,11 @@ impl InvokeUiSession for FlutterHandler {
                 owned.previews = channels;
                 self.retire_emulator_rgba(|channel| channel >= 0x40000000 && channel != owned.selected && !owned.previews.contains(&channel));
                 event.extend([("type", json!("previews")), ("enabled", json!(previews.enabled)), ("session_ids", json!(previews.session_ids))]);
+            }
+            Some(emulator_response::Union::Host(host)) => {
+                let payload = serde_json::from_str::<serde_json::Value>(&host.json)
+                    .unwrap_or_else(|error| json!({"ok": false, "error": format!("Invalid host response: {error}")}));
+                event.extend([("type", json!("host")), ("host", payload)]);
             }
             Some(emulator_response::Union::Error(error)) => event.extend([("type", json!("error")), ("error", json!(error))]),
             _ => return,

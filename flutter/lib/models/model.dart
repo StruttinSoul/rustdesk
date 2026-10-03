@@ -1474,6 +1474,7 @@ class FfiModel with ChangeNotifier {
       _pi.features.codex = features['codex'] == true;
       _pi.features.emulator = features['emulator'] == true;
       _pi.features.targetDashboard = features['target_dashboard'] == true;
+      _pi.features.hostManagement = features['host_management'] == true;
       if (!isCache) {
         handleResolutions(peerId, evt["resolutions"]);
       }
@@ -4585,6 +4586,7 @@ class Features {
   bool codex = false;
   bool emulator = false;
   bool targetDashboard = false;
+  bool hostManagement = false;
 }
 
 const kInvalidDisplayIndex = -1;

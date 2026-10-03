@@ -29,6 +29,17 @@ impl Connection {
                     Err(error) => remote_windows::error_response(id, error.to_string()),
                 }
             }
+            Some(emulator_request::Union::Host(host)) => {
+                let host = host.clone();
+                match hbb_common::tokio::task::spawn_blocking(move || {
+                    crate::server::emulator::host_management::handle_request(id, &host)
+                })
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => remote_windows::error_response(id, error.to_string()),
+                }
+            }
             Some(emulator_request::Union::Select(_)) => {
                 self.emulator_session.take();
                 if !self.emulator_dashboard { self.suspend_emulator_desktop(); }

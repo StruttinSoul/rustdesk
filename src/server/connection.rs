@@ -2117,6 +2117,8 @@ impl Connection {
             emulator: self.is_remote() && super::emulator::guest_runtime::helper_path().is_ok(),
             #[cfg(windows)]
             target_dashboard: self.is_remote() && super::emulator::guest_runtime::helper_path().is_ok(),
+            #[cfg(windows)]
+            host_management: self.is_remote(),
             ..Default::default()
         })
         .into();

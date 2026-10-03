@@ -55,6 +55,15 @@ pub fn authorize_request(
     }
     match request.union.as_ref() {
         Some(Union::List(_)) | Some(Union::Desktop(_)) => Ok(()),
+        Some(Union::Host(host)) => match host.action.as_str() {
+            "status" => Ok(()),
+            "process_end" if control && host.pid > 0 => Ok(()),
+            "recover" if control && host.component == "bluestacks_adb" => Ok(()),
+            "process_end" | "recover" if !control => {
+                Err("Host management action requires control permission")
+            }
+            _ => Err("Invalid host management action"),
+        },
         Some(Union::Previews(previews)) => {
             if previews.target_ids.len() + previews.displays.len() > 4
                 || previews.target_ids.iter().any(|id| !id.starts_with("bluestacks:") || id.len() > 128 || id.len() <= 11)

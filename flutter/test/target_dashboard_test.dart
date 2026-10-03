@@ -11,6 +11,7 @@ void main() {
         return Scaffold(
           bottomNavigationBar: ConnectedPcTabBar(
             currentIndex: selected,
+            hostManagementAvailable: true,
             filesAvailable: true,
             powershellAvailable: true,
             codexAvailable: true,
@@ -21,22 +22,27 @@ void main() {
     ));
 
     expect(find.text('Devices'), findsOneWidget);
+    expect(find.text('System'), findsOneWidget);
     expect(find.text('Files'), findsOneWidget);
     expect(find.text('PowerShell'), findsOneWidget);
     expect(find.text('Codex'), findsOneWidget);
     expect(selected, 0);
 
-    await tester.tap(find.text('Files'));
+    await tester.tap(find.text('System'));
     await tester.pump();
     expect(selected, 1);
 
-    await tester.tap(find.text('PowerShell'));
+    await tester.tap(find.text('Files'));
     await tester.pump();
     expect(selected, 2);
 
-    await tester.tap(find.text('Codex'));
+    await tester.tap(find.text('PowerShell'));
     await tester.pump();
     expect(selected, 3);
+
+    await tester.tap(find.text('Codex'));
+    await tester.pump();
+    expect(selected, 4);
   });
 
   testWidgets('connected PC navigation keeps useful tabs without Codex',
@@ -45,6 +51,7 @@ void main() {
       home: Scaffold(
         bottomNavigationBar: ConnectedPcTabBar(
           currentIndex: 0,
+          hostManagementAvailable: true,
           filesAvailable: true,
           powershellAvailable: true,
           codexAvailable: false,
@@ -54,6 +61,7 @@ void main() {
     ));
 
     expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.text('System'), findsOneWidget);
     expect(find.text('Files'), findsOneWidget);
     expect(find.text('PowerShell'), findsOneWidget);
     expect(find.text('Codex'), findsNothing);
@@ -65,6 +73,7 @@ void main() {
       home: Scaffold(
         bottomNavigationBar: ConnectedPcTabBar(
           currentIndex: 0,
+          hostManagementAvailable: false,
           filesAvailable: false,
           powershellAvailable: false,
           codexAvailable: true,
@@ -74,6 +83,7 @@ void main() {
     ));
 
     expect(find.text('Devices'), findsOneWidget);
+    expect(find.text('System'), findsNothing);
     expect(find.text('Files'), findsNothing);
     expect(find.text('PowerShell'), findsNothing);
     expect(find.text('Codex'), findsOneWidget);

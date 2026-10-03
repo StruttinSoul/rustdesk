@@ -1704,10 +1704,31 @@ fn run_command_with_timeout(program: &Path, args: &[String]) -> ResultType<Timed
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdbConnectionMode {
+    ProbeOnly,
+    EnsureConnected,
+}
+
+impl AdbConnectionMode {
+    fn should_connect(self) -> bool {
+        matches!(self, Self::EnsureConnected)
+    }
+}
+
 fn run_adb(
     provider: &BlueStacksProvider,
     instance: &BlueStacksInstanceInfo,
     args: &[&str],
+) -> ResultType<String> {
+    run_adb_with_mode(provider, instance, args, AdbConnectionMode::EnsureConnected)
+}
+
+fn run_adb_with_mode(
+    provider: &BlueStacksProvider,
+    instance: &BlueStacksInstanceInfo,
+    args: &[&str],
+    connection_mode: AdbConnectionMode,
 ) -> ResultType<String> {
     if !instance.adb_enabled {
         bail!("BlueStacks ADB access is disabled")
@@ -1729,17 +1750,19 @@ fn run_adb(
             Some(process.exe().to_path_buf())
         })
         .unwrap_or_else(|| provider.installation.adb_path());
-    let connect_args = vec!["connect".to_owned(), serial.clone()];
-    let connect = run_command_with_timeout(&adb_path, &connect_args)?;
-    if connect.timed_out {
-        bail!("BlueStacks ADB connect timed out for {serial}")
-    }
-    if !connect.success {
-        let error = connect.stderr.trim().to_owned();
-        bail!(
-            "BlueStacks ADB connect failed for {serial}: {}",
-            if error.is_empty() { "non-zero exit status" } else { &error }
-        );
+    if connection_mode.should_connect() {
+        let connect_args = vec!["connect".to_owned(), serial.clone()];
+        let connect = run_command_with_timeout(&adb_path, &connect_args)?;
+        if connect.timed_out {
+            bail!("BlueStacks ADB connect timed out for {serial}")
+        }
+        if !connect.success {
+            let error = connect.stderr.trim().to_owned();
+            bail!(
+                "BlueStacks ADB connect failed for {serial}: {}",
+                if error.is_empty() { "non-zero exit status" } else { &error }
+            );
+        }
     }
     let mut command_args = vec!["-s".to_owned(), serial.clone()];
     command_args.extend(args.iter().map(|arg| (*arg).to_owned()));
@@ -1755,6 +1778,38 @@ fn run_adb(
         );
     }
     Ok(output.stdout)
+}
+
+pub fn watchdog_adb_health() -> ResultType<(usize, usize)> {
+    adb_health(AdbConnectionMode::ProbeOnly)
+}
+
+fn adb_health(connection_mode: AdbConnectionMode) -> ResultType<(usize, usize)> {
+    let Some(provider) = BlueStacksProvider::detect()? else {
+        return Ok((0, 0));
+    };
+    let mut expected = 0usize;
+    let mut healthy = 0usize;
+    for instance in provider.instances()?.iter().filter(|instance| {
+        instance.running && instance.adb_enabled && instance.adb_port.is_some()
+    }) {
+        expected += 1;
+        if run_adb_with_mode(&provider, instance, &["get-state"], connection_mode)
+            .map(|state| state.trim().eq_ignore_ascii_case("device"))
+            .unwrap_or(false)
+        {
+            healthy += 1;
+        }
+    }
+    Ok((expected, healthy))
+}
+
+pub fn recover_adb_connections() -> ResultType<usize> {
+    let (expected, healthy) = adb_health(AdbConnectionMode::EnsureConnected)?;
+    if expected > 0 && healthy == 0 {
+        bail!("No running BlueStacks ADB instance could be reached")
+    }
+    Ok(healthy)
 }
 
 fn find_instance(
@@ -2678,6 +2733,12 @@ impl EmulatorProvider for BlueStacksProvider {
 mod tests {
     use super::*;
     use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+
+    #[test]
+    fn watchdog_probe_does_not_request_adb_reconnect() {
+        assert!(!AdbConnectionMode::ProbeOnly.should_connect());
+        assert!(AdbConnectionMode::EnsureConnected.should_connect());
+    }
 
     const CURRENT_CONF: &str = r#"bst.enable_adb_access="0"
 bst.enable_programmatic_ads="1"

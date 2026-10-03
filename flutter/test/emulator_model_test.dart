@@ -134,6 +134,69 @@ void main() {
     model.dispose();
   });
 
+  test('loads host health and sends bounded management actions', () async {
+    final sent = <Map<String, dynamic>>[];
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, value) async => sent.add(jsonDecode(value)));
+
+    await model.refreshHost();
+    expect(sent.last['action'], 'host_status');
+    final requestId = sent.last['request_id'];
+    model.handleResponse({
+      'type': 'host',
+      'request_id': requestId,
+      'protocol_version': 1,
+      'host': {
+        'ok': true,
+        'snapshot': {
+          'cpu_percent': 42.5,
+          'cpu_name': 'Test CPU',
+          'logical_cpus': 8,
+          'memory_used_bytes': 4294967296,
+          'memory_total_bytes': 8589934592,
+          'uptime_secs': 7200,
+          'processes': [
+            {
+              'pid': 1234,
+              'name': 'game.exe',
+              'cpu_percent': 10.0,
+              'memory_bytes': 268435456,
+              'executable': r'C:\Games\game.exe',
+              'can_end': true,
+            }
+          ],
+          'watchdog': {
+            'running': true,
+            'last_check_ms': 10,
+            'last_recovery_ms': 0,
+            'components': [
+              {
+                'id': 'bluestacks_adb',
+                'label': 'BlueStacks ADB',
+                'state': 'healthy',
+                'detail': '1/1 running instance reachable',
+                'recoverable': true,
+              }
+            ],
+          },
+        },
+      },
+    });
+    expect(model.hostLoading, isFalse);
+    expect(model.hostSnapshot?.cpuPercent, 42.5);
+    expect(model.hostSnapshot?.processes.single.name, 'game.exe');
+    expect(model.hostSnapshot?.watchdog.components.single.state, 'healthy');
+
+    await model.endProcess(1234);
+    expect(sent.last['action'], 'process_end');
+    expect(sent.last['pid'], 1234);
+
+    await model.recoverComponent('bluestacks_adb');
+    expect(sent.last['action'], 'recover');
+    expect(sent.last['component'], 'bluestacks_adb');
+    model.dispose();
+  });
+
   test('binds navigation to the selected guest and rejects stale statuses',
       () async {
     final sent = <Map<String, dynamic>>[];

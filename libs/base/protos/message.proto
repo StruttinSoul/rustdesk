@@ -104,6 +104,7 @@ message Features {
   bool codex = 4;
   bool emulator = 5;
   bool target_dashboard = 6;
+  bool host_management = 7;
 }
 
 message CodecAbility {
@@ -1296,6 +1297,16 @@ message EmulatorKey {
   bool down = 2;
 }
 
+message EmulatorHostRequest {
+  string action = 1;
+  uint32 pid = 2;
+  string component = 3;
+}
+
+message EmulatorHostResponse {
+  string json = 1;
+}
+
 message EmulatorRequest {
   uint64 request_id = 1;
   uint32 protocol_version = 2;
@@ -1308,6 +1319,7 @@ message EmulatorRequest {
     EmulatorTouch touch = 8;
     EmulatorKey key = 9;
     EmulatorPreviewRequest previews = 10;
+    EmulatorHostRequest host = 11;
   }
 }
 
@@ -1353,6 +1365,7 @@ message EmulatorResponse {
     EmulatorSessionStatus status = 4;
     string error = 5;
     EmulatorPreviewState previews = 6;
+    EmulatorHostResponse host = 7;
   }
 }
 

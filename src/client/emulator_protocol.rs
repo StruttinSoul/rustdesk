@@ -1,6 +1,7 @@
 use base::message_proto::{
-    EmulatorDesktopRequest, EmulatorKey, EmulatorListRequest, EmulatorNavigation, EmulatorRequest,
-    EmulatorSelectRequest, EmulatorTouch, EmulatorPreviewRequest,
+    EmulatorDesktopRequest, EmulatorHostRequest, EmulatorKey, EmulatorListRequest,
+    EmulatorNavigation, EmulatorPreviewRequest, EmulatorRequest, EmulatorSelectRequest,
+    EmulatorTouch,
 };
 
 pub fn emulator_request_from_json(payload: &str) -> Option<EmulatorRequest> {
@@ -30,6 +31,20 @@ pub fn emulator_request_from_json(payload: &str) -> Option<EmulatorRequest> {
             ..Default::default()
         }),
         "desktop" => request.set_desktop(EmulatorDesktopRequest::new()),
+        "host_status" => request.set_host(EmulatorHostRequest {
+            action: "status".to_owned(),
+            ..Default::default()
+        }),
+        "process_end" => request.set_host(EmulatorHostRequest {
+            action: "process_end".to_owned(),
+            pid: u32::try_from(value["pid"].as_u64()?).ok()?,
+            ..Default::default()
+        }),
+        "recover" => request.set_host(EmulatorHostRequest {
+            action: "recover".to_owned(),
+            component: value["component"].as_str()?.to_owned(),
+            ..Default::default()
+        }),
         "previews" => request.set_previews(EmulatorPreviewRequest {
             enabled: value["enabled"].as_bool()?,
             target_ids: value["target_ids"].as_array()?.iter().map(|id| id.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>()?,
@@ -107,5 +122,35 @@ mod tests {
         ] {
             assert!(emulator_request_from_json(payload).is_none());
         }
+    }
+
+    #[test]
+    fn host_management_is_bounded_and_control_gated() {
+        let status = emulator_request_from_json(
+            r#"{"protocol_version":1,"request_id":11,"action":"host_status"}"#,
+        )
+        .unwrap();
+        assert!(crate::server::emulator::remote::authorize_request(
+            &status, true, false, None
+        )
+        .is_ok());
+
+        let end = emulator_request_from_json(
+            r#"{"protocol_version":1,"request_id":12,"action":"process_end","pid":1234}"#,
+        )
+        .unwrap();
+        assert!(crate::server::emulator::remote::authorize_request(
+            &end, true, false, None
+        )
+        .is_err());
+        assert!(crate::server::emulator::remote::authorize_request(
+            &end, true, true, None
+        )
+        .is_ok());
+
+        assert!(emulator_request_from_json(
+            r#"{"protocol_version":1,"request_id":13,"action":"recover","component":"arbitrary_service"}"#
+        )
+        .is_none());
     }
 }
