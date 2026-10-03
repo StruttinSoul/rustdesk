@@ -234,6 +234,7 @@ class BlueStacksInstanceInfo {
     required this.height,
     required this.dpi,
     required this.defaultPackage,
+    required this.installedApps,
   });
 
   final String id;
@@ -248,6 +249,7 @@ class BlueStacksInstanceInfo {
   final int? height;
   final int? dpi;
   final String defaultPackage;
+  final List<BlueStacksInstalledAppInfo> installedApps;
 
   factory BlueStacksInstanceInfo.fromJson(Map<String, dynamic> json) =>
       BlueStacksInstanceInfo(
@@ -263,6 +265,34 @@ class BlueStacksInstanceInfo {
         height: _asNullableInt(json['height']),
         dpi: _asNullableInt(json['dpi']),
         defaultPackage: _asString(json['default_package']),
+        installedApps: _asList(json['installed_apps'])
+            .map((item) => BlueStacksInstalledAppInfo.fromJson(_asMap(item)))
+            .toList(growable: false),
+      );
+}
+
+class BlueStacksInstalledAppInfo {
+  const BlueStacksInstalledAppInfo({
+    required this.package,
+    required this.label,
+    required this.activity,
+    required this.category,
+    required this.versionName,
+  });
+
+  final String package;
+  final String label;
+  final String activity;
+  final String category;
+  final String versionName;
+
+  factory BlueStacksInstalledAppInfo.fromJson(Map<String, dynamic> json) =>
+      BlueStacksInstalledAppInfo(
+        package: _asString(json['package']),
+        label: _asString(json['label']),
+        activity: _asString(json['activity']),
+        category: _asString(json['category']),
+        versionName: _asString(json['version_name']),
       );
 }
 
@@ -563,6 +593,12 @@ class BlueStacksModel with ChangeNotifier {
         'package': package,
       });
 
+  Future<void> playApp(String instanceId, String package) => _send({
+        'action': 'play_app',
+        'instance_id': instanceId,
+        'package': package,
+      });
+
   Future<void> launchDefaultApp(String instanceId) => _send({
         'action': 'launch_default_app',
         'instance_id': instanceId,
@@ -614,8 +650,9 @@ class BlueStacksModel with ChangeNotifier {
         androidPackages[packageInventory.instanceId] = packageInventory;
       }
       lastActionMessage = packageInventory.message;
-    } else if (action == 'launch_default_app') {
-      lastActionMessage = _asString(data['message']);
+    } else if (action == 'launch_default_app' || action == 'play_app') {
+      final report = action == 'play_app' ? _asMap(data['report']) : data;
+      lastActionMessage = _asString(report['message']);
     } else if (action == 'remove_optional_component') {
       lastActionMessage = _asString(data['message']);
       await refresh();

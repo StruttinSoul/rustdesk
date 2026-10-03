@@ -850,6 +850,14 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    pub fn request_emulator(&self, payload: String) {
+        if let Some(request) = crate::client::emulator_request_from_json(&payload) {
+            let mut message = Message::new();
+            message.set_emulator_request(request);
+            self.send(Data::Message(message));
+        }
+    }
+
     pub fn request_codex_history(
         &self,
         request_id: String,
@@ -1921,6 +1929,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn handle_terminal_response(&self, response: TerminalResponse);
     fn handle_codex_read_response(&self, response: CodexReadResponse);
     fn handle_codex_control_response(&self, response: CodexControlResponse);
+    fn handle_emulator_response(&self, _response: EmulatorResponse) {}
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {

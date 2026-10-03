@@ -16,6 +16,7 @@ import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/models/codex_model.dart';
+import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:flutter_hbb/models/group_model.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
@@ -105,6 +106,7 @@ class CachedPeerData {
 }
 
 class FfiModel with ChangeNotifier {
+  bool authenticatedPeer = false;
   CachedPeerData cachedPeerData = CachedPeerData();
   PeerInfo _pi = PeerInfo();
   int? lastUserDisplay;
@@ -253,6 +255,7 @@ class FfiModel with ChangeNotifier {
     _cancelPendingMonitorRestore();
     _secure = null;
     _direct = null;
+    authenticatedPeer = false;
     _inputBlocked = false;
     _timer?.cancel();
     _timer = null;
@@ -369,6 +372,15 @@ class FfiModel with ChangeNotifier {
         parent.target?.routeTerminalResponse(evt);
       } else if (name == 'codex_read_response') {
         parent.target?.codexModel.handleResponse(evt);
+      } else if (name == 'emulator_response') {
+        final model = parent.target?.emulatorModel;
+        final previousId = model?.guestSessionId;
+        final previousWidth = model?.width;
+        final previousHeight = model?.height;
+        model?.handleResponse(evt);
+        if (model != null && !model.dashboardActive && (previousId != model.guestSessionId || previousWidth != model.width || previousHeight != model.height || (model.selected && !model.streaming))) {
+          parent.target?.imageModel.disposeImage();
+        }
       } else if (name == 'codex_control_response') {
         parent.target?.codexModel.handleControlResponse(evt);
       } else if (name == 'file_dir') {
@@ -1458,7 +1470,10 @@ class FfiModel with ChangeNotifier {
       }
       Map<String, dynamic> features = json.decode(evt['features']);
       _pi.features.privacyMode = features['privacy_mode'] == true;
+      _pi.features.terminal = features['terminal'] == true;
       _pi.features.codex = features['codex'] == true;
+      _pi.features.emulator = features['emulator'] == true;
+      _pi.features.targetDashboard = features['target_dashboard'] == true;
       if (!isCache) {
         handleResolutions(peerId, evt["resolutions"]);
       }
@@ -1483,6 +1498,7 @@ class FfiModel with ChangeNotifier {
       }
     }
 
+    if (!isCache) authenticatedPeer = true;
     _pi.isSet.value = true;
     stateGlobal.resetLastResolutionGroupValues(peerId);
 
@@ -1916,6 +1932,14 @@ class VirtualMouseMode with ChangeNotifier {
 
 class ImageModel with ChangeNotifier {
   ui.Image? _image;
+  final Map<int, ui.Image> _dashboardImages = {};
+  ui.Image? dashboardImage(int channel) => _dashboardImages[channel];
+
+  void retainDashboardImages(Set<int> channels) {
+    for (final channel in _dashboardImages.keys.toList()) {
+      if (!channels.contains(channel)) _dashboardImages.remove(channel)?.dispose();
+    }
+  }
 
   ui.Image? get image => _image;
 
@@ -1976,6 +2000,15 @@ class ImageModel with ChangeNotifier {
   }
 
   decodeAndUpdate(int display, Uint8List rgba) async {
+    if (parent.target?.emulatorModel.dashboardActive == true) {
+      await _decodeDashboard(display, rgba);
+      return;
+    }
+    if (display >= 0x40000000) {
+      await _decodeGuest(display, rgba);
+      return;
+    }
+    if (parent.target?.emulatorModel.selected == true) return;
     final pid = parent.target?.id;
     final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
     final image = await img.decodeImageFromPixels(
@@ -1990,7 +2023,44 @@ class ImageModel with ChangeNotifier {
       image?.dispose();
       return;
     }
-    await update(image);
+    await update(image,
+        isCurrentSession: () => parent.target?.emulatorModel.selected != true);
+  }
+
+  Future<void> _decodeGuest(int channel, Uint8List rgba) async {
+    final model = parent.target?.emulatorModel;
+    if (model == null || !model.streaming || channel != model.videoChannel) return;
+    final id = model.guestSessionId;
+    final width = model.width;
+    final height = model.height;
+    if (rgba.length != width * height * 4) return;
+    final image = await img.decodeImageFromPixels(rgba, width, height,
+        isWeb | isWindows | isLinux ? ui.PixelFormat.rgba8888 : ui.PixelFormat.bgra8888);
+    await update(image, isCurrentSession: () => model.streaming && model.guestSessionId == id && model.width == width && model.height == height);
+  }
+
+  Future<void> _decodeDashboard(int channel, Uint8List rgba) async {
+    final ffi = parent.target;
+    if (ffi == null) return;
+    final model = ffi.emulatorModel;
+    final preview = model.previewForChannel(channel);
+    final active = model.streaming && channel == model.videoChannel;
+    final rect = channel < 0x40000000 ? ffi.ffiModel.pi.getDisplayRect(channel) : null;
+    final w = preview?.width ?? (active ? model.width : rect?.width.toInt() ?? 0);
+    final h = preview?.height ?? (active ? model.height : rect?.height.toInt() ?? 0);
+    if (w <= 0 || h <= 0 || rgba.length != w * h * 4) return;
+    final image = await img.decodeImageFromPixels(rgba, w, h,
+        isWeb | isWindows | isLinux ? ui.PixelFormat.rgba8888 : ui.PixelFormat.bgra8888);
+    if (image == null) return;
+    if (parent.target != ffi || !model.dashboardActive ||
+        (channel >= 0x40000000 && model.previewForChannel(channel)?.sessionId != preview?.sessionId && !(model.streaming && model.videoChannel == channel)) ||
+        (channel >= 0x40000000 && preview == null && !(model.streaming && model.videoChannel == channel))) {
+      image.dispose();
+      return;
+    }
+    _dashboardImages.remove(channel)?.dispose();
+    _dashboardImages[channel] = image;
+    notifyListeners();
   }
 
   Future<void> update(ui.Image? image,
@@ -2053,6 +2123,7 @@ class ImageModel with ChangeNotifier {
   void disposeImage() {
     _image?.dispose();
     _image = null;
+    retainDashboardImages({});
   }
 }
 
@@ -4044,6 +4115,7 @@ class FFI {
   late final ServerModel serverModel; // global
   late final ChatModel chatModel; // session
   late final CodexModel codexModel; // session
+  late final EmulatorModel emulatorModel;
   late final FileModel fileModel; // session
   late final AbModel abModel; // global
   late final GroupModel groupModel; // global
@@ -4074,6 +4146,7 @@ class FFI {
     serverModel = ServerModel(WeakReference(this));
     chatModel = ChatModel(WeakReference(this));
     codexModel = CodexModel(sessionId);
+    emulatorModel = EmulatorModel(sessionId);
     fileModel = FileModel(WeakReference(this));
     userModel = UserModel(WeakReference(this));
     peerTabModel = PeerTabModel(WeakReference(this));
@@ -4100,6 +4173,7 @@ class FFI {
   /// Mobile reuse FFI
   void mobileReset() {
     codexModel.reset();
+    emulatorModel.reset();
     ffiModel.resetRestartReconnectState();
     ffiModel.waitForFirstImage.value = true;
     ffiModel.isRefreshing = false;
@@ -4346,7 +4420,7 @@ class FFI {
   void _applyPendingMonitorRestore() {
     final restore = ffiModel.pendingMonitorRestore;
     ffiModel._cancelPendingMonitorRestore();
-    if (restore == null || closed) return;
+    if (restore == null || closed || emulatorModel.dashboardActive) return;
     // The display list may have changed since the restore was queued.
     final displays = ffiModel.pi.displays;
     if ((restore == kAllDisplayValue && displays.isNotEmpty) ||
@@ -4380,6 +4454,7 @@ class FFI {
     }
     chatModel.close();
     codexModel.reset();
+    emulatorModel.reset();
     // Close all terminal models
     for (final model in _terminalModels.values) {
       model.dispose();
@@ -4506,7 +4581,10 @@ class Resolution {
 
 class Features {
   bool privacyMode = false;
+  bool terminal = false;
   bool codex = false;
+  bool emulator = false;
+  bool targetDashboard = false;
 }
 
 const kInvalidDisplayIndex = -1;

@@ -603,6 +603,79 @@ fn restore_shortcut_changes(journal: &mut CleanupJournal) -> ResultType<RestoreP
     Ok(report)
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct BlueStacksAppCacheEntry {
+    #[serde(default)]
+    package: String,
+    #[serde(default, rename = "appLabel")]
+    app_label: String,
+    #[serde(default)]
+    activity: String,
+    #[serde(default)]
+    category: String,
+    #[serde(default, rename = "versionName")]
+    version_name: String,
+}
+
+fn parse_app_cache(raw: &str) -> Vec<BlueStacksInstalledApp> {
+    let entries = match serde_json::from_str::<Vec<BlueStacksAppCacheEntry>>(raw) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::debug!("failed to parse BlueStacks app cache: {error}");
+            return Vec::new();
+        }
+    };
+    entries
+        .into_iter()
+        .filter(|entry| {
+            !entry.package.is_empty()
+                && entry.package.contains('.')
+                && entry
+                    .package
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_'))
+        })
+        .map(|entry| BlueStacksInstalledApp {
+            package: entry.package,
+            label: entry.app_label,
+            activity: entry.activity,
+            category: entry.category,
+            version_name: entry.version_name,
+        })
+        .collect()
+}
+
+fn read_instance_app_cache(
+    installation: &BlueStacksInstallation,
+    instance_id: &str,
+) -> Vec<BlueStacksInstalledApp> {
+    if instance_id.is_empty()
+        || !instance_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return Vec::new();
+    }
+    let path = installation
+        .user_defined_dir
+        .join("Engine")
+        .join(instance_id)
+        .join("AppCache")
+        .join("AppCache.json");
+    match fs::read_to_string(&path) {
+        Ok(raw) => parse_app_cache(&raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            log::debug!(
+                "failed to read BlueStacks app cache '{}': {}",
+                path.display(),
+                error
+            );
+            Vec::new()
+        }
+    }
+}
+
 fn parse_package_list(output: &str) -> BTreeSet<String> {
     output
         .lines()
@@ -757,6 +830,15 @@ pub struct BlueStacksInstallationInventory {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlueStacksInstalledApp {
+    pub package: String,
+    pub label: String,
+    pub activity: String,
+    pub category: String,
+    pub version_name: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BlueStacksInstanceInventory {
     pub id: String,
     pub display_name: String,
@@ -770,6 +852,7 @@ pub struct BlueStacksInstanceInventory {
     pub height: Option<u32>,
     pub dpi: Option<u32>,
     pub default_package: String,
+    pub installed_apps: Vec<BlueStacksInstalledApp>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -803,6 +886,10 @@ pub enum BlueStacksAction {
         instance_id: String,
         package: String,
     },
+    PlayApp {
+        instance_id: String,
+        package: String,
+    },
     LaunchDefaultApp {
         instance_id: String,
     },
@@ -829,6 +916,7 @@ impl BlueStacksAction {
             Self::ApplyProfile { .. } => "apply_profile",
             Self::Restore => "restore",
             Self::SetDefaultApp { .. } => "set_default_app",
+            Self::PlayApp { .. } => "play_app",
             Self::LaunchDefaultApp { .. } => "launch_default_app",
             Self::InspectAndroidPackages { .. } => "inspect_android_packages",
             Self::DisableOptionalAndroidPackage { .. } => "disable_optional_android_package",
@@ -892,6 +980,10 @@ fn load_default_apps() -> DefaultApps {
     serde_json::from_str(&Config::get_option(OPTION_DEFAULT_APPS)).unwrap_or_default()
 }
 
+pub(super) fn default_app_for_instance(instance_id: &str) -> String {
+    load_default_apps().get(instance_id).unwrap_or_default().to_owned()
+}
+
 fn save_default_apps(apps: &DefaultApps) {
     let encoded = serde_json::to_string(apps).unwrap_or_default();
     Config::set_option(OPTION_DEFAULT_APPS.to_owned(), encoded);
@@ -930,6 +1022,7 @@ pub fn management_inventory() -> ResultType<BlueStacksInventory> {
     let instance_inventory = instances
         .into_iter()
         .map(|instance| BlueStacksInstanceInventory {
+            installed_apps: read_instance_app_cache(&provider.installation, &instance.id),
             default_package: default_apps
                 .get(&instance.id)
                 .unwrap_or_default()
@@ -1059,6 +1152,17 @@ fn execute_action(action: &BlueStacksAction) -> ResultType<serde_json::Value> {
             Ok(serde_json::json!({
                 "instance_id": instance_id,
                 "package": package,
+                "inventory": management_inventory()?,
+            }))
+        }
+        BlueStacksAction::PlayApp {
+            instance_id,
+            package,
+        } => {
+            set_default_app(instance_id, package)?;
+            let report = launch_default_app(instance_id)?;
+            Ok(serde_json::json!({
+                "report": report,
                 "inventory": management_inventory()?,
             }))
         }
@@ -1612,9 +1716,34 @@ fn run_adb(
         .adb_port
         .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks ADB port is unavailable"))?;
     let serial = format!("127.0.0.1:{port}");
+    let adb_path = hbb_common::sysinfo::System::new_all()
+        .processes()
+        .values()
+        .find_map(|process| {
+            if !process.name().eq_ignore_ascii_case("adb.exe")
+                || !super::guest_runtime::is_default_adb_server(process.cmd())
+                || !process.exe().is_file()
+            {
+                return None;
+            }
+            Some(process.exe().to_path_buf())
+        })
+        .unwrap_or_else(|| provider.installation.adb_path());
+    let connect_args = vec!["connect".to_owned(), serial.clone()];
+    let connect = run_command_with_timeout(&adb_path, &connect_args)?;
+    if connect.timed_out {
+        bail!("BlueStacks ADB connect timed out for {serial}")
+    }
+    if !connect.success {
+        let error = connect.stderr.trim().to_owned();
+        bail!(
+            "BlueStacks ADB connect failed for {serial}: {}",
+            if error.is_empty() { "non-zero exit status" } else { &error }
+        );
+    }
     let mut command_args = vec!["-s".to_owned(), serial.clone()];
     command_args.extend(args.iter().map(|arg| (*arg).to_owned()));
-    let output = run_command_with_timeout(&provider.installation.adb_path(), &command_args)?;
+    let output = run_command_with_timeout(&adb_path, &command_args)?;
     if output.timed_out {
         bail!("BlueStacks ADB command timed out for {serial}")
     }
@@ -1821,7 +1950,7 @@ fn wait_for_android_ready(
     let deadline = Instant::now() + timeout;
     loop {
         let instance = find_instance(provider, instance_id)?;
-        if instance.running && instance.adb_enabled && instance.adb_port.is_some() {
+        if can_probe_android_ready(&instance) {
             if run_adb(provider, &instance, &["get-state"])
                 .map(|output| output.trim().eq_ignore_ascii_case("device"))
                 .unwrap_or(false)
@@ -1841,6 +1970,10 @@ fn wait_for_android_ready(
         }
         thread::sleep(DEFAULT_LAUNCH_POLL_INTERVAL);
     }
+}
+
+fn can_probe_android_ready(instance: &BlueStacksInstanceInfo) -> bool {
+    instance.adb_enabled && instance.adb_port.is_some()
 }
 
 pub fn launch_default_app(instance_id: &str) -> ResultType<LaunchReport> {
@@ -2160,7 +2293,7 @@ fn android_metadata(instance_id: &str) -> (Option<&'static str>, Option<&'static
         "Nougat64" => (Some("Nougat 64-bit"), Some("7.1.2")),
         "Pie64" => (Some("Pie 64-bit"), Some("9")),
         "Rvc64" => (Some("Android 11"), Some("11")),
-        "Android13" => (Some("Android 13"), Some("13")),
+        "Android13" | "Tiramisu64" => (Some("Android 13"), Some("13")),
         _ => (None, None),
     }
 }
@@ -2263,14 +2396,82 @@ fn capabilities_for_instance(instance: &BlueStacksInstanceInfo) -> EmulatorCapab
     }
 }
 
-fn running_player_commands() -> Vec<Vec<String>> {
-    let system = hbb_common::sysinfo::System::new_all();
+fn running_player_commands(system: &hbb_common::sysinfo::System) -> Vec<Vec<String>> {
     system
         .processes()
         .values()
         .filter(|process| process.name().eq_ignore_ascii_case("HD-Player.exe"))
         .map(|process| process.cmd().to_vec())
         .collect()
+}
+
+fn running_player_ports(system: &hbb_common::sysinfo::System) -> ResultType<BTreeSet<u16>> {
+    use winapi::{
+        shared::{
+            iprtrmib::TCP_TABLE_OWNER_PID_LISTENER, tcpmib::MIB_TCPROW_OWNER_PID,
+            winerror::ERROR_INSUFFICIENT_BUFFER, ws2def::AF_INET,
+        },
+        um::iphlpapi::GetExtendedTcpTable,
+    };
+
+    let players: BTreeSet<_> = system
+        .processes()
+        .values()
+        .filter(|process| process.name().eq_ignore_ascii_case("HD-Player.exe"))
+        .map(|process| process.pid().as_u32())
+        .collect();
+    if players.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    // Elevated players may hide their command lines. The Windows TCP owner
+    // table still identifies which player owns each configured ADB listener.
+    let mut bytes = 0;
+    let result = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut bytes,
+            0,
+            AF_INET as u32,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if result != ERROR_INSUFFICIENT_BUFFER {
+        bail!("Could not size the TCP owner table: {result}")
+    }
+    let mut buffer = vec![0u32; (bytes as usize + 3) / 4];
+    let result = unsafe {
+        GetExtendedTcpTable(
+            buffer.as_mut_ptr() as _,
+            &mut bytes,
+            0,
+            AF_INET as u32,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if result != 0 {
+        bail!("Could not read the TCP owner table: {result}")
+    }
+    let count = buffer.first().copied().unwrap_or_default() as usize;
+    if bytes < 4
+        || bytes as usize > buffer.len() * 4
+        || count > (bytes as usize - 4) / std::mem::size_of::<MIB_TCPROW_OWNER_PID>()
+    {
+        bail!("Invalid TCP owner table size")
+    }
+    // The table header and rows contain only DWORD fields, aligned like buffer.
+    let rows = unsafe {
+        std::slice::from_raw_parts(buffer.as_ptr().add(1) as *const MIB_TCPROW_OWNER_PID, count)
+    };
+    Ok(rows
+        .iter()
+        .filter(|row| {
+            players.contains(&row.dwOwningPid)
+                && (row.dwLocalAddr == 0 || row.dwLocalAddr == u32::from_ne_bytes([127, 0, 0, 1]))
+        })
+        .map(|row| u16::from_be(row.dwLocalPort as u16))
+        .collect())
 }
 
 fn registry_installation() -> Option<BlueStacksInstallation> {
@@ -2352,7 +2553,18 @@ impl BlueStacksProvider {
 
     fn instances(&self) -> ResultType<Vec<BlueStacksInstanceInfo>> {
         let config = self.read_config()?;
-        Ok(instances_from_config(&config, &running_player_commands()))
+        let system = hbb_common::sysinfo::System::new_all();
+        let mut instances = instances_from_config(&config, &running_player_commands(&system));
+        match running_player_ports(&system) {
+            Ok(ports) => {
+                for instance in &mut instances {
+                    instance.running |= instance.adb_port.map(|port| ports.contains(&port)).unwrap_or(false);
+                }
+            }
+            Err(error) => hbb_common::throttled_log!(Duration::from_secs(5), warn,
+                "BlueStacks listener discovery failed: {error}"),
+        }
+        Ok(instances)
     }
 
     fn target_instance_id<'a>(&self, target: &'a EmulatorTarget) -> ResultType<&'a str> {
@@ -2645,6 +2857,16 @@ bst.status.hypervisor="hyperv"
         ]];
         let running = instances_from_config(&document, &running_commands).remove(0);
         assert_eq!(android_package_inventory_unavailable_reason(&running), None);
+    }
+
+    #[test]
+    fn android_ready_probe_does_not_depend_on_process_running_detection() {
+        let raw = CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
+        let document = BlueStacksConfigDocument::parse(&raw).unwrap();
+        let stopped = instances_from_config(&document, &[]).remove(0);
+
+        assert!(!stopped.running);
+        assert!(can_probe_android_ready(&stopped));
     }
 
     #[test]
@@ -3131,6 +3353,35 @@ bst.status.hypervisor="hyperv"
     }
 
     #[test]
+    fn parses_installed_apps_from_bluestacks_app_cache() {
+        let apps = parse_app_cache(
+            r#"[
+                {
+                    "activity": "com.nexon.ma.MainActivity",
+                    "appLabel": "MapleStory : Idle RPG",
+                    "category": "Role Playing",
+                    "package": "com.nexon.ma",
+                    "versionName": "1.16.0"
+                },
+                {
+                    "activity": "ignored.Activity",
+                    "appLabel": "Broken",
+                    "category": "",
+                    "package": "bad package",
+                    "versionName": "1"
+                }
+            ]"#,
+        );
+
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].package, "com.nexon.ma");
+        assert_eq!(apps[0].label, "MapleStory : Idle RPG");
+        assert_eq!(apps[0].activity, "com.nexon.ma.MainActivity");
+        assert_eq!(apps[0].category, "Role Playing");
+        assert_eq!(apps[0].version_name, "1.16.0");
+    }
+
+    #[test]
     fn parses_registered_uninstaller_without_shell_interpretation() {
         let (program, args) = parse_registered_uninstall_command(
             r#""C:\Program Files (x86)\BlueStacks X\Uninstall.exe" --uninstall --silent"#,
@@ -3184,6 +3435,17 @@ bst.status.hypervisor="hyperv"
     }
 
     #[test]
+    #[ignore = "requires BLUESTACKS_RUNNING_INSTANCE to name a running local instance; read-only"]
+    fn discovers_running_instance_without_readable_player_command_line() {
+        let instance_id = std::env::var("BLUESTACKS_RUNNING_INSTANCE").unwrap();
+        let provider = BlueStacksProvider::detect().unwrap().unwrap();
+        let target = provider.discover().unwrap().into_iter()
+            .find(|target| target.provider_instance_id == instance_id).unwrap();
+        assert_ne!(target.state, EmulatorState::Stopped,
+            "A running elevated player must not be reported as stopped");
+    }
+
+    #[test]
     #[ignore = "requires a local BlueStacks 5 installation; read-only"]
     fn detects_and_discovers_real_local_bluestacks_installation() {
         let provider = BlueStacksProvider::detect()
@@ -3203,6 +3465,25 @@ bst.status.hypervisor="hyperv"
                 target.capabilities
             );
         }
+    }
+
+    #[test]
+    #[ignore = "starts a local instance and launches the explicitly configured smoke-test app"]
+    fn plays_real_local_bluestacks_app() {
+        let instance_id = std::env::var("BLUESTACKS_SMOKE_INSTANCE").unwrap();
+        let package = std::env::var("BLUESTACKS_SMOKE_PACKAGE").unwrap();
+        let payload = serde_json::json!({
+            "action": "play_app",
+            "instance_id": instance_id,
+            "package": package,
+        });
+        let result: serde_json::Value = serde_json::from_str(
+            &handle_action_json(&payload.to_string()),
+        ).unwrap();
+        println!("launch result: {}", result["data"]["report"]);
+        assert_eq!(result["ok"], true, "{}", result["error"]);
+        assert_eq!(result["data"]["report"]["package"], package);
+        assert_eq!(result["data"]["report"]["adb_verified"], true);
     }
 
     #[test]

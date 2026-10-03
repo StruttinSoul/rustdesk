@@ -44,9 +44,141 @@ void main() {
 
     expect(find.text('Codex'), findsOneWidget);
     expect(find.text('Read only'), findsNothing);
-    expect(find.text('NEW CODEX TASK'), findsOneWidget);
+    expect(find.text('New task'), findsOneWidget);
     expect(find.text('Remote-control checkpoint'), findsOneWidget);
     expect(find.byType(TextField), findsNothing);
+  });
+
+  testWidgets(
+      'compact Codex task opens inside the workspace and returns to tasks',
+      (tester) async {
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (_, __) async {},
+    );
+
+    tester.view.physicalSize = const Size(390, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(MaterialApp(home: CodexPage(model: model)));
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'codex_version': '0.155.1',
+      'control': {'start_turn': true},
+      'threads': [
+        {
+          'id': 'thr_1',
+          'title': 'Inline task',
+          'project': 'RustDesk',
+          'originator': 'codex_desktop',
+          'updated_at': 1,
+          'state': 'idle',
+        }
+      ],
+    });
+    await tester.pump();
+
+    await tester.tap(find.text('Inline task'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byTooltip('Back to tasks'), findsOneWidget);
+    expect(find.byType(TextField), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Back to tasks'));
+    await tester.pump();
+    expect(find.text('Inline task'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+  });
+
+  testWidgets('wide Codex workspace keeps task list beside the active task',
+      (tester) async {
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (_, __) async {},
+    );
+
+    tester.view.physicalSize = const Size(900, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(MaterialApp(home: CodexPage(model: model)));
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'codex_version': '0.155.1',
+      'control': {'start_turn': true},
+      'threads': [
+        {
+          'id': 'thr_1',
+          'title': 'Split-view task',
+          'project': 'RustDesk',
+          'originator': 'codex_desktop',
+          'updated_at': 1,
+          'state': 'idle',
+        }
+      ],
+    });
+    await tester.pump();
+
+    await tester.tap(find.text('Split-view task'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Split-view task'), findsNWidgets(2));
+    expect(find.byTooltip('Back to tasks'), findsNothing);
+    expect(find.byType(TextField), findsOneWidget);
+  });
+
+  testWidgets('compact Codex workspace remains usable at 130 percent text size',
+      (tester) async {
+    final model = CodexModel(
+      Uuid().v4obj(),
+      commandSender: (_, __) async {},
+    );
+
+    tester.view.physicalSize = const Size(390, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(MaterialApp(
+      home: MediaQuery(
+        data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
+        child: CodexPage(model: model),
+      ),
+    ));
+    model.handleResponse({
+      'type': 'thread_list',
+      'request_id': 'threads',
+      'service_state': 'ready',
+      'codex_version': '0.155.1',
+      'control': {'start_thread': true, 'start_turn': true},
+      'threads': [
+        {
+          'id': 'thr_large_text',
+          'title': 'A longer Codex task title that still remains usable',
+          'project': 'RustDesk emulator remote',
+          'originator': 'codex_desktop',
+          'updated_at': 1,
+          'state': 'idle',
+        }
+      ],
+    });
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('New task'), findsOneWidget);
+    await tester.tap(find.textContaining('A longer Codex task title'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.takeException(), isNull);
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.text('Send'), findsOneWidget);
   });
 
   testWidgets('resumes then sends steers and interrupts a Codex task',
@@ -86,10 +218,10 @@ void main() {
     await tester.tap(find.text('Remote-control checkpoint'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
-    expect(find.text('RESUME NATIVELY'), findsOneWidget);
+    expect(find.text('Resume'), findsOneWidget);
     expect(find.byType(TextField), findsNothing);
 
-    await tester.tap(find.text('RESUME NATIVELY'));
+    await tester.tap(find.text('Resume'));
     await tester.pump();
     final resume =
         sent.lastWhere((command) => command.key == 'codex-resume-thread');
@@ -105,9 +237,9 @@ void main() {
     await tester.pump();
 
     expect(find.byType(TextField), findsOneWidget);
-    expect(find.text('SEND'), findsOneWidget);
+    expect(find.text('Send'), findsOneWidget);
     await tester.enterText(find.byType(TextField), 'Continue checkpoint 4');
-    await tester.tap(find.text('SEND'));
+    await tester.tap(find.text('Send'));
     await tester.pump();
     final start =
         sent.lastWhere((command) => command.key == 'codex-start-turn');
@@ -124,8 +256,8 @@ void main() {
     });
     await tester.pump();
 
-    expect(find.text('STARTING'), findsOneWidget);
-    expect(find.text('INTERRUPT'), findsNothing);
+    expect(find.text('Starting'), findsOneWidget);
+    expect(find.text('Stop'), findsNothing);
 
     model.handleResponse({
       'type': 'event',
@@ -140,10 +272,10 @@ void main() {
     });
     await tester.pump();
 
-    expect(find.text('STEER'), findsOneWidget);
-    expect(find.text('INTERRUPT'), findsOneWidget);
+    expect(find.text('Steer'), findsOneWidget);
+    expect(find.text('Stop'), findsOneWidget);
     await tester.enterText(find.byType(TextField), 'Use the typed transport');
-    await tester.tap(find.text('STEER'));
+    await tester.tap(find.text('Steer'));
     await tester.pump();
     final steer =
         sent.lastWhere((command) => command.key == 'codex-steer-turn');
@@ -160,7 +292,7 @@ void main() {
     });
     await tester.pump();
 
-    await tester.tap(find.text('INTERRUPT'));
+    await tester.tap(find.text('Stop'));
     await tester.pump();
     expect(sent.last.key, 'codex-interrupt-turn');
   });
@@ -215,10 +347,10 @@ void main() {
 
     expect(find.text('Command approval'), findsOneWidget);
     expect(find.text('cargo test codex'), findsOneWidget);
-    expect(find.text('DENY'), findsOneWidget);
-    expect(find.text('APPROVE'), findsOneWidget);
+    expect(find.text('Deny'), findsOneWidget);
+    expect(find.text('Approve'), findsOneWidget);
 
-    await tester.tap(find.text('APPROVE'));
+    await tester.tap(find.text('Approve'));
     await tester.pump();
     final response =
         sent.lastWhere((command) => command.key == 'codex-respond-approval');
@@ -281,9 +413,9 @@ void main() {
     await tester.tap(find.text('Desktop-owned task'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('OPEN WINDOWS APP'), findsOneWidget);
+    expect(find.text('Open Windows app'), findsOneWidget);
 
-    await tester.tap(find.text('OPEN WINDOWS APP'));
+    await tester.tap(find.text('Open Windows app'));
     await tester.pump();
     final handoff =
         sent.lastWhere((command) => command.key == 'codex-open-windows-app');
@@ -325,6 +457,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('Codex is unavailable'), findsOneWidget);
-    expect(find.text('OPEN WINDOWS APP'), findsOneWidget);
+    expect(find.text('Open Windows app'), findsOneWidget);
   });
 }

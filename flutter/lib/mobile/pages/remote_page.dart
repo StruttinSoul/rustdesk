@@ -25,6 +25,8 @@ import '../../utils/image.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
 import 'codex_page.dart';
+import 'emulator_page.dart';
+import 'target_dashboard_page.dart';
 
 final initText = '1' * 1024;
 
@@ -61,6 +63,7 @@ class RemotePage extends StatefulWidget {
 
 class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Timer? _timer;
+  bool _dashboardOpened = false;
   bool _showBar = !isWebDesktop;
   bool _showGestureHelp = false;
   String _value = '';
@@ -95,6 +98,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
+    gFFI.ffiModel.addListener(_openDashboardWhenReady);
     gFFI.start(
       widget.id,
       password: widget.password,
@@ -143,6 +147,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   @override
   Future<void> dispose() async {
+    gFFI.ffiModel.removeListener(_openDashboardWhenReady);
     WidgetsBinding.instance.removeObserver(this);
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
     // after several awaits (canvas save, image update, the `enable_soft_keyboard`
@@ -190,6 +195,22 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   // When swithing from other app to this app, try to sync clipboard.
   void trySyncClipboard() {
     gFFI.invokeMethod("try_sync_clipboard");
+  }
+
+  void _openDashboardWhenReady() {
+    if (!isAndroid ||
+        !mounted ||
+        _dashboardOpened ||
+        !gFFI.ffiModel.authenticatedPeer ||
+        !gFFI.ffiModel.pi.features.targetDashboard) return;
+    _dashboardOpened = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => TargetDashboardPage(ffi: gFFI),
+        ));
+      }
+    });
   }
 
   bool _shouldGateKeyboardForWayland() {
@@ -733,7 +754,18 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   List<TTextMenu> _getMobileActionMenus() {
     final actions = <TTextMenu>[];
-    if (gFFI.ffiModel.pi.features.codex) {
+    if (gFFI.ffiModel.pi.features.emulator) {
+      actions.add(TTextMenu(
+        child: const Text('Emulators'),
+        trailingIcon: Icon(Icons.tablet_android, color: MyTheme.accent),
+        onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => gFFI.ffiModel.pi.features.targetDashboard
+                ? TargetDashboardPage(ffi: gFFI)
+                : EmulatorPage(ffi: gFFI))),
+      ));
+    }
+    if (gFFI.ffiModel.pi.features.codex &&
+        !gFFI.ffiModel.pi.features.targetDashboard) {
       actions.add(
         TTextMenu(
           child: const Text('Codex'),

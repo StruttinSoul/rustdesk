@@ -74,6 +74,9 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
+#[cfg(windows)]
+#[path = "emulator/connection.rs"]
+mod emulator_connection;
 
 const FAILURE_IDX_ID_WHITELIST: usize = 2;
 // How long a rejection counts, so also how long a blocked address stays blocked. Longer
@@ -375,6 +378,16 @@ pub struct Connection {
     require_2fa: Option<totp_rs::TOTP>,
     awaiting_2fa: bool,
     keyboard: bool,
+    #[cfg(windows)]
+    emulator_session: Option<super::emulator::remote_windows::GuestSession>,
+    #[cfg(windows)]
+    emulator_tx: mpsc::Sender<super::emulator::remote::GuestEvent>,
+    #[cfg(windows)]
+    emulator_desktop_services: Vec<String>,
+    #[cfg(windows)]
+    emulator_previews: std::collections::BTreeMap<String, super::emulator::remote_windows::GuestSession>,
+    #[cfg(windows)]
+    emulator_dashboard: bool,
     clipboard: bool,
     audio: bool,
     file: bool,
@@ -551,6 +564,7 @@ impl Connection {
         let (tx_to_cm, rx_to_cm) = mpsc::unbounded_channel::<ipc::Data>();
         let (tx, mut rx) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
         let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
+        let (_emulator_tx, mut emulator_rx) = mpsc::channel::<super::emulator::remote::GuestEvent>(2);
         let (tx_input, _rx_input) = std_mpsc::channel();
         let (tx_from_authed, mut rx_from_authed) = mpsc::unbounded_channel::<ipc::Data>();
         let mut hbbs_rx = crate::hbbs_http::sync::signal_receiver();
@@ -588,6 +602,16 @@ impl Connection {
             authorized: false,
             unauthorized_id: Some(unauthorized),
             keyboard: Self::permission(keys::OPTION_ENABLE_KEYBOARD, &control_permissions),
+            #[cfg(windows)]
+            emulator_session: None,
+            #[cfg(windows)]
+            emulator_tx: _emulator_tx,
+            #[cfg(windows)]
+            emulator_desktop_services: Vec::new(),
+            #[cfg(windows)]
+            emulator_previews: Default::default(),
+            #[cfg(windows)]
+            emulator_dashboard: false,
             clipboard: Self::permission(keys::OPTION_ENABLE_CLIPBOARD, &control_permissions),
             audio: Self::permission(keys::OPTION_ENABLE_AUDIO, &control_permissions),
             // to-do: make sure is the option correct here
@@ -800,6 +824,8 @@ impl Connection {
                             if &name == "keyboard" {
                                 conn.keyboard = enabled;
                                 conn.send_permission(Permission::Keyboard, enabled).await;
+                                #[cfg(windows)]
+                                conn.enforce_guest_permissions().await;
                                 if let Some(s) = conn.server.upgrade() {
                                     s.write().unwrap().subscribe(
                                         super::clipboard_service::NAME,
@@ -1071,7 +1097,12 @@ impl Connection {
                         break;
                     }
                 }
+                Some(event) = emulator_rx.recv() => {
+                    if !conn.on_emulator_event(event).await { break; }
+                },
                 Some((instant, value)) = rx_video.recv() => {
+                    #[cfg(windows)]
+                    if conn.emulator_session.is_some() && !conn.emulator_dashboard { continue; }
                     if !conn.video_ack_required {
                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
                             video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
@@ -1083,6 +1114,11 @@ impl Connection {
                     }
                 },
                 Some((instant, value)) = rx.recv() => {
+                    #[cfg(windows)]
+                    if conn.emulator_session.is_some()
+                        && matches!(value.union.as_ref(), Some(message::Union::AudioFrame(_) | message::Union::CursorData(_) | message::Union::CursorId(_) | message::Union::CursorPosition(_) | message::Union::Clipboard(_) | message::Union::MultiClipboards(_) | message::Union::PeerInfo(_)))
+                        && !(conn.emulator_dashboard && matches!(value.union.as_ref(), Some(message::Union::PeerInfo(_))))
+                    { continue; }
                     let latency = instant.elapsed().as_millis() as i64;
                     #[allow(unused_mut)]
                     let mut msg = value;
@@ -2077,6 +2113,10 @@ impl Connection {
             terminal,
             #[cfg(target_os = "windows")]
             codex: self.is_remote() && crate::server::codex::is_available(),
+            #[cfg(windows)]
+            emulator: self.is_remote() && super::emulator::guest_runtime::helper_path().is_ok(),
+            #[cfg(windows)]
+            target_dashboard: self.is_remote() && super::emulator::guest_runtime::helper_path().is_ok(),
             ..Default::default()
         })
         .into();
@@ -2842,6 +2882,13 @@ impl Connection {
         }
     }
 
+    async fn on_emulator_event(&mut self, event: super::emulator::remote::GuestEvent) -> bool {
+        #[cfg(windows)]
+        { self.handle_emulator_event(event).await }
+        #[cfg(not(windows))]
+        { let _ = event; true }
+    }
+
     async fn on_message(&mut self, msg: Message) -> bool {
         if let Some(message::Union::Misc(misc)) = &msg.union {
             // Move the CloseReason forward, as this message needs to be received when unauthorized, especially for kcp.
@@ -2859,6 +2906,14 @@ impl Connection {
             if let Some(message) = self.authorized_scope_violation(&msg) {
                 return self.handle_authorized_scope_violation(message).await;
             }
+        }
+        #[cfg(windows)]
+        if let Some(message::Union::EmulatorRequest(request)) = msg.union.as_ref() {
+            return self.on_emulator_request(request.clone()).await;
+        }
+        #[cfg(windows)]
+        if self.emulator_session.is_some() && super::emulator::remote::blocks_desktop_message(&msg) {
+            return true;
         }
         // After handling CloseReason messages, proceed to process other message types
         if let Some(message::Union::LoginRequest(lr)) = msg.union {
@@ -6136,6 +6191,9 @@ impl Connection {
             Some(message::Union::CodexReadResponse(_)) => "codex_read_response",
             Some(message::Union::CodexControlRequest(_)) => "codex_control_request",
             Some(message::Union::CodexControlResponse(_)) => "codex_control_response",
+            Some(message::Union::EmulatorRequest(_)) => "emulator_request",
+            Some(message::Union::EmulatorResponse(_)) => "emulator_response",
+            Some(message::Union::EmulatorVideoFrame(_)) => "emulator_video_frame",
             Some(message::Union::PortForwardChannel(_)) => "port_forward_channel",
             Some(message::Union::Misc(misc)) => Self::misc_message_family(misc),
             Some(_) => "message.other",
@@ -6700,6 +6758,8 @@ impl Default for PortableState {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        self.emulator_session.take();
         #[cfg(target_os = "windows")]
         crate::server::codex::disconnect_client(self.inner.id);
 

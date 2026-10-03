@@ -2931,6 +2931,10 @@ pub fn main_set_common(_key: String, _value: String) {
 
 pub fn session_set_common(session_id: SessionID, key: String, value: String) {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
+        if key == "emulator-request" {
+            s.request_emulator(value);
+            return;
+        }
         if key == "continue-insecure-connection" {
             s.continue_insecure_connection(value == "Y");
             return;

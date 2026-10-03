@@ -2565,13 +2565,71 @@ class _BlueStacksSettingsState extends State<_BlueStacksSettings> {
                   : 'ADB disabled',
               style: Theme.of(context).textTheme.bodySmall,
             ).marginOnly(top: 2, bottom: 8),
+            if (instance.installedApps.isNotEmpty) ...[
+              Text(
+                'Installed apps',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ).marginOnly(bottom: 4),
+              ...instance.installedApps.map((app) {
+                final isDefault = instance.defaultPackage == app.package;
+                final label = app.label.isEmpty ? app.package : app.label;
+                final details = [
+                  app.category,
+                  if (app.versionName.isNotEmpty) 'v${app.versionName}',
+                  app.package,
+                ].where((value) => value.isNotEmpty).join(' • ');
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.sports_esports_outlined, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              label,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            if (details.isNotEmpty)
+                              Text(
+                                details,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                          ],
+                        ),
+                      ),
+                      if (isDefault) ...[
+                        _compactStatus(
+                          context,
+                          'Default',
+                          Icons.star_outline,
+                          active: true,
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      ElevatedButton.icon(
+                        onPressed: _model.actionPending
+                            ? null
+                            : () => _model.playApp(instance.id, app.package),
+                        icon: const Icon(Icons.play_arrow, size: 18),
+                        label: const Text('Play'),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+              const Divider(),
+            ],
             TextField(
               controller: controller,
               enabled: !_model.actionPending,
               decoration: const InputDecoration(
                 isDense: true,
                 border: OutlineInputBorder(),
-                labelText: 'Default Android package',
+                labelText: 'Default Android package (advanced)',
                 hintText: 'com.example.game',
               ),
             ),

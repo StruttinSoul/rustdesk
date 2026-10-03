@@ -101,6 +101,8 @@ mod audio_playback_recovery;
 mod audio_state_tests;
 pub mod file_trait;
 pub mod helper;
+mod emulator_protocol;
+pub use emulator_protocol::emulator_request_from_json;
 pub mod io_loop;
 pub mod screenshot;
 

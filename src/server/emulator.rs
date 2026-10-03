@@ -4,7 +4,16 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 #[cfg(windows)]
 pub mod bluestacks;
 #[cfg(windows)]
+pub mod boot_windows;
+#[cfg(windows)]
 pub mod ldplayer;
+#[cfg(windows)]
+pub mod guest_protocol;
+#[cfg(windows)]
+pub mod guest_runtime;
+pub mod remote;
+#[cfg(windows)]
+pub mod remote_windows;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProviderId(String);

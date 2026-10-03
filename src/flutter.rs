@@ -25,7 +25,7 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
 };
 
@@ -240,6 +240,7 @@ pub struct FlutterHandler {
     display_rgbas: Arc<RwLock<HashMap<usize, RgbaData>>>,
     peer_info: Arc<RwLock<PeerInfo>>,
     use_texture_render: Arc<AtomicBool>,
+    emulator_rgba_channels: Arc<Mutex<EmulatorRgbaChannels>>,
 }
 
 impl Default for FlutterHandler {
@@ -247,6 +248,7 @@ impl Default for FlutterHandler {
         Self {
             session_handlers: Default::default(),
             display_rgbas: Default::default(),
+            emulator_rgba_channels: Default::default(),
             peer_info: Default::default(),
             use_texture_render: Arc::new(
                 AtomicBool::new(crate::ui_interface::use_texture_render()),
@@ -261,6 +263,13 @@ struct RgbaData {
     // We must check the `rgba_valid` before reading [rgba].
     data: Vec<u8>,
     valid: bool,
+    retired: bool,
+}
+
+#[derive(Default)]
+struct EmulatorRgbaChannels {
+    selected: usize,
+    previews: Vec<usize>,
 }
 
 pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
@@ -886,7 +895,10 @@ impl InvokeUiSession for FlutterHandler {
         let mut features: HashMap<&str, bool> = Default::default();
         for ref f in pi.features.iter() {
             features.insert("privacy_mode", f.privacy_mode);
+            features.insert("terminal", f.terminal);
             features.insert("codex", f.codex);
+            features.insert("emulator", f.emulator);
+            features.insert("target_dashboard", f.target_dashboard);
         }
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {
@@ -1088,7 +1100,10 @@ impl InvokeUiSession for FlutterHandler {
 
     #[inline]
     fn next_rgba(&self, _display: usize) {
-        if let Some(rgba_data) = self.display_rgbas.write().unwrap().get_mut(&_display) {
+        let mut buffers = self.display_rgbas.write().unwrap();
+        if buffers.get(&_display).map(|rgba| rgba.retired).unwrap_or(false) {
+            buffers.remove(&_display);
+        } else if let Some(rgba_data) = buffers.get_mut(&_display) {
             rgba_data.valid = false;
         }
     }
@@ -1310,6 +1325,44 @@ impl InvokeUiSession for FlutterHandler {
         self.push_event_("codex_read_response", &event_data, &[], &[]);
     }
 
+    fn handle_emulator_response(&self, response: EmulatorResponse) {
+        if let Some(emulator_response::Union::Status(status)) = response.union.as_ref() {
+            let channel = 0x40000000 | (status.session_id as usize & 0x3fffffff);
+            let mut channels = self.emulator_rgba_channels.lock().unwrap();
+            if status.preview {
+                self.retire_emulator_rgba(|id| id == channel);
+            } else {
+                let previous = channels.selected;
+                channels.selected = if matches!(status.state.enum_value_or_default(), EmulatorSessionState::EmulatorStarting | EmulatorSessionState::EmulatorStreaming) { channel } else { 0 };
+                self.retire_emulator_rgba(|id| id == channel || id == previous);
+            }
+        }
+        let request_id = response.request_id;
+        let mut event = vec![("request_id", json!(request_id)), ("protocol_version", json!(response.protocol_version))];
+        match response.union {
+            Some(emulator_response::Union::Inventory(inventory)) => {
+                event.push(("type", json!("inventory")));
+                event.push(("instances", json!(inventory.instances.into_iter().map(|instance| json!({"target_id": instance.target_id, "provider": instance.provider, "name": instance.name, "state": instance.state, "android_version": instance.android_version, "default_package": instance.default_package, "last_error": instance.last_error})).collect::<Vec<_>>())));
+                event.push(("provider_errors", json!(inventory.provider_errors)));
+                event.push(("dashboard", json!(inventory.dashboard)));
+            }
+            Some(emulator_response::Union::Status(status)) => {
+                let state = match status.state.enum_value_or_default() { EmulatorSessionState::EmulatorStarting => "starting", EmulatorSessionState::EmulatorStreaming => "streaming", EmulatorSessionState::EmulatorDesktop => "desktop", EmulatorSessionState::EmulatorFailed => "failed", _ => "unknown" };
+                event.extend([("type", json!("status")), ("session_id", json!(status.session_id)), ("target_id", json!(status.target_id)), ("state", json!(state)), ("width", json!(status.width)), ("height", json!(status.height)), ("error", json!(status.error)), ("preview", json!(status.preview))]);
+            }
+            Some(emulator_response::Union::Previews(previews)) => {
+                let channels = previews.session_ids.iter().map(|id| 0x40000000 | (*id as usize & 0x3fffffff)).collect::<Vec<_>>();
+                let mut owned = self.emulator_rgba_channels.lock().unwrap();
+                owned.previews = channels;
+                self.retire_emulator_rgba(|channel| channel >= 0x40000000 && channel != owned.selected && !owned.previews.contains(&channel));
+                event.extend([("type", json!("previews")), ("enabled", json!(previews.enabled)), ("session_ids", json!(previews.session_ids))]);
+            }
+            Some(emulator_response::Union::Error(error)) => event.extend([("type", json!("error")), ("error", json!(error))]),
+            _ => return,
+        }
+        self.push_event_("emulator_response", &event, &[], &[]);
+    }
+
     fn handle_codex_control_response(&self, response: CodexControlResponse) {
         use base::message_proto::codex_control_response::Union;
 
@@ -1438,6 +1491,19 @@ fn codex_event_kind_name(kind: CodexEventKind) -> &'static str {
 }
 
 impl FlutterHandler {
+    fn retire_emulator_rgba(&self, retire: impl Fn(usize) -> bool) {
+        self.display_rgbas.write().unwrap().retain(|channel, rgba| {
+            if !retire(*channel) { return true; }
+            if rgba.valid {
+                // Dart may still be decoding this published native allocation.
+                rgba.retired = true;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     #[inline]
     fn on_rgba_soft_render(&self, display: usize, rgba: &mut scrap::ImageRgb) {
         // If the current rgba is not fetched by flutter, i.e., is valid.
@@ -1977,6 +2043,27 @@ pub extern "C" fn session_get_rgba(session_uuid_str: *const char, display: usize
 pub fn session_next_rgba(session_id: SessionID, display: usize) {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
         return s.ui_handler.next_rgba(display);
+    }
+}
+
+#[cfg(test)]
+mod dashboard_rgba_tests {
+    use super::*;
+
+    #[test]
+    fn retiring_dashboard_video_keeps_published_pixels_until_flutter_acknowledges() {
+        let handler = FlutterHandler::default();
+        let channel = 0x40000007;
+        handler.display_rgbas.write().unwrap().insert(channel, RgbaData {
+            data: vec![1, 2, 3, 4], valid: true, ..Default::default()
+        });
+        let pointer = handler.get_rgba(channel);
+        let mut response = EmulatorResponse::new();
+        response.set_previews(EmulatorPreviewState { enabled: true, ..Default::default() });
+        handler.handle_emulator_response(response);
+        assert_eq!(handler.get_rgba(channel), pointer, "The decoder still owns a published FFI buffer until next_rgba");
+        handler.next_rgba(channel);
+        assert!(handler.get_rgba(channel).is_null());
     }
 }
 

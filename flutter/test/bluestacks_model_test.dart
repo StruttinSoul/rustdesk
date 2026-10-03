@@ -37,6 +37,15 @@ void main() {
               'height': 1080,
               'dpi': 240,
               'default_package': 'com.nexon.maplem.global',
+              'installed_apps': [
+                {
+                  'package': 'com.nexon.ma',
+                  'label': 'MapleStory : Idle RPG',
+                  'activity': 'com.nexon.ma.MainActivity',
+                  'category': 'Role Playing',
+                  'version_name': '1.16.0',
+                }
+              ],
             }
           ],
           'services': [
@@ -86,6 +95,8 @@ void main() {
     expect(model.inventory.instances.single.id, 'Nougat32');
     expect(model.inventory.instances.single.defaultPackage,
         'com.nexon.maplem.global');
+    expect(model.inventory.instances.single.installedApps.single.label,
+        'MapleStory : Idle RPG');
     expect(model.inventory.components.single.canRemove, isTrue);
     expect(model.inventory.cleanupNeedsReapply, isTrue);
     expect(model.inventory.restoreAvailable, isTrue);
@@ -145,6 +156,18 @@ void main() {
       'action': 'remove_optional_component',
       'data': {
         'message': 'Removal started.',
+      },
+    });
+
+    await model.playApp('Tiramisu64', 'com.nexon.ma');
+    expect(sent.last['action'], 'play_app');
+    expect(sent.last['instance_id'], 'Tiramisu64');
+    expect(sent.last['package'], 'com.nexon.ma');
+    await model.handleActionResult({
+      'ok': true,
+      'action': 'play_app',
+      'data': {
+        'report': {'message': 'Launch requested.'},
       },
     });
 

@@ -102,6 +102,8 @@ message Features {
   bool terminal = 2;
   bool port_forward_mux = 3;
   bool codex = 4;
+  bool emulator = 5;
+  bool target_dashboard = 6;
 }
 
 message CodecAbility {
@@ -1252,6 +1254,115 @@ message CodexControlResponse {
   }
 }
 
+message EmulatorListRequest {}
+
+message EmulatorSelectRequest {
+  string target_id = 1;
+  bool start_if_stopped = 2;
+  bool launch_default_app = 3;
+}
+
+message EmulatorDesktopRequest {}
+
+message EmulatorPreviewRequest {
+  bool enabled = 1;
+  repeated string target_ids = 2;
+  repeated uint32 displays = 3;
+}
+
+message EmulatorPreviewState {
+  bool enabled = 1;
+  repeated uint64 session_ids = 2;
+}
+
+enum EmulatorNavigation {
+  EmulatorNavigationUnknown = 0;
+  EmulatorBack = 1;
+  EmulatorHome = 2;
+  EmulatorRecents = 3;
+}
+
+message EmulatorTouch {
+  uint32 action = 1;
+  uint64 pointer_id = 2;
+  uint32 x = 3;
+  uint32 y = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+}
+
+message EmulatorKey {
+  uint32 keycode = 1;
+  bool down = 2;
+}
+
+message EmulatorRequest {
+  uint64 request_id = 1;
+  uint32 protocol_version = 2;
+  uint64 session_id = 3;
+  oneof union {
+    EmulatorListRequest list = 4;
+    EmulatorSelectRequest select = 5;
+    EmulatorDesktopRequest desktop = 6;
+    EmulatorNavigation navigation = 7;
+    EmulatorTouch touch = 8;
+    EmulatorKey key = 9;
+    EmulatorPreviewRequest previews = 10;
+  }
+}
+
+message EmulatorInstance {
+  string target_id = 1;
+  string provider = 2;
+  string name = 3;
+  string state = 4;
+  string android_version = 5;
+  string default_package = 6;
+  string last_error = 7;
+}
+
+message EmulatorInventory {
+  repeated EmulatorInstance instances = 1;
+  repeated string provider_errors = 2;
+  bool dashboard = 3;
+}
+
+enum EmulatorSessionState {
+  EmulatorSessionUnknown = 0;
+  EmulatorStarting = 1;
+  EmulatorStreaming = 2;
+  EmulatorDesktop = 3;
+  EmulatorFailed = 4;
+}
+
+message EmulatorSessionStatus {
+  uint64 session_id = 1;
+  string target_id = 2;
+  EmulatorSessionState state = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  string error = 6;
+  bool preview = 7;
+}
+
+message EmulatorResponse {
+  uint64 request_id = 1;
+  uint32 protocol_version = 2;
+  oneof union {
+    EmulatorInventory inventory = 3;
+    EmulatorSessionStatus status = 4;
+    string error = 5;
+    EmulatorPreviewState previews = 6;
+  }
+}
+
+message EmulatorVideoFrame {
+  uint64 session_id = 1;
+  bytes data = 2;
+  bool key = 3;
+  int64 pts = 4;
+}
+
 message Message {
   oneof union {
     SignedId signed_id = 3;
@@ -1289,5 +1400,8 @@ message Message {
     CodexReadResponse codex_read_response = 35;
     CodexControlRequest codex_control_request = 36;
     CodexControlResponse codex_control_response = 37;
+    EmulatorRequest emulator_request = 38;
+    EmulatorResponse emulator_response = 39;
+    EmulatorVideoFrame emulator_video_frame = 40;
   }
 }

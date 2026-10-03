@@ -1,7 +1,7 @@
 # Live BlueStacks and PC monitor dashboard
 
 Date: 2026-10-02
-Status: Written specification awaiting user review. The conversational design was approved; implementation has not started.
+Status: Implemented inline, built and installed on the authorized phone. Initial dashboard/direct-connection/fullscreen checks passed; remaining physical scenarios are recorded in the implementation plan.
 
 ## Intended outcome
 

@@ -71,6 +71,9 @@ use std::{
     },
 };
 
+#[path = "emulator.rs"]
+mod emulator_client;
+
 pub struct Remote<T: InvokeUiSession> {
     handler: Session<T>,
     audio_sender: MediaSender,
@@ -102,6 +105,10 @@ pub struct Remote<T: InvokeUiSession> {
     last_record_state: bool,
     sent_close_reason: bool,
     cursor_dedupe: CursorDedupe,
+    emulator_session_id: u64,
+    guest_video: Option<emulator_client::GuestVideoDecoder>,
+    guest_previews: HashMap<u64, Option<emulator_client::GuestVideoDecoder>>,
+    dashboard_enabled: bool,
 }
 
 #[derive(Default)]
@@ -154,6 +161,10 @@ impl<T: InvokeUiSession> Remote<T> {
             last_record_state: false,
             sent_close_reason: false,
             cursor_dedupe: Default::default(),
+            emulator_session_id: 0,
+            guest_video: None,
+            guest_previews: Default::default(),
+            dashboard_enabled: false,
         }
     }
 
@@ -1532,6 +1543,7 @@ impl<T: InvokeUiSession> Remote<T> {
         if let Ok(msg_in) = Message::parse_from_bytes(&data) {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
+                    if self.emulator_session_id != 0 && !self.dashboard_enabled { return true; }
                     if !self.first_frame {
                         self.first_frame = true;
                         self.handler.close_success();
@@ -2362,6 +2374,8 @@ impl<T: InvokeUiSession> Remote<T> {
                 Some(message::Union::CodexControlResponse(response)) => {
                     self.handler.handle_codex_control_response(response);
                 }
+                Some(message::Union::EmulatorResponse(response)) => self.handle_emulator_response(response),
+                Some(message::Union::EmulatorVideoFrame(frame)) => self.handle_emulator_video(frame),
                 _ => {}
             }
         }
@@ -2369,6 +2383,10 @@ impl<T: InvokeUiSession> Remote<T> {
     }
 
     fn set_peer_info(&mut self, pi: &PeerInfo) {
+        self.emulator_session_id = 0;
+        self.guest_video.take();
+        self.guest_previews.clear();
+        self.dashboard_enabled = false;
         self.peer_info.platform = pi.platform.clone();
 
         // Check features field for terminal support

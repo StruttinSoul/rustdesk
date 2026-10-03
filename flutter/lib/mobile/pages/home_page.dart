@@ -43,6 +43,14 @@ class HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     initPages();
+    if (isAndroid && !bind.isIncomingOnly()) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        final id = await bind.mainGetLastRemoteId();
+        if (mounted && id.isNotEmpty && ModalRoute.of(context)?.isCurrent == true) {
+          await connect(context, id);
+        }
+      });
+    }
   }
 
   void initPages() {

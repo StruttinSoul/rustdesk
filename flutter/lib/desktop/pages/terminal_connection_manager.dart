@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
+import 'package:uuid/uuid.dart';
 import '../../models/model.dart';
 
 /// Manages terminal connections to ensure one FFI instance per peer
@@ -28,7 +29,10 @@ class TerminalConnectionManager {
 
     // Create new FFI instance for first terminal
     debugPrint('[TerminalConnectionManager] Creating new terminal connection for peer $peerId');
-    final ffi = FFI(null);
+    // Terminal can now live beside an active mobile remote-desktop session.
+    // Give it its own UI session id instead of the mobile singleton id so the
+    // terminal stream cannot replace or close the dashboard session.
+    final ffi = FFI(Uuid().v4obj());
     ffi.start(
       peerId,
       password: password,

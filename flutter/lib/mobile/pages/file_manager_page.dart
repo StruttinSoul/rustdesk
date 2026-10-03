@@ -6,10 +6,12 @@ import 'package:flutter_breadcrumb/flutter_breadcrumb.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:get/get.dart';
 import 'package:toggle_switch/toggle_switch.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../common.dart';
 import '../../common/widgets/dialog.dart';
 import '../../consts.dart';
+import '../../models/model.dart';
 
 class FileManagerPage extends StatefulWidget {
   FileManagerPage(
@@ -17,12 +19,18 @@ class FileManagerPage extends StatefulWidget {
       required this.id,
       this.password,
       this.isSharedPassword,
-      this.forceRelay})
+      this.forceRelay,
+      this.connToken,
+      this.embedded = false,
+      this.initiallyShowRemote = false})
       : super(key: key);
   final String id;
   final String? password;
   final bool? isSharedPassword;
   final bool? forceRelay;
+  final String? connToken;
+  final bool embedded;
+  final bool initiallyShowRemote;
 
   @override
   State<StatefulWidget> createState() => _FileManagerPageState();
@@ -64,7 +72,8 @@ extension SelectModeExt on Rx<SelectMode> {
 }
 
 class _FileManagerPageState extends State<FileManagerPage> {
-  final model = gFFI.fileModel;
+  late final FFI _ffi;
+  late final FileModel model;
   final selectMode = SelectMode.none.obs;
 
   var showLocal = true;
@@ -76,11 +85,11 @@ class _FileManagerPageState extends State<FileManagerPage> {
   final _uniqueKey = UniqueKey();
 
   Future<T> _runAndroidDocumentPicker<T>(Future<T> Function() action) async {
-    gFFI.ffiModel.beginAndroidDocumentPicker();
+    _ffi.ffiModel.beginAndroidDocumentPicker();
     try {
       return await action();
     } finally {
-      gFFI.ffiModel.endAndroidDocumentPicker();
+      _ffi.ffiModel.endAndroidDocumentPicker();
     }
   }
 
@@ -92,7 +101,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     final importIsWindows = currentOptions.isWindows;
     try {
       final selectedFiles = await _runAndroidDocumentPicker(() =>
-          gFFI.invokeMethodWithResult<List<dynamic>>(
+          _ffi.invokeMethodWithResult<List<dynamic>>(
               AndroidChannel.kPickImportFiles));
       if (selectedFiles == null || selectedFiles.isEmpty) return;
 
@@ -117,7 +126,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
           overwrite = true;
         }
         try {
-          final success = await gFFI.invokeMethod(
+          final success = await _ffi.invokeMethod(
               AndroidChannel.kImportFile,
               {'uri': uri, 'path': destination, 'overwrite': overwrite});
           if (success == true) {
@@ -144,7 +153,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
 
   Future<void> _exportFile(Entry entry) async {
     try {
-      final exported = await _runAndroidDocumentPicker(() => gFFI
+      final exported = await _runAndroidDocumentPicker(() => _ffi
           .invokeMethod(AndroidChannel.kExportFile, {'path': entry.path}));
       if (exported == true) {
         showToast(translate('Successful'));
@@ -161,7 +170,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     final importIsWindows = currentOptions.isWindows;
     try {
       final picked = await _runAndroidDocumentPicker(() =>
-          gFFI.invokeMethodWithResult<Map<dynamic, dynamic>>(
+          _ffi.invokeMethodWithResult<Map<dynamic, dynamic>>(
               AndroidChannel.kPickImportDirectory));
       if (picked == null || picked.isEmpty) return;
       final uri = picked['uri'] as String?;
@@ -187,7 +196,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
         showToast(translate('Failed'));
         return;
       }
-      final success = await gFFI.invokeMethod(AndroidChannel.kImportDirectory,
+      final success = await _ffi.invokeMethod(AndroidChannel.kImportDirectory,
           {'uri': uri, 'path': destination, 'overwrite': overwrite});
       if (success == true) {
         showToast(translate('Successful'));
@@ -226,7 +235,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
   Future<void> _exportPaths(Iterable<String> paths) async {
     try {
       final result = await _runAndroidDocumentPicker(() =>
-          gFFI.invokeMethodWithResult<Map<dynamic, dynamic>>(
+          _ffi.invokeMethodWithResult<Map<dynamic, dynamic>>(
               AndroidChannel.kExportFiles, {'paths': paths.toList()}));
       if (result == null) return;
       final exported = result['exported'] as int? ?? 0;
@@ -245,24 +254,32 @@ class _FileManagerPageState extends State<FileManagerPage> {
   @override
   void initState() {
     super.initState();
-    gFFI.start(widget.id,
+    showLocal = !widget.initiallyShowRemote;
+    _ffi = widget.embedded || widget.connToken != null
+        ? FFI(Uuid().v4obj())
+        : gFFI;
+    model = _ffi.fileModel;
+    _ffi.start(widget.id,
         isFileTransfer: true,
         password: widget.password,
         isSharedPassword: widget.isSharedPassword,
+        connToken: widget.connToken,
         forceRelay: widget.forceRelay);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      gFFI.dialogManager
-          .showLoading(translate('Connecting...'), onCancel: closeConnection);
+      _ffi.dialogManager.showLoading(translate('Connecting...'),
+          onCancel: widget.embedded ? _ffi.close : closeConnection);
     });
-    gFFI.ffiModel.updateEventListener(gFFI.sessionId, widget.id);
+    if (!widget.embedded) {
+      _ffi.ffiModel.updateEventListener(_ffi.sessionId, widget.id);
+    }
     WakelockManager.enable(_uniqueKey);
   }
 
   @override
   void dispose() {
     model.close().whenComplete(() {
-      gFFI.close();
-      gFFI.dialogManager.dismissAll();
+      _ffi.close();
+      _ffi.dialogManager.dismissAll();
       WakelockManager.disable(_uniqueKey);
     });
     model.jobController.clear();
@@ -275,6 +292,11 @@ class _FileManagerPageState extends State<FileManagerPage> {
         if (selectMode.value != SelectMode.none) {
           selectMode.value = SelectMode.none;
           setState(() {});
+          return false;
+        }
+        if (widget.embedded) {
+          // Let the dashboard's PopScope switch back to Devices.
+          return true;
         } else {
           currentFileController.goBack();
         }
@@ -283,11 +305,14 @@ class _FileManagerPageState extends State<FileManagerPage> {
       child: Scaffold(
         // backgroundColor: MyTheme.grayBg,
         appBar: AppBar(
-          leading: Row(children: [
-            IconButton(
-                icon: Icon(Icons.close),
-                onPressed: () => clientClose(gFFI.sessionId, gFFI)),
-          ]),
+          automaticallyImplyLeading: !widget.embedded,
+          leading: widget.embedded
+              ? null
+              : Row(children: [
+                  IconButton(
+                      icon: Icon(Icons.close),
+                      onPressed: () => clientClose(_ffi.sessionId, _ffi)),
+                ]),
           centerTitle: true,
           title: ToggleSwitch(
             initialLabelIndex: showLocal ? 0 : 1,
@@ -425,7 +450,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
                   } else if (v == "folder") {
                     final name = TextEditingController();
                     String? errorText;
-                    gFFI.dialogManager.show((setState, close, context) {
+                    _ffi.dialogManager.show((setState, close, context) {
                       name.addListener(() {
                         if (errorText != null) {
                           setState(() {
@@ -482,10 +507,12 @@ class _FileManagerPageState extends State<FileManagerPage> {
             ? FileManagerView(
                 controller: model.localController,
                 selectMode: selectMode,
+                remoteVersion: () => _ffi.ffiModel.pi.version,
               )
             : FileManagerView(
                 controller: model.remoteController,
                 selectMode: selectMode,
+                remoteVersion: () => _ffi.ffiModel.pi.version,
               ),
         bottomSheet: bottomSheet(),
       ));
@@ -655,8 +682,13 @@ class _FileManagerPageState extends State<FileManagerPage> {
 class FileManagerView extends StatefulWidget {
   final FileController controller;
   final Rx<SelectMode> selectMode;
+  final String Function() remoteVersion;
 
-  FileManagerView({required this.controller, required this.selectMode});
+  FileManagerView({
+    required this.controller,
+    required this.selectMode,
+    required this.remoteVersion,
+  });
 
   @override
   State<StatefulWidget> createState() => _FileManagerViewState();
@@ -761,8 +793,7 @@ class _FileManagerViewState extends State<FileManagerView> {
                                   enabled: false,
                                 ),
                                 if (!entries[index].isDrive &&
-                                    versionCmp(gFFI.ffiModel.pi.version,
-                                            "1.3.0") >=
+                                    versionCmp(widget.remoteVersion(), "1.3.0") >=
                                         0)
                                   PopupMenuItem(
                                     child: Text(translate("Rename")),

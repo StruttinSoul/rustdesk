@@ -71,12 +71,14 @@ class TerminalPage extends StatefulWidget {
     required this.isSharedPassword,
     this.forceRelay,
     this.connToken,
+    this.embedded = false,
   }) : super(key: key);
   final String id;
   final String? password;
   final bool? forceRelay;
   final bool? isSharedPassword;
   final String? connToken;
+  final bool embedded;
   final terminalId = 0;
 
   @override
@@ -168,7 +170,11 @@ class _TerminalPageState extends State<TerminalPage>
     // Auto-close connection when shell exits
     _terminalModel.onClosed = () {
       if (mounted) {
-        closeConnection(id: widget.id);
+        if (widget.embedded) {
+          unawaited(_ffi.close());
+        } else {
+          closeConnection(id: widget.id);
+        }
       }
     };
 
@@ -190,14 +196,16 @@ class _TerminalPageState extends State<TerminalPage>
         bind.mainGetLocalOption(key: kOptionShowTerminalCtrlKeys) == 'Y';
     // Initialize terminal connection
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _ffi.dialogManager
-          .showLoading(translate('Connecting...'), onCancel: closeConnection);
+      _ffi.dialogManager.showLoading(translate('Connecting...'),
+          onCancel: widget.embedded ? _ffi.close : closeConnection);
 
       if (_showTerminalExtraKeys) {
         _updateKeyboardHeight();
       }
     });
-    _ffi.ffiModel.updateEventListener(_ffi.sessionId, widget.id);
+    if (!widget.embedded) {
+      _ffi.ffiModel.updateEventListener(_ffi.sessionId, widget.id);
+    }
   }
 
   void _handleTerminalClipboardWriteBlocked(String clipboardText) {
@@ -413,6 +421,7 @@ class _TerminalPageState extends State<TerminalPage>
     super.build(context);
     return WillPopScope(
       onWillPop: () async {
+        if (widget.embedded) return true;
         clientClose(sessionId, _ffi);
         return false; // Prevent default back behavior
       },
@@ -428,7 +437,7 @@ class _TerminalPageState extends State<TerminalPage>
         children: [
           Positioned.fill(
             child: SafeArea(
-              top: true,
+              top: !widget.embedded,
               child: LayoutBuilder(
                 builder: (context, constraints) {
                   final heightPx = constraints.maxHeight;
@@ -469,13 +478,13 @@ class _TerminalPageState extends State<TerminalPage>
           ),
           if (_showTerminalExtraKeys) _buildFloatingKeyboard(),
           // iOS-style circular close button in top-right corner
-          if (isIOS) _buildCloseButton(),
+          if (isIOS && !widget.embedded) _buildCloseButton(),
         ],
       ),
     );
 
     // Add iOS edge swipe gesture to exit (similar to Android back button)
-    if (isIOS) {
+    if (isIOS && !widget.embedded) {
       return LayoutBuilder(
         builder: (context, constraints) {
           final screenWidth = constraints.maxWidth;

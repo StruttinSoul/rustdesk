@@ -674,6 +674,8 @@ pub async fn start_server(is_server: bool, no_server: bool) {
 
     if is_server {
         crate::common::set_server_running(true);
+        #[cfg(windows)]
+        emulator::boot_windows::start_if_configured();
         std::thread::spawn(move || {
             if let Err(err) = crate::ipc::start("") {
                 log::error!("Failed to start ipc: {}", err);
