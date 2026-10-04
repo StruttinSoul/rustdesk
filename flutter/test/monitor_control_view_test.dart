@@ -7,6 +7,8 @@ void main() {
       {bool control = true,
       void Function(int, Offset)? pointer,
       ValueChanged<int>? scroll,
+      MonitorControlPreferences preferences = const MonitorControlPreferences(),
+      ValueChanged<MonitorControlPreferences>? onPreferencesChanged,
       VoidCallback? ctrlAltDel,
       VoidCallback? switchView,
       VoidCallback? dashboard}) async {
@@ -16,6 +18,8 @@ void main() {
             body: MonitorControlView(
           desktopSize: const Size(3840, 2160),
           canControl: control,
+          preferences: preferences,
+          onPreferencesChanged: onPreferencesChanged,
           onPointer: pointer ?? (_, __) {},
           onScroll: scroll ?? (_) {},
           onKeyboard: () {},
@@ -24,6 +28,30 @@ void main() {
           onCtrlAltDel: ctrlAltDel,
         ))));
   }
+
+  test('monitor preferences round trip safely', () {
+    const preferences = MonitorControlPreferences(
+      preferredView: MonitorViewPreference.readable,
+      precision: true,
+      toolbarDock: MonitorToolbarDock.left,
+      toolbarVisible: false,
+      thumbwheelVisible: true,
+      mouseButtonsVisible: true,
+      mouseButtonsPosition: Offset(0.25, 0.65),
+      orientation: MonitorOrientationPreference.portrait,
+    );
+
+    expect(
+        MonitorControlPreferences.fromJson(preferences.toJson()), preferences);
+    expect(
+        monitorUsesLandscape(
+            MonitorOrientationPreference.auto, const Size(2560, 1440)),
+        isTrue);
+    expect(
+        monitorUsesLandscape(
+            MonitorOrientationPreference.portrait, const Size(2560, 1440)),
+        isFalse);
+  });
 
   testWidgets('Windows opens fit-to-screen with TeamViewer-style toolbar',
       (tester) async {
@@ -186,6 +214,59 @@ void main() {
     await tester.tap(find.byTooltip('Dock controls left'));
     await tester.pump();
     expect(find.byTooltip('Dock controls right'), findsOneWidget);
+  });
+
+  testWidgets('thumbwheel scrolls without moving or clicking the pointer',
+      (tester) async {
+    final events = <int>[];
+    final scroll = <int>[];
+    await show(tester,
+        preferences: const MonitorControlPreferences(thumbwheelVisible: true),
+        pointer: (action, _) => events.add(action),
+        scroll: scroll.add);
+
+    final wheel = find.byKey(const ValueKey('monitor-thumbwheel'));
+    expect(wheel, findsOneWidget);
+    await tester.drag(wheel, const Offset(0, 80));
+    await tester.pump();
+
+    expect(scroll, isNotEmpty);
+    expect(events, isEmpty);
+  });
+
+  testWidgets('floating mouse buttons move and send explicit button events',
+      (tester) async {
+    final events = <int>[];
+    final changes = <MonitorControlPreferences>[];
+    await show(tester,
+        preferences: const MonitorControlPreferences(mouseButtonsVisible: true),
+        onPreferencesChanged: changes.add,
+        pointer: (action, _) => events.add(action));
+
+    final controls = find.byKey(const ValueKey('monitor-mouse-buttons'));
+    final before = tester.getTopLeft(controls);
+    await tester.drag(find.byKey(const ValueKey('monitor-mouse-buttons-drag')),
+        const Offset(-100, -80));
+    await tester.pump();
+    final after = tester.getTopLeft(controls);
+    expect(after, isNot(before));
+    expect(changes, isNotEmpty);
+
+    await tester.tap(find.byTooltip('Remote right mouse button'));
+    await tester.pump();
+    expect(events, containsAllInOrder([5, 6]));
+  });
+
+  testWidgets('orientation preference is reported from the display controls',
+      (tester) async {
+    final changes = <MonitorControlPreferences>[];
+    await show(tester, onPreferencesChanged: changes.add);
+    await tester.tap(find.byTooltip('Display'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Orientation: Auto'));
+    await tester.pump();
+
+    expect(changes.last.orientation, MonitorOrientationPreference.portrait);
   });
 
   testWidgets(

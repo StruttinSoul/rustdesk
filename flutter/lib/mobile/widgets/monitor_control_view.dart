@@ -4,12 +4,138 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'mirpg_remote_theme.dart';
 
+enum MonitorViewPreference { fit, readable }
+
+enum MonitorOrientationPreference { auto, portrait, landscape }
+
+enum MonitorToolbarDock { left, right }
+
+class MonitorControlPreferences {
+  const MonitorControlPreferences({
+    this.preferredView = MonitorViewPreference.fit,
+    this.precision = false,
+    this.toolbarDock = MonitorToolbarDock.right,
+    this.toolbarVisible = true,
+    this.thumbwheelVisible = false,
+    this.mouseButtonsVisible = false,
+    this.mouseButtonsPosition = const Offset(0.78, 0.58),
+    this.orientation = MonitorOrientationPreference.auto,
+  });
+
+  final MonitorViewPreference preferredView;
+  final bool precision;
+  final MonitorToolbarDock toolbarDock;
+  final bool toolbarVisible;
+  final bool thumbwheelVisible;
+  final bool mouseButtonsVisible;
+  final Offset mouseButtonsPosition;
+  final MonitorOrientationPreference orientation;
+
+  MonitorControlPreferences copyWith({
+    MonitorViewPreference? preferredView,
+    bool? precision,
+    MonitorToolbarDock? toolbarDock,
+    bool? toolbarVisible,
+    bool? thumbwheelVisible,
+    bool? mouseButtonsVisible,
+    Offset? mouseButtonsPosition,
+    MonitorOrientationPreference? orientation,
+  }) =>
+      MonitorControlPreferences(
+        preferredView: preferredView ?? this.preferredView,
+        precision: precision ?? this.precision,
+        toolbarDock: toolbarDock ?? this.toolbarDock,
+        toolbarVisible: toolbarVisible ?? this.toolbarVisible,
+        thumbwheelVisible: thumbwheelVisible ?? this.thumbwheelVisible,
+        mouseButtonsVisible: mouseButtonsVisible ?? this.mouseButtonsVisible,
+        mouseButtonsPosition: mouseButtonsPosition ?? this.mouseButtonsPosition,
+        orientation: orientation ?? this.orientation,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'view': preferredView.name,
+        'precision': precision,
+        'dock': toolbarDock.name,
+        'toolbar': toolbarVisible,
+        'thumbwheel': thumbwheelVisible,
+        'mouseButtons': mouseButtonsVisible,
+        'mouseX': mouseButtonsPosition.dx,
+        'mouseY': mouseButtonsPosition.dy,
+        'orientation': orientation.name,
+      };
+
+  factory MonitorControlPreferences.fromJson(Map<String, dynamic> json) {
+    T enumValue<T extends Enum>(Iterable<T> values, dynamic raw, T fallback) =>
+        values.cast<T?>().firstWhere((value) => value?.name == raw,
+            orElse: () => fallback) ??
+        fallback;
+    double normalized(dynamic value, double fallback) {
+      final parsed = value is num ? value.toDouble() : fallback;
+      return parsed.clamp(0.0, 1.0).toDouble();
+    }
+
+    return MonitorControlPreferences(
+      preferredView: enumValue(MonitorViewPreference.values, json['view'],
+          MonitorViewPreference.fit),
+      precision: json['precision'] == true,
+      toolbarDock: enumValue(
+          MonitorToolbarDock.values, json['dock'], MonitorToolbarDock.right),
+      toolbarVisible: json['toolbar'] != false,
+      thumbwheelVisible: json['thumbwheel'] == true,
+      mouseButtonsVisible: json['mouseButtons'] == true,
+      mouseButtonsPosition: Offset(
+        normalized(json['mouseX'], 0.78),
+        normalized(json['mouseY'], 0.58),
+      ),
+      orientation: enumValue(MonitorOrientationPreference.values,
+          json['orientation'], MonitorOrientationPreference.auto),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is MonitorControlPreferences &&
+      preferredView == other.preferredView &&
+      precision == other.precision &&
+      toolbarDock == other.toolbarDock &&
+      toolbarVisible == other.toolbarVisible &&
+      thumbwheelVisible == other.thumbwheelVisible &&
+      mouseButtonsVisible == other.mouseButtonsVisible &&
+      mouseButtonsPosition == other.mouseButtonsPosition &&
+      orientation == other.orientation;
+
+  @override
+  int get hashCode => Object.hash(
+      preferredView,
+      precision,
+      toolbarDock,
+      toolbarVisible,
+      thumbwheelVisible,
+      mouseButtonsVisible,
+      mouseButtonsPosition,
+      orientation);
+}
+
+bool monitorUsesLandscape(
+    MonitorOrientationPreference preference, Size desktopSize) {
+  switch (preference) {
+    case MonitorOrientationPreference.portrait:
+      return false;
+    case MonitorOrientationPreference.landscape:
+      return true;
+    case MonitorOrientationPreference.auto:
+      return desktopSize.width > desktopSize.height;
+  }
+}
+
 class MonitorControlView extends StatefulWidget {
   const MonitorControlView(
       {super.key,
       required this.desktopSize,
       this.image,
       required this.canControl,
+      this.preferences = const MonitorControlPreferences(),
+      this.onPreferencesChanged,
       this.localViewOnly = false,
       this.onLocalViewOnlyChanged,
       required this.onPointer,
@@ -21,6 +147,8 @@ class MonitorControlView extends StatefulWidget {
   final Size desktopSize;
   final ui.Image? image;
   final bool canControl;
+  final MonitorControlPreferences preferences;
+  final ValueChanged<MonitorControlPreferences>? onPreferencesChanged;
   final bool localViewOnly;
   final ValueChanged<bool>? onLocalViewOnlyChanged;
   final void Function(int action, Offset point) onPointer;
@@ -249,16 +377,26 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
 
 class _MonitorControlViewState extends State<MonitorControlView> {
   static const double _precisionGain = 0.35;
+  static const Size _floatingMouseSize = Size(132, 52);
   late Offset _cursor = widget.desktopSize.center(Offset.zero);
   Size _viewport = Size.zero;
   Offset _offset = Offset.zero;
   double _fit = 1;
   double? _zoom;
-  _MonitorViewPreset _viewPreset = _MonitorViewPreset.fit;
+  late _MonitorViewPreset _viewPreset;
+  late MonitorViewPreference _preferredView;
   bool _panMode = false;
-  bool _precision = false;
+  late bool _precision;
   bool _dragLocked = false;
-  _ToolbarDock _toolbarDock = _ToolbarDock.right;
+  late MonitorToolbarDock _toolbarDock;
+  late bool _toolbarVisible;
+  late bool _thumbwheelVisible;
+  late bool _mouseButtonsVisible;
+  late Offset _mouseButtonsPosition;
+  late MonitorOrientationPreference _orientationPreference;
+  bool _floatingLeftPressed = false;
+  bool _floatingRightPressed = false;
+  double _thumbwheelDelta = 0;
   double _gestureScale = 1;
   double _wheel = 0;
   int _fingers = 0;
@@ -271,20 +409,63 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   int _twoFingerUpdates = 0;
   double _twoFingerStartScale = 1;
   Offset _twoFingerPendingDelta = Offset.zero;
-  bool _toolbarVisible = true;
   _MonitorPanel _panel = _MonitorPanel.none;
   double get _scale => _fit * (_zoom ?? 1);
   bool get _canSendInput => widget.canControl && !widget.localViewOnly;
 
   @override
+  void initState() {
+    super.initState();
+    _loadPreferences(widget.preferences);
+  }
+
+  @override
   void didUpdateWidget(covariant MonitorControlView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.preferences != widget.preferences) {
+      _loadPreferences(widget.preferences, keepCustomZoom: true);
+    }
     if (_dragLocked && !_canSendInput) {
       _dragLocked = false;
       if (oldWidget.canControl && !oldWidget.localViewOnly) {
         widget.onPointer(1, _cursor);
       }
     }
+    if (!_canSendInput) {
+      _floatingLeftPressed = false;
+      _floatingRightPressed = false;
+    }
+  }
+
+  void _loadPreferences(MonitorControlPreferences preferences,
+      {bool keepCustomZoom = false}) {
+    _preferredView = preferences.preferredView;
+    if (!keepCustomZoom || _viewPreset != _MonitorViewPreset.custom) {
+      _viewPreset = preferences.preferredView == MonitorViewPreference.readable
+          ? _MonitorViewPreset.readable
+          : _MonitorViewPreset.fit;
+      _zoom = null;
+    }
+    _precision = preferences.precision;
+    _toolbarDock = preferences.toolbarDock;
+    _toolbarVisible = preferences.toolbarVisible;
+    _thumbwheelVisible = preferences.thumbwheelVisible;
+    _mouseButtonsVisible = preferences.mouseButtonsVisible;
+    _mouseButtonsPosition = preferences.mouseButtonsPosition;
+    _orientationPreference = preferences.orientation;
+  }
+
+  void _emitPreferences() {
+    widget.onPreferencesChanged?.call(MonitorControlPreferences(
+      preferredView: _preferredView,
+      precision: _precision,
+      toolbarDock: _toolbarDock,
+      toolbarVisible: _toolbarVisible,
+      thumbwheelVisible: _thumbwheelVisible,
+      mouseButtonsVisible: _mouseButtonsVisible,
+      mouseButtonsPosition: _mouseButtonsPosition,
+      orientation: _orientationPreference,
+    ));
   }
 
   void _limitOffset() {
@@ -313,12 +494,36 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     if (preset == _MonitorViewPreset.fit) {
       _zoom = 1;
       _viewPreset = preset;
+      _preferredView = MonitorViewPreference.fit;
       _limitOffset();
+      _emitPreferences();
       return;
     }
     final readableZoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
+    _preferredView = MonitorViewPreference.readable;
     _setZoom(readableZoom, _viewport.center(Offset.zero), preset: preset);
+    _emitPreferences();
   }
+
+  void _cycleOrientation() {
+    setState(() {
+      _orientationPreference = switch (_orientationPreference) {
+        MonitorOrientationPreference.auto =>
+          MonitorOrientationPreference.portrait,
+        MonitorOrientationPreference.portrait =>
+          MonitorOrientationPreference.landscape,
+        MonitorOrientationPreference.landscape =>
+          MonitorOrientationPreference.auto,
+      };
+    });
+    _emitPreferences();
+  }
+
+  String get _orientationLabel => switch (_orientationPreference) {
+        MonitorOrientationPreference.auto => 'Auto',
+        MonitorOrientationPreference.portrait => 'Portrait',
+        MonitorOrientationPreference.landscape => 'Landscape',
+      };
 
   String get _viewLabel {
     switch (_viewPreset) {
@@ -506,7 +711,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                     'Precision',
                     Icons.gps_fixed,
                     _canSendInput
-                        ? () => setState(() => _precision = !_precision)
+                        ? () {
+                            setState(() => _precision = !_precision);
+                            _emitPreferences();
+                          }
                         : null,
                     selected: _precision),
                 _button('Drag lock', Icons.drag_indicator,
@@ -523,17 +731,33 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                             .onLocalViewOnlyChanged!(!widget.localViewOnly),
                     selected: widget.localViewOnly),
                 _button(
-                    _toolbarDock == _ToolbarDock.right
+                    _toolbarDock == MonitorToolbarDock.right
                         ? 'Dock controls left'
                         : 'Dock controls right',
-                    _toolbarDock == _ToolbarDock.right
+                    _toolbarDock == MonitorToolbarDock.right
                         ? Icons.align_horizontal_left
-                        : Icons.align_horizontal_right,
-                    () => setState(() {
-                          _toolbarDock = _toolbarDock == _ToolbarDock.right
-                              ? _ToolbarDock.left
-                              : _ToolbarDock.right;
-                        })),
+                        : Icons.align_horizontal_right, () {
+                  setState(() {
+                    _toolbarDock = _toolbarDock == MonitorToolbarDock.right
+                        ? MonitorToolbarDock.left
+                        : MonitorToolbarDock.right;
+                  });
+                  _emitPreferences();
+                }),
+                _button(
+                    _mouseButtonsVisible
+                        ? 'Hide mouse buttons'
+                        : 'Show mouse buttons',
+                    Icons.mouse_outlined, () {
+                  setState(() => _mouseButtonsVisible = !_mouseButtonsVisible);
+                  _emitPreferences();
+                }, selected: _mouseButtonsVisible),
+                _button(
+                    _thumbwheelVisible ? 'Hide thumbwheel' : 'Show thumbwheel',
+                    Icons.swap_vert, () {
+                  setState(() => _thumbwheelVisible = !_thumbwheelVisible);
+                  _emitPreferences();
+                }, selected: _thumbwheelVisible),
                 _button('Ctrl+Alt+Del', Icons.security,
                     _canSendInput ? widget.onCtrlAltDel : null),
                 _button('Gestures', Icons.help_outline, _showGestureHelp),
@@ -567,6 +791,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                 Icons.zoom_in,
                 () => setState(() => _setZoom(
                     (_zoom ?? 1) * 1.25, _viewport.center(Offset.zero)))),
+            _button('Orientation: $_orientationLabel', Icons.screen_rotation,
+                _cycleOrientation),
           ])));
 
   Widget _toolbarButton(String tooltip, IconData icon, VoidCallback? action,
@@ -610,6 +836,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                 _toolbarVisible = false;
                 _panel = _MonitorPanel.none;
               });
+              _emitPreferences();
             }),
           ])));
 
@@ -618,6 +845,142 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     if (_dragLocked == locked) return;
     setState(() => _dragLocked = locked);
     widget.onPointer(locked ? 0 : 1, _cursor);
+  }
+
+  Offset _floatingMouseTopLeft() {
+    final maxX = math.max(0.0, _viewport.width - _floatingMouseSize.width);
+    final maxY = math.max(0.0, _viewport.height - _floatingMouseSize.height);
+    return Offset(
+        _mouseButtonsPosition.dx * maxX, _mouseButtonsPosition.dy * maxY);
+  }
+
+  void _moveFloatingMouse(Offset delta) {
+    final maxX = math.max(1.0, _viewport.width - _floatingMouseSize.width);
+    final maxY = math.max(1.0, _viewport.height - _floatingMouseSize.height);
+    _mouseButtonsPosition = Offset(
+      (_mouseButtonsPosition.dx + delta.dx / maxX).clamp(0.0, 1.0).toDouble(),
+      (_mouseButtonsPosition.dy + delta.dy / maxY).clamp(0.0, 1.0).toDouble(),
+    );
+  }
+
+  void _setFloatingButton(bool left, bool down) {
+    if (down && !_canSendInput) return;
+    final wasDown = left ? _floatingLeftPressed : _floatingRightPressed;
+    if (wasDown == down) return;
+    setState(() {
+      if (left) {
+        _floatingLeftPressed = down;
+      } else {
+        _floatingRightPressed = down;
+      }
+    });
+    widget.onPointer(left ? (down ? 0 : 1) : (down ? 5 : 6), _cursor);
+  }
+
+  Widget _floatingMouseButton(
+      String tooltip, IconData icon, bool left, bool pressed) {
+    return Tooltip(
+      message: tooltip,
+      child: Listener(
+        onPointerDown:
+            _canSendInput ? (_) => _setFloatingButton(left, true) : null,
+        onPointerUp:
+            _canSendInput ? (_) => _setFloatingButton(left, false) : null,
+        onPointerCancel:
+            _canSendInput ? (_) => _setFloatingButton(left, false) : null,
+        child: Semantics(
+          button: true,
+          enabled: _canSendInput,
+          label: tooltip,
+          child: SizedBox(
+            width: 48,
+            height: 48,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: pressed
+                    ? MirpgRemoteTheme.accent.withOpacity(0.24)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon,
+                  color: _canSendInput
+                      ? pressed
+                          ? MirpgRemoteTheme.accent
+                          : Colors.white
+                      : Colors.white38),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _floatingMouseButtons() {
+    return Material(
+      key: const ValueKey('monitor-mouse-buttons'),
+      color: const Color(0xF2191F22),
+      elevation: 8,
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: _floatingMouseSize.width,
+        height: _floatingMouseSize.height,
+        child: Row(children: [
+          GestureDetector(
+            key: const ValueKey('monitor-mouse-buttons-drag'),
+            behavior: HitTestBehavior.opaque,
+            onPanUpdate: (details) =>
+                setState(() => _moveFloatingMouse(details.delta)),
+            onPanEnd: (_) => _emitPreferences(),
+            child: const SizedBox(
+              width: 32,
+              height: 52,
+              child:
+                  Icon(Icons.drag_indicator, color: Colors.white70, size: 20),
+            ),
+          ),
+          _floatingMouseButton('Remote left mouse button', Icons.mouse, true,
+              _floatingLeftPressed),
+          _floatingMouseButton('Remote right mouse button', Icons.ads_click,
+              false, _floatingRightPressed),
+        ]),
+      ),
+    );
+  }
+
+  Widget _thumbwheel() {
+    return GestureDetector(
+      key: const ValueKey('monitor-thumbwheel'),
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: _canSendInput
+          ? (details) {
+              _thumbwheelDelta += details.delta.dy / 8;
+              final steps = _thumbwheelDelta.truncate();
+              if (steps != 0) {
+                widget.onScroll(steps);
+                _thumbwheelDelta -= steps;
+              }
+            }
+          : null,
+      onVerticalDragEnd: (_) => _thumbwheelDelta = 0,
+      onVerticalDragCancel: () => _thumbwheelDelta = 0,
+      child: Material(
+        color: const Color(0xF2191F22),
+        elevation: 8,
+        borderRadius: BorderRadius.circular(18),
+        child: SizedBox(
+          width: 44,
+          height: 144,
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            const Icon(Icons.keyboard_arrow_up, color: Colors.white70),
+            const SizedBox(height: 12),
+            Icon(Icons.unfold_more,
+                color: _canSendInput ? Colors.white : Colors.white38),
+            const SizedBox(height: 12),
+            const Icon(Icons.keyboard_arrow_down, color: Colors.white70),
+          ]),
+        ),
+      ),
+    );
   }
 
   Rect _visibleSourceRect() {
@@ -743,10 +1106,17 @@ class _MonitorControlViewState extends State<MonitorControlView> {
           _viewport = size;
           _fit = math.min(size.width / widget.desktopSize.width,
               size.height / widget.desktopSize.height);
-          _zoom ??= 1;
+          if (_viewPreset == _MonitorViewPreset.readable) {
+            _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
+          } else if (_viewPreset == _MonitorViewPreset.fit) {
+            _zoom = 1;
+          } else {
+            _zoom ??= 1;
+          }
           _offset = size.center(Offset.zero) - _cursor * _scale;
           _limitOffset();
         }
+        final floatingMouse = _floatingMouseTopLeft();
         return Stack(children: [
           Positioned.fill(
               child: Listener(
@@ -807,10 +1177,21 @@ class _MonitorControlViewState extends State<MonitorControlView> {
             Positioned(top: 12, right: 12, child: _minimap()),
           if (_dragLocked || _panMode || _precision)
             Positioned(top: 12, left: 12, child: _modeBadge()),
+          if (_mouseButtonsVisible)
+            Positioned(
+                left: floatingMouse.dx,
+                top: floatingMouse.dy,
+                child: _floatingMouseButtons()),
+          if (_thumbwheelVisible)
+            Positioned(
+                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
+                top: math.max(12, (_viewport.height - 144) / 2),
+                child: _thumbwheel()),
           if (_toolbarVisible && _panel != _MonitorPanel.none)
             Positioned(
-                left: _toolbarDock == _ToolbarDock.left ? 8 : null,
-                right: _toolbarDock == _ToolbarDock.right ? 8 : null,
+                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
                 bottom: 72,
                 child: ConstrainedBox(
                     constraints: BoxConstraints(
@@ -820,14 +1201,14 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                         : _displayPanel())),
           if (_toolbarVisible)
             Positioned(
-                left: _toolbarDock == _ToolbarDock.left ? 8 : null,
-                right: _toolbarDock == _ToolbarDock.right ? 8 : null,
+                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
                 bottom: 8,
                 child: _sessionToolbar())
           else
             Positioned(
-                left: _toolbarDock == _ToolbarDock.left ? 4 : null,
-                right: _toolbarDock == _ToolbarDock.right ? 4 : null,
+                left: _toolbarDock == MonitorToolbarDock.left ? 4 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 4 : null,
                 bottom: 4,
                 child: Material(
                     color: const Color(0xF2191F22),
@@ -837,8 +1218,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                         tooltip: 'Show toolbar',
                         color: Colors.white,
                         icon: const Icon(Icons.keyboard_arrow_up),
-                        onPressed: () =>
-                            setState(() => _toolbarVisible = true)))),
+                        onPressed: () {
+                          setState(() => _toolbarVisible = true);
+                          _emitPreferences();
+                        }))),
         ]);
       });
 }
@@ -850,5 +1233,3 @@ enum _TwoFingerMode { undecided, scroll, pinch }
 enum _MonitorViewPreset { fit, readable, custom }
 
 enum _MonitorKeyboardMode { text, keys }
-
-enum _ToolbarDock { left, right }

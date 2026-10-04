@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
@@ -39,8 +40,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   bool _chooser = false;
   bool _background = false;
   bool _monitorDown = false;
+  bool _monitorRightDown = false;
   bool _monitorLocalViewOnly = false;
   final Set<int> _monitorHeldKeys = <int>{};
+  final Map<int, MonitorControlPreferences> _monitorPreferences =
+      <int, MonitorControlPreferences>{};
   Future<void> _monitorEvents = Future.value();
   bool? _landscape;
   String _subscription = '';
@@ -54,6 +58,40 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   bool _powershellOpened = false;
   bool _codexOpened = false;
   EmulatorModel get model => widget.ffi.emulatorModel;
+
+  String _monitorPreferenceKey(int display) =>
+      'mirpg-monitor-controls:${widget.ffi.id}:monitor:$display';
+
+  MonitorControlPreferences _preferencesForMonitor(int display) {
+    return _monitorPreferences.putIfAbsent(display, () {
+      final raw = bind.getLocalFlutterOption(k: _monitorPreferenceKey(display));
+      if (raw.isEmpty) return const MonitorControlPreferences();
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          return MonitorControlPreferences.fromJson(
+              Map<String, dynamic>.from(decoded));
+        }
+      } catch (_) {
+        // Ignore corrupt or stale local preferences and fall back safely.
+      }
+      return const MonitorControlPreferences();
+    });
+  }
+
+  void _saveMonitorPreferences(
+      int display, MonitorControlPreferences preferences) {
+    final previous = _preferencesForMonitor(display);
+    _monitorPreferences[display] = preferences;
+    unawaited(bind.setLocalFlutterOption(
+        k: _monitorPreferenceKey(display),
+        v: jsonEncode(preferences.toJson())));
+    if (previous.orientation != preferences.orientation &&
+        _fullscreen?.display == display) {
+      _landscape = null;
+      _presentation();
+    }
+  }
 
   List<_Target> get targets => [
         for (final instance in model.instances)
@@ -188,7 +226,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         ? model.height
         : widget.ffi.ffiModel.pi.displays[display].height;
     if (width <= 0 || height <= 0) return;
-    final landscape = width > height;
+    final landscape = display == null
+        ? width > height
+        : monitorUsesLandscape(
+            _preferencesForMonitor(display).orientation,
+            Size(width.toDouble(), height.toDouble()),
+          );
     if (_landscape == landscape) return;
     _landscape = landscape;
     unawaited(SystemChrome.setPreferredOrientations(landscape
@@ -309,8 +352,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final activeSection =
         sections.contains(_section) ? _section : _ConnectedPcSection.devices;
     final sectionIndex = sections.indexOf(activeSection);
-    final connToken =
-        bind.sessionGetConnToken(sessionId: widget.ffi.sessionId);
+    final connToken = bind.sessionGetConnToken(sessionId: widget.ffi.sessionId);
     final pages = <Widget>[
       _devicesBody(),
       if (hostManagementAvailable)
@@ -452,7 +494,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(const SnackBar(
-        content: Text('Session still connected. Use the session menu to end it.'),
+        content:
+            Text('Session still connected. Use the session menu to end it.'),
         duration: Duration(seconds: 2),
       ));
   }
@@ -566,6 +609,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                           widget.ffi.imageModel.dashboardImage(target.display!);
                       final display =
                           widget.ffi.ffiModel.pi.displays[target.display!];
+                      final preferences =
+                          _preferencesForMonitor(target.display!);
                       return MonitorControlView(
                         key: ValueKey(
                             '${target.id}:${display.width}x${display.height}'),
@@ -574,6 +619,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         image: image,
                         canControl: image != null &&
                             _hostCanControlMonitor(target.display!),
+                        preferences: preferences,
+                        onPreferencesChanged: (next) =>
+                            _saveMonitorPreferences(target.display!, next),
                         localViewOnly: _monitorLocalViewOnly,
                         onLocalViewOnlyChanged: (value) =>
                             unawaited(_setMonitorLocalViewOnly(value)),
@@ -626,7 +674,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   Future<void> _monitorTouch(int action, Offset point, int index) async {
-    if (!_canControlMonitor(index) || (action == 1 && !_monitorDown)) return;
+    if (!_canControlMonitor(index) ||
+        (action == 0 && _monitorDown) ||
+        (action == 1 && !_monitorDown) ||
+        (action == 5 && _monitorRightDown) ||
+        (action == 6 && !_monitorRightDown)) return;
     final display = widget.ffi.ffiModel.pi.displays[index];
     if (!point.dx.isFinite ||
         !point.dy.isFinite ||
@@ -646,6 +698,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       await widget.ffi.inputModel.tap(MouseButtons.right);
     } else if (action == 4) {
       await widget.ffi.inputModel.tap(MouseButtons.wheel);
+    } else if (action == 5) {
+      _monitorRightDown = true;
+      await widget.ffi.inputModel.tapDown(MouseButtons.right);
+    } else if (action == 6) {
+      _monitorRightDown = false;
+      await widget.ffi.inputModel.tapUp(MouseButtons.right);
     }
   }
 
@@ -708,9 +766,14 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
 
   Future<void> _releaseMonitor() async {
     await _monitorEvents;
-    if (!_monitorDown) return;
-    _monitorDown = false;
-    await widget.ffi.inputModel.tapUp(MouseButtons.left);
+    if (_monitorDown) {
+      _monitorDown = false;
+      await widget.ffi.inputModel.tapUp(MouseButtons.left);
+    }
+    if (_monitorRightDown) {
+      _monitorRightDown = false;
+      await widget.ffi.inputModel.tapUp(MouseButtons.right);
+    }
   }
 
   Future<void> _releaseMonitorInput() async {
@@ -812,7 +875,8 @@ class ConnectedPcSessionMenu extends StatelessWidget {
   final VoidCallback onEndSession;
 
   @override
-  Widget build(BuildContext context) => PopupMenuButton<_ConnectedPcSessionAction>(
+  Widget build(BuildContext context) =>
+      PopupMenuButton<_ConnectedPcSessionAction>(
         tooltip: 'Session menu',
         icon: const Icon(Icons.more_vert),
         onSelected: (action) {
