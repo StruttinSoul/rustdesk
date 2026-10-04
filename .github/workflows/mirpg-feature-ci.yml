@@ -151,6 +151,11 @@ jobs:
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
           Move-Item ./flutter/build/windows/x64/runner/Release ./MIRPG-Remote-Windows-x64
 
+      - name: Package pinned Android guest helper
+        shell: pwsh
+        run: |
+          .\tools\prepare_guest_helper.ps1 -DestinationDirectory .\MIRPG-Remote-Windows-x64
+
       - name: Upload Windows app
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

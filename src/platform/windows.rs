@@ -1105,7 +1105,12 @@ pub fn is_physical_console_session() -> Option<bool> {
 pub fn get_active_username() -> String {
     // get_active_user will give console username higher priority
     if let Some(name) = get_current_session_username() {
-        return name;
+        // Services run in session 0, where WTSUserName is commonly empty. An
+        // empty session-0 result must fall through to the active console/RDP
+        // lookup so LocalSystem-hosted features can resolve the signed-in user.
+        if !name.is_empty() {
+            return name;
+        }
     }
     if !is_root() {
         return crate::username();

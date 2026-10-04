@@ -2116,7 +2116,11 @@ impl Connection {
             #[cfg(windows)]
             emulator: self.is_remote() && super::emulator::guest_runtime::helper_path().is_ok(),
             #[cfg(windows)]
-            target_dashboard: self.is_remote() && super::emulator::guest_runtime::helper_path().is_ok(),
+            // The connected-PC dashboard also hosts Windows monitor, files, terminal,
+            // system-management, and Codex surfaces. Keep it available even when the
+            // optional Android guest helper is missing; only live emulator capture
+            // should depend on that helper.
+            target_dashboard: self.is_remote(),
             #[cfg(windows)]
             host_management: self.is_remote(),
             ..Default::default()
