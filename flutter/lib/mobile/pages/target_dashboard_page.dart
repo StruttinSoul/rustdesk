@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../consts.dart' show kPeerPlatformLinux, kPeerPlatformWindows;
+import '../../common/widgets/dialog.dart' show clientClose;
 import '../../models/platform_model.dart' show bind;
 import '../../models/emulator_model.dart';
 import '../../models/input_model.dart';
@@ -12,7 +13,9 @@ import 'codex_page.dart';
 import 'emulator_page.dart';
 import 'file_manager_page.dart';
 import 'host_management_page.dart';
+import 'settings_page.dart';
 import 'terminal_page.dart';
+import '../widgets/mirpg_remote_theme.dart';
 import '../widgets/monitor_control_view.dart';
 
 enum _ConnectedPcSection { devices, system, files, powershell, codex }
@@ -370,70 +373,87 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         }
         unawaited(_leave());
       },
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(widget.ffi.ffiModel.pi.hostname.isEmpty
-              ? 'Your PC'
-              : widget.ffi.ffiModel.pi.hostname),
-          leading: IconButton(
-              tooltip: 'Return to desktop',
-              icon: const Icon(Icons.close),
-              onPressed: () => unawaited(_leave())),
-          actions: [
-            Center(
-                child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Text(widget.ffi.ffiModel.direct == null
-                        ? 'Connecting'
-                        : widget.ffi.ffiModel.direct!
-                            ? 'Direct'
-                            : 'Relay'))),
-            if (activeSection == _ConnectedPcSection.devices)
-              IconButton(
-                  tooltip: 'Refresh views',
-                  icon: const Icon(Icons.refresh),
-                  onPressed: model.loading
-                      ? null
-                      : () {
-                          _subscription = '';
-                          unawaited(model.refresh());
-                        }),
-            if (activeSection == _ConnectedPcSection.system)
-              IconButton(
-                  tooltip: 'Refresh system status',
-                  icon: const Icon(Icons.refresh),
-                  onPressed: model.hostLoading
-                      ? null
-                      : () => unawaited(model.refreshHost())),
-          ],
-        ),
-        body: IndexedStack(
-          index: sectionIndex,
-          children: pages,
-        ),
-        bottomNavigationBar: ConnectedPcTabBar(
-          currentIndex: sectionIndex,
-          filesAvailable: filesAvailable,
-          hostManagementAvailable: hostManagementAvailable,
-          powershellAvailable: powershellAvailable,
-          codexAvailable: codexAvailable,
-          onDestinationSelected: (index) {
-            if (index < 0 || index >= sections.length) return;
-            final selected = sections[index];
-            if (selected == activeSection) return;
-            setState(() {
-              _section = selected;
-              if (selected == _ConnectedPcSection.system) _systemOpened = true;
-              if (selected == _ConnectedPcSection.files) _filesOpened = true;
-              if (selected == _ConnectedPcSection.powershell) {
-                _powershellOpened = true;
-              }
-              if (selected == _ConnectedPcSection.codex) _codexOpened = true;
-            });
-          },
+      child: Theme(
+        data: MirpgRemoteTheme.build(Theme.of(context)),
+        child: Scaffold(
+          appBar: AppBar(
+            automaticallyImplyLeading: false,
+            leading: const Icon(Icons.computer_outlined),
+            title: Text(widget.ffi.ffiModel.pi.hostname.isEmpty
+                ? 'Your PC'
+                : widget.ffi.ffiModel.pi.hostname),
+            actions: [
+              Center(
+                  child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text(widget.ffi.ffiModel.direct == null
+                          ? 'Connecting'
+                          : widget.ffi.ffiModel.direct!
+                              ? 'Direct'
+                              : 'Relay'))),
+              if (activeSection == _ConnectedPcSection.devices)
+                IconButton(
+                    tooltip: 'Refresh views',
+                    icon: const Icon(Icons.refresh),
+                    onPressed: model.loading
+                        ? null
+                        : () {
+                            _subscription = '';
+                            unawaited(model.refresh());
+                          }),
+              if (activeSection == _ConnectedPcSection.system)
+                IconButton(
+                    tooltip: 'Refresh system status',
+                    icon: const Icon(Icons.refresh),
+                    onPressed: model.hostLoading
+                        ? null
+                        : () => unawaited(model.refreshHost())),
+              ConnectedPcSessionMenu(
+                onSettings: _openSettings,
+                onEndSession: () =>
+                    clientClose(widget.ffi.sessionId, widget.ffi),
+              ),
+            ],
+          ),
+          body: IndexedStack(
+            index: sectionIndex,
+            children: pages,
+          ),
+          bottomNavigationBar: ConnectedPcTabBar(
+            currentIndex: sectionIndex,
+            filesAvailable: filesAvailable,
+            hostManagementAvailable: hostManagementAvailable,
+            powershellAvailable: powershellAvailable,
+            codexAvailable: codexAvailable,
+            onDestinationSelected: (index) {
+              if (index < 0 || index >= sections.length) return;
+              final selected = sections[index];
+              if (selected == activeSection) return;
+              setState(() {
+                _section = selected;
+                if (selected == _ConnectedPcSection.system) {
+                  _systemOpened = true;
+                }
+                if (selected == _ConnectedPcSection.files) _filesOpened = true;
+                if (selected == _ConnectedPcSection.powershell) {
+                  _powershellOpened = true;
+                }
+                if (selected == _ConnectedPcSection.codex) _codexOpened = true;
+              });
+            },
+          ),
         ),
       ),
     );
+  }
+
+  void _openSettings() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => Scaffold(
+        appBar: AppBar(title: const Text('Settings')),
+        body: SettingsPage(),
+      ),
+    ));
   }
 
   Widget _devicesBody() => Column(children: [
@@ -690,7 +710,7 @@ class ConnectedPcTabBar extends StatelessWidget {
       const NavigationDestination(
         icon: Icon(Icons.devices_outlined),
         selectedIcon: Icon(Icons.devices_rounded),
-        label: 'Devices',
+        label: 'Overview',
       ),
       if (hostManagementAvailable)
         const NavigationDestination(
@@ -708,7 +728,7 @@ class ConnectedPcTabBar extends StatelessWidget {
         const NavigationDestination(
           icon: Icon(Icons.terminal_outlined),
           selectedIcon: Icon(Icons.terminal_rounded),
-          label: 'PowerShell',
+          label: 'Shell',
         ),
       if (codexAvailable)
         const NavigationDestination(
@@ -724,6 +744,52 @@ class ConnectedPcTabBar extends StatelessWidget {
       destinations: destinations,
     );
   }
+}
+
+enum _ConnectedPcSessionAction { settings, endSession }
+
+class ConnectedPcSessionMenu extends StatelessWidget {
+  const ConnectedPcSessionMenu({
+    super.key,
+    required this.onSettings,
+    required this.onEndSession,
+  });
+
+  final VoidCallback onSettings;
+  final VoidCallback onEndSession;
+
+  @override
+  Widget build(BuildContext context) => PopupMenuButton<_ConnectedPcSessionAction>(
+        tooltip: 'Session menu',
+        icon: const Icon(Icons.more_vert),
+        onSelected: (action) {
+          switch (action) {
+            case _ConnectedPcSessionAction.settings:
+              onSettings();
+            case _ConnectedPcSessionAction.endSession:
+              onEndSession();
+          }
+        },
+        itemBuilder: (context) => const [
+          PopupMenuItem(
+            value: _ConnectedPcSessionAction.settings,
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.settings_outlined),
+              title: Text('App settings'),
+            ),
+          ),
+          PopupMenuDivider(),
+          PopupMenuItem(
+            value: _ConnectedPcSessionAction.endSession,
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.logout),
+              title: Text('End session'),
+            ),
+          ),
+        ],
+      );
 }
 
 class _Target {

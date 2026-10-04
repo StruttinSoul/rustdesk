@@ -21,10 +21,10 @@ void main() {
       }),
     ));
 
-    expect(find.text('Devices'), findsOneWidget);
+    expect(find.text('Overview'), findsOneWidget);
     expect(find.text('System'), findsOneWidget);
     expect(find.text('Files'), findsOneWidget);
-    expect(find.text('PowerShell'), findsOneWidget);
+    expect(find.text('Shell'), findsOneWidget);
     expect(find.text('Codex'), findsOneWidget);
     expect(selected, 0);
 
@@ -36,7 +36,7 @@ void main() {
     await tester.pump();
     expect(selected, 2);
 
-    await tester.tap(find.text('PowerShell'));
+    await tester.tap(find.text('Shell'));
     await tester.pump();
     expect(selected, 3);
 
@@ -63,7 +63,7 @@ void main() {
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(find.text('System'), findsOneWidget);
     expect(find.text('Files'), findsOneWidget);
-    expect(find.text('PowerShell'), findsOneWidget);
+    expect(find.text('Shell'), findsOneWidget);
     expect(find.text('Codex'), findsNothing);
   });
 
@@ -82,11 +82,69 @@ void main() {
       ),
     ));
 
-    expect(find.text('Devices'), findsOneWidget);
+    expect(find.text('Overview'), findsOneWidget);
     expect(find.text('System'), findsNothing);
     expect(find.text('Files'), findsNothing);
-    expect(find.text('PowerShell'), findsNothing);
+    expect(find.text('Shell'), findsNothing);
     expect(find.text('Codex'), findsOneWidget);
+  });
+
+  testWidgets('connected PC navigation fits compact width at 130 percent text',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: MediaQuery(
+        data: const MediaQueryData(
+          size: Size(360, 800),
+          textScaler: TextScaler.linear(1.3),
+        ),
+        child: Scaffold(
+          bottomNavigationBar: ConnectedPcTabBar(
+            currentIndex: 0,
+            hostManagementAvailable: true,
+            filesAvailable: true,
+            powershellAvailable: true,
+            codexAvailable: true,
+            onDestinationSelected: (_) {},
+          ),
+        ),
+      ),
+    ));
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Overview'), findsOneWidget);
+    expect(find.text('Shell'), findsOneWidget);
+  });
+
+  testWidgets('connected PC session menu exposes settings and explicit end',
+      (tester) async {
+    var settings = 0;
+    var endSession = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        appBar: AppBar(actions: [
+          ConnectedPcSessionMenu(
+            onSettings: () => settings++,
+            onEndSession: () => endSession++,
+          ),
+        ]),
+      ),
+    ));
+
+    await tester.tap(find.byTooltip('Session menu'));
+    await tester.pumpAndSettle();
+    expect(find.text('App settings'), findsOneWidget);
+    expect(find.text('End session'), findsOneWidget);
+
+    await tester.tap(find.text('App settings'));
+    await tester.pumpAndSettle();
+    expect(settings, 1);
+    expect(endSession, 0);
+
+    await tester.tap(find.byTooltip('Session menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('End session'));
+    await tester.pumpAndSettle();
+    expect(endSession, 1);
   });
 
   testWidgets('stopped cards boot only after an explicit tap', (tester) async {
