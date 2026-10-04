@@ -7,6 +7,7 @@ import '../../common.dart';
 import '../../common/widgets/chat_page.dart';
 import '../../models/platform_model.dart';
 import '../../models/state_model.dart';
+import '../widgets/mirpg_remote_theme.dart';
 import 'connection_page.dart';
 
 abstract class PageShape extends Widget {
@@ -69,49 +70,44 @@ class HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-        onWillPop: () async {
-          if (_selectedIndex != 0) {
-            setState(() {
-              _selectedIndex = 0;
-            });
-          } else {
-            return true;
-          }
-          return false;
-        },
-        child: Scaffold(
-          // backgroundColor: MyTheme.grayBg,
-          appBar: AppBar(
-            centerTitle: true,
-            title: appTitle(),
-            actions: _pages.elementAt(_selectedIndex).appBarActions,
-          ),
-          bottomNavigationBar: BottomNavigationBar(
-            key: navigationBarKey,
-            items: _pages
-                .map((page) =>
-                    BottomNavigationBarItem(icon: page.icon, label: page.title))
-                .toList(),
-            currentIndex: _selectedIndex,
-            type: BottomNavigationBarType.fixed,
-            selectedItemColor: MyTheme.accent, //
-            unselectedItemColor: MyTheme.darkGray,
-            onTap: (index) => setState(() {
-              // close chat overlay when go chat page
-              if (_selectedIndex != index) {
-                _selectedIndex = index;
-                if (isChatPageCurrentTab) {
-                  gFFI.chatModel.hideChatIconOverlay();
-                  gFFI.chatModel.hideChatWindowOverlay();
-                  gFFI.chatModel.mobileClearClientUnread(
-                      gFFI.chatModel.currentKey.connId);
+    return Theme(
+      data: MirpgRemoteTheme.build(Theme.of(context)),
+      child: WillPopScope(
+          onWillPop: () async {
+            if (_selectedIndex != 0) {
+              setState(() {
+                _selectedIndex = 0;
+              });
+            } else {
+              return true;
+            }
+            return false;
+          },
+          child: Scaffold(
+            appBar: AppBar(
+              centerTitle: true,
+              title: appTitle(),
+              actions: _pages.elementAt(_selectedIndex).appBarActions,
+            ),
+            bottomNavigationBar: MobileHomeNavigationBar(
+              key: navigationBarKey,
+              pages: _pages,
+              currentIndex: _selectedIndex,
+              onDestinationSelected: (index) => setState(() {
+                if (_selectedIndex != index) {
+                  _selectedIndex = index;
+                  if (isChatPageCurrentTab) {
+                    gFFI.chatModel.hideChatIconOverlay();
+                    gFFI.chatModel.hideChatWindowOverlay();
+                    gFFI.chatModel.mobileClearClientUnread(
+                        gFFI.chatModel.currentKey.connId);
+                  }
                 }
-              }
-            }),
-          ),
-          body: _pages.elementAt(_selectedIndex),
-        ));
+              }),
+            ),
+            body: _pages.elementAt(_selectedIndex),
+          )),
+    );
   }
 
   Widget appTitle() {
@@ -160,6 +156,32 @@ class HomePageState extends State<HomePage> {
     }
     return Text(bind.mainGetAppNameSync());
   }
+}
+
+class MobileHomeNavigationBar extends StatelessWidget {
+  const MobileHomeNavigationBar({
+    super.key,
+    required this.pages,
+    required this.currentIndex,
+    required this.onDestinationSelected,
+  });
+
+  final List<PageShape> pages;
+  final int currentIndex;
+  final ValueChanged<int> onDestinationSelected;
+
+  @override
+  Widget build(BuildContext context) => NavigationBar(
+        selectedIndex: currentIndex.clamp(0, pages.length - 1),
+        onDestinationSelected: onDestinationSelected,
+        destinations: [
+          for (final page in pages)
+            NavigationDestination(
+              icon: page.icon,
+              label: page is ServerPage ? 'Share' : page.title,
+            ),
+        ],
+      );
 }
 
 class WebHomePage extends StatelessWidget {
