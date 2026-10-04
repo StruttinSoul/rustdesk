@@ -3,6 +3,34 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/mobile/pages/target_dashboard_page.dart';
 
 void main() {
+  test('connected workspace Back returns tabs to Overview without ending', () {
+    var returnedToOverview = 0;
+    var stayedConnected = 0;
+
+    handleConnectedPcWorkspaceBack(
+      atOverview: false,
+      onReturnToOverview: () => returnedToOverview++,
+      onStayConnected: () => stayedConnected++,
+    );
+
+    expect(returnedToOverview, 1);
+    expect(stayedConnected, 0);
+  });
+
+  test('connected workspace Back at Overview stays connected', () {
+    var returnedToOverview = 0;
+    var stayedConnected = 0;
+
+    handleConnectedPcWorkspaceBack(
+      atOverview: true,
+      onReturnToOverview: () => returnedToOverview++,
+      onStayConnected: () => stayedConnected++,
+    );
+
+    expect(returnedToOverview, 0);
+    expect(stayedConnected, 1);
+  });
+
   testWidgets('connected PC navigation exposes management tabs',
       (tester) async {
     var selected = 0;

@@ -37,7 +37,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   _Target? _fullscreen;
   bool _chooser = false;
   bool _background = false;
-  bool _leaving = false;
   bool _monitorDown = false;
   Future<void> _monitorEvents = Future.value();
   bool? _landscape;
@@ -69,7 +68,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     _scroll.addListener(_scrolled);
     unawaited(model.refresh());
     _refreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (!_background && !_leaving && !model.loading && !model.connecting) {
+      if (!_background && !model.loading && !model.connecting) {
         unawaited(model.refresh());
       }
     });
@@ -79,7 +78,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   void _changed() {
-    if (!mounted || _leaving) return;
+    if (!mounted) return;
     if (_monitorDown &&
         (!widget.ffi.ffiModel.keyboard || widget.ffi.ffiModel.viewOnly)) {
       unawaited(_releaseMonitor());
@@ -108,7 +107,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   void _subscribe() {
-    if (!mounted || _leaving) return;
+    if (!mounted) return;
     final all = targets;
     final guestIds = <String>[];
     final displays = <int>[];
@@ -147,7 +146,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   Future<void> _open(_Target target) async {
-    if (_leaving || model.connecting) return;
+    if (model.connecting) return;
     await _releaseMonitor();
     setState(() => _fullscreen = target);
     _subscription = '';
@@ -264,16 +263,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     }
   }
 
-  Future<void> _leave() async {
-    if (_leaving) return;
-    _leaving = true;
-    await _releaseMonitor();
-    await model.desktop();
-    await model.setPreviews([], [], enabled: false);
-    widget.ffi.imageModel.retainDashboardImages({});
-    if (mounted) Navigator.of(context).pop();
-  }
-
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -283,7 +272,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     _refreshTimer?.cancel();
     _scroll.dispose();
     _monitorFocus.dispose();
-    if (!_leaving) unawaited(model.setPreviews([], [], enabled: false));
+    unawaited(model.setPreviews([], [], enabled: false));
     unawaited(SystemChrome.setPreferredOrientations(const []));
     unawaited(
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []));
@@ -364,14 +353,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             : const SizedBox.shrink(),
     ];
     return PopScope(
-      canPop: _leaving,
+      canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        if (activeSection != _ConnectedPcSection.devices) {
-          setState(() => _section = _ConnectedPcSection.devices);
-          return;
-        }
-        unawaited(_leave());
+        handleConnectedPcWorkspaceBack(
+          atOverview: activeSection == _ConnectedPcSection.devices,
+          onReturnToOverview: () =>
+              setState(() => _section = _ConnectedPcSection.devices),
+          onStayConnected: _showSessionStillConnected,
+        );
       },
       child: Theme(
         data: MirpgRemoteTheme.build(Theme.of(context)),
@@ -454,6 +444,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         body: SettingsPage(),
       ),
     ));
+  }
+
+  void _showSessionStillConnected() {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(
+        content: Text('Session still connected. Use the session menu to end it.'),
+        duration: Duration(seconds: 2),
+      ));
   }
 
   Widget _devicesBody() => Column(children: [
@@ -683,6 +682,18 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     if (!_monitorDown) return;
     _monitorDown = false;
     await widget.ffi.inputModel.tapUp(MouseButtons.left);
+  }
+}
+
+void handleConnectedPcWorkspaceBack({
+  required bool atOverview,
+  required VoidCallback onReturnToOverview,
+  required VoidCallback onStayConnected,
+}) {
+  if (atOverview) {
+    onStayConnected();
+  } else {
+    onReturnToOverview();
   }
 }
 
