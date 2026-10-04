@@ -3,7 +3,8 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../../consts.dart' show kPeerPlatformLinux, kPeerPlatformWindows;
+import '../../consts.dart'
+    show kKeyFlutterKey, kPeerPlatformLinux, kPeerPlatformWindows;
 import '../../common/widgets/dialog.dart' show clientClose;
 import '../../models/platform_model.dart' show bind;
 import '../../models/emulator_model.dart';
@@ -38,6 +39,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   bool _chooser = false;
   bool _background = false;
   bool _monitorDown = false;
+  bool _monitorLocalViewOnly = false;
+  final Set<int> _monitorHeldKeys = <int>{};
   Future<void> _monitorEvents = Future.value();
   bool? _landscape;
   String _subscription = '';
@@ -79,9 +82,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
 
   void _changed() {
     if (!mounted) return;
-    if (_monitorDown &&
-        (!widget.ffi.ffiModel.keyboard || widget.ffi.ffiModel.viewOnly)) {
-      unawaited(_releaseMonitor());
+    if (!widget.ffi.ffiModel.keyboard || widget.ffi.ffiModel.viewOnly) {
+      unawaited(_releaseMonitorInput());
     }
     if (_fullscreen != null &&
         !targets.any((target) => target.id == _fullscreen!.id)) {
@@ -101,7 +103,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _background = state != AppLifecycleState.resumed;
-    if (_background) unawaited(_releaseMonitor());
+    if (_background) unawaited(_releaseMonitorInput());
     _subscription = '';
     _subscribe();
   }
@@ -147,7 +149,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
 
   Future<void> _open(_Target target) async {
     if (model.connecting) return;
-    await _releaseMonitor();
+    await _releaseMonitorInput();
     setState(() => _fullscreen = target);
     _subscription = '';
     _subscribe();
@@ -161,7 +163,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   Future<void> _dashboard() async {
-    await _releaseMonitor();
+    await _releaseMonitorInput();
     await model.desktop();
     if (!mounted) return;
     setState(() => _fullscreen = null);
@@ -203,7 +205,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   Future<void> _choose() async {
-    await _releaseMonitor();
+    await _releaseMonitorInput();
     if (!mounted) return;
     _chooser = true;
     _chooserStart = 0;
@@ -553,10 +555,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                 focusNode: _monitorFocus,
                 autofocus: true,
                 onKeyEvent: (event) {
-                  if (!model.selected &&
-                      !model.connecting &&
-                      widget.ffi.ffiModel.keyboard &&
-                      !widget.ffi.ffiModel.viewOnly) {
+                  if (_canControlMonitor(target.display!)) {
                     widget.ffi.inputModel.handleKeyEvent(event);
                   }
                 },
@@ -574,7 +573,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                             display.height.toDouble()),
                         image: image,
                         canControl: image != null &&
-                            _canControlMonitor(target.display!),
+                            _hostCanControlMonitor(target.display!),
+                        localViewOnly: _monitorLocalViewOnly,
+                        onLocalViewOnlyChanged: (value) =>
+                            unawaited(_setMonitorLocalViewOnly(value)),
                         onPointer: (action, point) => _queueMonitor(() =>
                             _monitorTouch(action, point, target.display!)),
                         onScroll: (steps) => _queueMonitor(() async {
@@ -602,7 +604,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             ]))),
       );
 
-  bool _canControlMonitor(int index) =>
+  bool _hostCanControlMonitor(int index) =>
       mounted &&
       !_background &&
       _fullscreen?.display == index &&
@@ -612,6 +614,16 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       !widget.ffi.ffiModel.viewOnly &&
       index >= 0 &&
       index < widget.ffi.ffiModel.pi.displays.length;
+
+  bool _canControlMonitor(int index) =>
+      !_monitorLocalViewOnly && _hostCanControlMonitor(index);
+
+  Future<void> _setMonitorLocalViewOnly(bool value) async {
+    if (value == _monitorLocalViewOnly) return;
+    if (value) await _releaseMonitorInput();
+    if (!mounted) return;
+    setState(() => _monitorLocalViewOnly = value);
+  }
 
   Future<void> _monitorTouch(int action, Offset point, int index) async {
     if (!_canControlMonitor(index) || (action == 1 && !_monitorDown)) return;
@@ -648,7 +660,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   Future<void> _monitorKeyboard(int index) async {
-    await _releaseMonitor();
+    await _releaseMonitorInput();
     if (!_canControlMonitor(index)) return;
     await widget.ffi.invokeMethod('enable_soft_keyboard', true);
     try {
@@ -670,6 +682,23 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         .tapHidKey(key.usbHidUsage & 0xFFFF);
                   }
                 }),
+                onKeyState: (key, down) => _queueMonitor(() async {
+                  if (!mounted ||
+                      _fullscreen?.display != index ||
+                      index < 0 ||
+                      index >= widget.ffi.ffiModel.pi.displays.length) {
+                    return;
+                  }
+                  if (down && !_canControlMonitor(index)) return;
+                  final hid = key.usbHidUsage & 0xFFFF;
+                  if (down) {
+                    if (!_monitorHeldKeys.add(hid)) return;
+                  } else if (!_monitorHeldKeys.remove(hid)) {
+                    return;
+                  }
+                  widget.ffi.inputModel
+                      .newKeyboardMode(kKeyFlutterKey, hid, down, false);
+                }),
               ));
     } finally {
       await widget.ffi.invokeMethod('enable_soft_keyboard', false);
@@ -682,6 +711,19 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     if (!_monitorDown) return;
     _monitorDown = false;
     await widget.ffi.inputModel.tapUp(MouseButtons.left);
+  }
+
+  Future<void> _releaseMonitorInput() async {
+    await _releaseMonitor();
+    widget.ffi.inputModel.toReleaseKeys
+        .release(widget.ffi.inputModel.handleKeyEvent);
+    widget.ffi.inputModel.toReleaseRawKeys
+        .release(widget.ffi.inputModel.handleRawKeyEvent);
+    widget.ffi.inputModel.resetModifiers();
+    for (final hid in _monitorHeldKeys.toList()) {
+      widget.ffi.inputModel.newKeyboardMode(kKeyFlutterKey, hid, false, false);
+    }
+    _monitorHeldKeys.clear();
   }
 }
 

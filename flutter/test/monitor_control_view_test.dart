@@ -30,7 +30,7 @@ void main() {
     await show(tester);
     final surface =
         tester.getSize(find.byKey(const ValueKey('monitor-trackpad')));
-    final desktop = tester.getSize(find.byType(RawImage));
+    final desktop = tester.getSize(find.byKey(const ValueKey('monitor-frame')));
     expect(desktop.width, closeTo(surface.width, 0.01));
     expect(desktop.height, lessThanOrEqualTo(surface.height));
     expect(find.byTooltip('Keyboard'), findsOneWidget);
@@ -38,12 +38,190 @@ void main() {
     expect(find.byTooltip('Display'), findsOneWidget);
     await tester.tap(find.byTooltip('Display'));
     await tester.pump();
-    expect(find.text('100%'), findsOneWidget);
+    expect(find.text('Fit'), findsOneWidget);
     await tester.tap(find.byTooltip('Zoom in'));
     await tester.pump(const Duration(milliseconds: 350));
-    expect(find.text('125%'), findsOneWidget);
-    expect(tester.getSize(find.byType(RawImage)).width,
+    expect(find.text('1.25× Fit'), findsOneWidget);
+    expect(tester.getSize(find.byKey(const ValueKey('monitor-frame'))).width,
         greaterThan(desktop.width));
+  });
+
+  testWidgets('Readable preset enlarges Windows and exposes a minimap',
+      (tester) async {
+    await show(tester);
+    final surface =
+        tester.getSize(find.byKey(const ValueKey('monitor-trackpad')));
+
+    await tester.tap(find.byTooltip('Display'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Readable'));
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('monitor-minimap')), findsOneWidget);
+    expect(find.text('Readable'), findsOneWidget);
+    expect(tester.getSize(find.byKey(const ValueKey('monitor-frame'))).width,
+        greaterThan(surface.width));
+  });
+
+  testWidgets('minimap navigation pans locally without remote input',
+      (tester) async {
+    final events = <int>[];
+    await show(tester, pointer: (action, _) => events.add(action));
+    await tester.tap(find.byTooltip('Display'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Readable'));
+    await tester.pump();
+
+    final frame = find.byKey(const ValueKey('monitor-frame'));
+    final before = tester.getTopLeft(frame);
+    final minimap = find.byKey(const ValueKey('monitor-minimap'));
+    await tester.tapAt(tester.getTopLeft(minimap) + const Offset(12, 12));
+    await tester.pump();
+
+    expect(events, isEmpty);
+    expect(tester.getTopLeft(frame), isNot(before));
+  });
+
+  testWidgets('Pan moves the viewport without moving the remote pointer',
+      (tester) async {
+    final events = <int>[];
+    await show(tester, pointer: (action, _) => events.add(action));
+    await tester.tap(find.byTooltip('Display'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Readable'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Pan'));
+    await tester.pump();
+
+    final frame = find.byKey(const ValueKey('monitor-frame'));
+    final before = tester.getTopLeft(frame);
+    await tester.drag(
+        find.byKey(const ValueKey('monitor-trackpad')), const Offset(90, 0));
+    await tester.pump();
+
+    expect(events, isEmpty);
+    expect(tester.getTopLeft(frame), isNot(before));
+  });
+
+  testWidgets('Precision reduces relative pointer gain', (tester) async {
+    final moves = <Offset>[];
+    await show(tester, pointer: (action, point) {
+      if (action == 2) moves.add(point);
+    });
+    final surface = find.byKey(const ValueKey('monitor-trackpad'));
+
+    await tester.drag(surface, const Offset(80, 0));
+    final normalEnd = moves.last.dx;
+    final normalDelta = normalEnd - 1920;
+    moves.clear();
+
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Precision'));
+    await tester.pump();
+    await tester.drag(surface, const Offset(80, 0));
+    final precisionDelta = moves.last.dx - normalEnd;
+
+    expect(precisionDelta.abs(), lessThan(normalDelta.abs() * 0.6));
+  });
+
+  testWidgets('drag lock remains releasable with the toolbar hidden',
+      (tester) async {
+    final events = <int>[];
+    await show(tester, pointer: (action, _) => events.add(action));
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Drag lock'));
+    await tester.pump();
+    expect(events, [0]);
+    expect(find.text('Drag locked'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Hide toolbar'));
+    await tester.pump();
+    expect(find.text('Drag locked'), findsOneWidget);
+    await tester.tap(find.text('Release'));
+    await tester.pump();
+    expect(events, [0, 1]);
+  });
+
+  testWidgets('drag lock releases when monitor control becomes unavailable',
+      (tester) async {
+    final events = <int>[];
+    var control = true;
+    late StateSetter update;
+    await tester.pumpWidget(MaterialApp(
+      home: StatefulBuilder(builder: (context, setState) {
+        update = setState;
+        return Scaffold(
+          body: MonitorControlView(
+            desktopSize: const Size(3840, 2160),
+            canControl: control,
+            onPointer: (action, _) => events.add(action),
+            onScroll: (_) {},
+            onKeyboard: () {},
+          ),
+        );
+      }),
+    ));
+
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Drag lock'));
+    await tester.pump();
+    expect(events, [0]);
+
+    update(() => control = false);
+    await tester.pump();
+    expect(events, [0, 1]);
+    expect(find.text('Drag locked'), findsNothing);
+  });
+
+  testWidgets('toolbar can dock left and right', (tester) async {
+    await show(tester);
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    expect(find.byTooltip('Dock controls left'), findsOneWidget);
+    await tester.tap(find.byTooltip('Dock controls left'));
+    await tester.pump();
+    expect(find.byTooltip('Dock controls right'), findsOneWidget);
+  });
+
+  testWidgets(
+      'local view only blocks monitor input without changing host access',
+      (tester) async {
+    final events = <int>[];
+    var localViewOnly = false;
+    late StateSetter update;
+    await tester.pumpWidget(MaterialApp(
+      home: StatefulBuilder(builder: (context, setState) {
+        update = setState;
+        return Scaffold(
+          body: MonitorControlView(
+            desktopSize: const Size(3840, 2160),
+            canControl: true,
+            localViewOnly: localViewOnly,
+            onLocalViewOnlyChanged: (value) {
+              update(() => localViewOnly = value);
+            },
+            onPointer: (action, _) => events.add(action),
+            onScroll: (_) {},
+            onKeyboard: () {},
+          ),
+        );
+      }),
+    ));
+
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('View only'));
+    await tester.pump();
+    expect(localViewOnly, isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('monitor-trackpad')));
+    await tester.pump();
+    expect(events, isEmpty);
   });
 
   testWidgets('TeamViewer mouse mode swipe moves and tap clicks',
@@ -97,7 +275,8 @@ void main() {
   testWidgets('TeamViewer pinch zooms the remote desktop', (tester) async {
     await show(tester);
     final surface = find.byKey(const ValueKey('monitor-trackpad'));
-    final before = tester.getSize(find.byType(RawImage)).width;
+    final before =
+        tester.getSize(find.byKey(const ValueKey('monitor-frame'))).width;
     final center = tester.getCenter(surface);
     final one =
         await tester.startGesture(center - const Offset(30, 0), pointer: 31);
@@ -110,7 +289,8 @@ void main() {
     await one.up();
     await two.up();
     await tester.pump();
-    expect(tester.getSize(find.byType(RawImage)).width, greaterThan(before));
+    expect(tester.getSize(find.byKey(const ValueKey('monitor-frame'))).width,
+        greaterThan(before));
   });
 
   testWidgets('TeamViewer toolbar exposes actions and navigation',
@@ -154,7 +334,58 @@ void main() {
     await tester.pump();
     await tester.tap(find.byTooltip('Fit screen'));
     await tester.pump(const Duration(milliseconds: 350));
-    expect(find.text('100%'), findsOneWidget);
+    expect(find.text('Fit'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Text input stays local until Send is explicitly tapped',
+      (tester) async {
+    final sent = <String>[];
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: MonitorKeyboardPanel(
+          onText: sent.add,
+          onKey: (_) {},
+        ),
+      ),
+    ));
+
+    await tester.enterText(find.byType(TextField), 'line one\nline two');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(sent, isEmpty);
+
+    await tester.tap(find.byTooltip('Send text'));
+    await tester.pump();
+    expect(sent, ['line one\nline two']);
+  });
+
+  testWidgets('sticky modifiers release when switching from Keys to Text',
+      (tester) async {
+    final states = <String>[];
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: MonitorKeyboardPanel(
+          onText: (_) {},
+          onKey: (_) {},
+          onKeyState: (key, down) =>
+              states.add('${key.debugName}:${down ? 'down' : 'up'}'),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('Keys'));
+    await tester.pump();
+    await tester.tap(find.text('Ctrl'));
+    await tester.pump();
+    expect(states, contains('Control Left:down'));
+
+    await tester.tap(find.text('Ctrl+C'));
+    await tester.pump();
+    expect(states, ['Control Left:down']);
+
+    await tester.tap(find.text('Text'));
+    await tester.pump();
+    expect(states, contains('Control Left:up'));
   });
 }
