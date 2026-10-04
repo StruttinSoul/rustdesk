@@ -7,7 +7,9 @@ void main() {
       {bool control = true,
       void Function(int, Offset)? pointer,
       ValueChanged<int>? scroll,
-      VoidCallback? ctrlAltDel}) async {
+      VoidCallback? ctrlAltDel,
+      VoidCallback? switchView,
+      VoidCallback? dashboard}) async {
     await tester.pumpWidget(MaterialApp(
         theme: ThemeData(splashFactory: NoSplash.splashFactory),
         home: Scaffold(
@@ -17,19 +19,24 @@ void main() {
           onPointer: pointer ?? (_, __) {},
           onScroll: scroll ?? (_) {},
           onKeyboard: () {},
+          onSwitchView: switchView,
+          onDashboard: dashboard,
           onCtrlAltDel: ctrlAltDel,
         ))));
   }
 
-  testWidgets('Windows opens fit-to-screen like AnyDesk', (tester) async {
+  testWidgets('Windows opens fit-to-screen with TeamViewer-style toolbar',
+      (tester) async {
     await show(tester);
     final surface =
         tester.getSize(find.byKey(const ValueKey('monitor-trackpad')));
     final desktop = tester.getSize(find.byType(RawImage));
     expect(desktop.width, closeTo(surface.width, 0.01));
     expect(desktop.height, lessThanOrEqualTo(surface.height));
-    expect(find.byIcon(Icons.mouse_outlined), findsOneWidget);
-    await tester.tap(find.byTooltip('Session menu'));
+    expect(find.byTooltip('Keyboard'), findsOneWidget);
+    expect(find.byTooltip('Actions'), findsOneWidget);
+    expect(find.byTooltip('Display'), findsOneWidget);
+    await tester.tap(find.byTooltip('Display'));
     await tester.pump();
     expect(find.text('100%'), findsOneWidget);
     await tester.tap(find.byTooltip('Zoom in'));
@@ -39,8 +46,7 @@ void main() {
         greaterThan(desktop.width));
   });
 
-  testWidgets(
-      'AnyDesk trackpad swipe moves, tap clicks, and two fingers only change the view',
+  testWidgets('TeamViewer mouse mode swipe moves and tap clicks',
       (tester) async {
     final events = <int>[];
     final scroll = <int>[];
@@ -51,26 +57,12 @@ void main() {
     expect(events, contains(2));
     expect(events, isNot(contains(0)));
     events.clear();
-    final center = tester.getCenter(surface);
-    final one =
-        await tester.startGesture(center - const Offset(30, 0), pointer: 1);
-    final two =
-        await tester.startGesture(center + const Offset(30, 0), pointer: 2);
-    await one.moveTo(center - const Offset(70, 0));
-    await two.moveTo(center + const Offset(70, 0));
-    await one.up();
-    await two.up();
-    await tester.pump();
-    expect(events, isNot(contains(0)));
-    expect(scroll, isEmpty);
-    events.clear();
     await tester.tap(surface);
     await tester.pump(const Duration(milliseconds: 350));
     expect(events, [0, 1]);
   });
 
-  testWidgets('AnyDesk hold is right click instead of left-button drag',
-      (tester) async {
+  testWidgets('TeamViewer mouse mode hold is right click', (tester) async {
     final events = <int>[];
     await show(tester, pointer: (action, _) => events.add(action));
     await tester.longPress(find.byKey(const ValueKey('monitor-trackpad')));
@@ -78,8 +70,7 @@ void main() {
     expect(events, [3]);
   });
 
-  testWidgets(
-      'AnyDesk three-finger swipe scrolls and three-finger tap middle-clicks',
+  testWidgets('TeamViewer two-finger drag scrolls without clicking',
       (tester) async {
     final events = <int>[];
     final scroll = <int>[];
@@ -89,46 +80,58 @@ void main() {
     final center = tester.getCenter(surface);
 
     final one =
-        await tester.startGesture(center - const Offset(40, 0), pointer: 11);
-    final two = await tester.startGesture(center, pointer: 12);
-    final three =
-        await tester.startGesture(center + const Offset(40, 0), pointer: 13);
-    await one.moveBy(const Offset(0, 60));
-    await two.moveBy(const Offset(0, 60));
-    await three.moveBy(const Offset(0, 60));
+        await tester.startGesture(center - const Offset(30, 0), pointer: 11);
+    final two =
+        await tester.startGesture(center + const Offset(30, 0), pointer: 12);
+    for (var i = 0; i < 4; i++) {
+      await one.moveBy(const Offset(0, 15));
+      await two.moveBy(const Offset(0, 15));
+    }
     await one.up();
     await two.up();
-    await three.up();
     await tester.pump();
     expect(scroll, isNotEmpty);
-    expect(events, isNot(contains(4)));
-
-    scroll.clear();
-    events.clear();
-    final tapOne =
-        await tester.startGesture(center - const Offset(30, 0), pointer: 21);
-    final tapTwo = await tester.startGesture(center, pointer: 22);
-    final tapThree =
-        await tester.startGesture(center + const Offset(30, 0), pointer: 23);
-    await tapOne.up();
-    await tapTwo.up();
-    await tapThree.up();
-    await tester.pump(const Duration(milliseconds: 350));
-    expect(scroll, isEmpty);
-    expect(events, [4]);
+    expect(events, isEmpty);
   });
 
-  testWidgets('session menu exposes Windows controls and secure attention',
+  testWidgets('TeamViewer pinch zooms the remote desktop', (tester) async {
+    await show(tester);
+    final surface = find.byKey(const ValueKey('monitor-trackpad'));
+    final before = tester.getSize(find.byType(RawImage)).width;
+    final center = tester.getCenter(surface);
+    final one =
+        await tester.startGesture(center - const Offset(30, 0), pointer: 31);
+    final two =
+        await tester.startGesture(center + const Offset(30, 0), pointer: 32);
+    await one.moveBy(const Offset(-20, 0));
+    await two.moveBy(const Offset(20, 0));
+    await one.moveBy(const Offset(-20, 0));
+    await two.moveBy(const Offset(20, 0));
+    await one.up();
+    await two.up();
+    await tester.pump();
+    expect(tester.getSize(find.byType(RawImage)).width, greaterThan(before));
+  });
+
+  testWidgets('TeamViewer toolbar exposes actions and navigation',
       (tester) async {
     var ctrlAltDel = 0;
-    await show(tester, ctrlAltDel: () => ctrlAltDel++);
-    await tester.tap(find.byTooltip('Session menu'));
+    var switches = 0;
+    var dashboards = 0;
+    await show(tester,
+        ctrlAltDel: () => ctrlAltDel++,
+        switchView: () => switches++,
+        dashboard: () => dashboards++);
+    await tester.tap(find.byTooltip('Actions'));
     await tester.pump();
-    expect(find.byTooltip('Keyboard'), findsOneWidget);
     expect(find.byTooltip('Right click'), findsOneWidget);
     expect(find.byTooltip('Middle click'), findsOneWidget);
     await tester.tap(find.byTooltip('Ctrl+Alt+Del'));
     expect(ctrlAltDel, 1);
+    await tester.tap(find.byTooltip('Switch view'));
+    await tester.tap(find.byTooltip('Dashboard'));
+    expect(switches, 1);
+    expect(dashboards, 1);
   });
 
   testWidgets(
@@ -139,7 +142,7 @@ void main() {
         control: false, pointer: (action, _) => events.add(action));
     await tester.drag(
         find.byKey(const ValueKey('monitor-trackpad')), const Offset(80, 20));
-    await tester.tap(find.byTooltip('Session menu'));
+    await tester.tap(find.byTooltip('Actions'));
     await tester.pump();
     await tester.tap(find.byTooltip('Right click'));
     await tester.pump(const Duration(milliseconds: 350));
@@ -147,6 +150,8 @@ void main() {
     final keyboard = tester.widget<IconButton>(
         find.widgetWithIcon(IconButton, Icons.keyboard_outlined));
     expect(keyboard.onPressed, isNull);
+    await tester.tap(find.byTooltip('Display'));
+    await tester.pump();
     await tester.tap(find.byTooltip('Fit screen'));
     await tester.pump(const Duration(milliseconds: 350));
     expect(find.text('100%'), findsOneWidget);

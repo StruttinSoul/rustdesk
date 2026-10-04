@@ -565,6 +565,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         }),
                         onKeyboard: () =>
                             unawaited(_monitorKeyboard(target.display!)),
+                        onSwitchView: () => unawaited(_choose()),
+                        onDashboard: () => unawaited(_dashboard()),
                         onCtrlAltDel: (widget.ffi.ffiModel.pi.platform ==
                                     kPeerPlatformLinux ||
                                 widget.ffi.ffiModel.pi.sasEnabled)
@@ -578,34 +580,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                       );
                     }),
               )),
-              Positioned(
-                  left: 8,
-                  top: 0,
-                  bottom: 0,
-                  child: Center(
-                      child: Material(
-                          color: Colors.black87,
-                          elevation: 8,
-                          borderRadius: BorderRadius.circular(16),
-                          child: Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 4),
-                              child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    IconButton(
-                                        tooltip: 'Switch view',
-                                        color: Colors.white,
-                                        icon: const Icon(
-                                            Icons.view_agenda_outlined),
-                                        onPressed: () => unawaited(_choose())),
-                                    IconButton(
-                                        tooltip: 'Dashboard',
-                                        color: Colors.white,
-                                        icon: const Icon(
-                                            Icons.grid_view_outlined),
-                                        onPressed: () =>
-                                            unawaited(_dashboard())),
-                                  ]))))),
             ]))),
       );
 

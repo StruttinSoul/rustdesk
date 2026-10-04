@@ -12,6 +12,8 @@ class MonitorControlView extends StatefulWidget {
       required this.onPointer,
       required this.onScroll,
       required this.onKeyboard,
+      this.onSwitchView,
+      this.onDashboard,
       this.onCtrlAltDel});
   final Size desktopSize;
   final ui.Image? image;
@@ -19,6 +21,8 @@ class MonitorControlView extends StatefulWidget {
   final void Function(int action, Offset point) onPointer;
   final void Function(int steps) onScroll;
   final VoidCallback onKeyboard;
+  final VoidCallback? onSwitchView;
+  final VoidCallback? onDashboard;
   final VoidCallback? onCtrlAltDel;
 
   @override
@@ -116,11 +120,14 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   int _maxFingers = 0;
   final Set<int> _rawPointers = <int>{};
   int _rawMaxFingers = 0;
-  double _rawTravel = 0;
   bool _suppressTap = false;
   Offset _lastFocal = Offset.zero;
-  bool _menuOpen = false;
-  double? _menuY;
+  _TwoFingerMode _twoFingerMode = _TwoFingerMode.undecided;
+  int _twoFingerUpdates = 0;
+  double _twoFingerStartScale = 1;
+  Offset _twoFingerPendingDelta = Offset.zero;
+  bool _toolbarVisible = true;
+  _MonitorPanel _panel = _MonitorPanel.none;
   double get _scale => _fit * (_zoom ?? 1);
 
   void _limitOffset() {
@@ -191,27 +198,41 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       _fingers = details.pointerCount;
       _lastFocal = details.localFocalPoint;
       _gestureScale = details.scale;
+      if (details.pointerCount >= 2) {
+        _twoFingerMode = _TwoFingerMode.undecided;
+        _twoFingerUpdates = 0;
+        _twoFingerStartScale = details.scale;
+        _twoFingerPendingDelta = Offset.zero;
+      }
       return;
     }
     final delta = details.localFocalPoint - _lastFocal;
     final factor = details.scale / _gestureScale;
     setState(() {
-      if (_maxFingers >= 3) {
-        if (widget.canControl) {
-          _wheel += delta.dy / 8;
+      if (_maxFingers >= 2) {
+        _twoFingerUpdates++;
+        _twoFingerPendingDelta += delta;
+        if (_twoFingerMode == _TwoFingerMode.undecided &&
+            _twoFingerUpdates >= 2) {
+          final scaleChange = (details.scale / _twoFingerStartScale - 1).abs();
+          if (scaleChange >= 0.04) {
+            _twoFingerMode = _TwoFingerMode.pinch;
+          } else if (_twoFingerPendingDelta.distance >= 6) {
+            _twoFingerMode = _TwoFingerMode.scroll;
+          }
+        }
+        if (_twoFingerMode == _TwoFingerMode.pinch) {
+          _setZoom((_zoom ?? 1) * factor, details.localFocalPoint);
+        } else if (_twoFingerMode == _TwoFingerMode.scroll &&
+            widget.canControl) {
+          _wheel += _twoFingerPendingDelta.dy / 8;
           final steps = _wheel.truncate();
           if (steps != 0) {
             widget.onScroll(steps);
             _wheel -= steps;
           }
+          _twoFingerPendingDelta = Offset.zero;
         }
-      } else if (_maxFingers == 2) {
-        if ((factor - 1).abs() > 0.001) {
-          _setZoom((_zoom ?? 1) * factor, details.localFocalPoint);
-        }
-        _offset += delta;
-        _limitOffset();
-        if (widget.canControl) _followCursor();
       } else if (widget.canControl) {
         _move(delta);
       } else {
@@ -227,32 +248,24 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _fingers = 0;
     _maxFingers = 0;
     _wheel = 0;
+    _twoFingerMode = _TwoFingerMode.undecided;
+    _twoFingerUpdates = 0;
+    _twoFingerPendingDelta = Offset.zero;
   }
 
   void _rawPointerDown(PointerDownEvent event) {
     if (_rawPointers.isEmpty) {
       _rawMaxFingers = 0;
-      _rawTravel = 0;
     }
     _rawPointers.add(event.pointer);
     _rawMaxFingers = math.max(_rawMaxFingers, _rawPointers.length);
-  }
-
-  void _rawPointerMove(PointerMoveEvent event) {
-    if (_rawPointers.contains(event.pointer)) {
-      _rawTravel += event.delta.distance;
-    }
   }
 
   void _rawPointerUp(PointerEvent event) {
     _rawPointers.remove(event.pointer);
     if (_rawPointers.isNotEmpty) return;
     _suppressTap = _rawMaxFingers >= 2;
-    if (_rawMaxFingers >= 3 && _rawTravel < 12 && widget.canControl) {
-      widget.onPointer(4, _cursor);
-    }
     _rawMaxFingers = 0;
-    _rawTravel = 0;
   }
 
   Widget _button(String tooltip, IconData icon, VoidCallback? action) =>
@@ -283,68 +296,96 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   leading: Icon(Icons.zoom_out_map),
                   title: Text('Two fingers'),
                   subtitle: Text(
-                      'Pinch or move together to zoom and reposition the desktop.')),
-              ListTile(
-                  leading: Icon(Icons.swipe_vertical),
-                  title: Text('Three fingers'),
-                  subtitle: Text(
-                      'Swipe to scroll. Tap with three fingers for middle-click.')),
+                      'Pinch to zoom. Drag together to scroll the remote computer.')),
             ])));
   }
 
-  Widget _sessionPanel() => Material(
+  Widget _actionsPanel() => Material(
       color: Colors.black87,
       elevation: 8,
       borderRadius: BorderRadius.circular(16),
       child: Padding(
           padding: const EdgeInsets.all(6),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            SizedBox(
-                width: 148,
-                child: Row(children: [
-                  const Icon(Icons.desktop_windows_outlined,
-                      size: 18, color: Colors.white70),
-                  const SizedBox(width: 8),
-                  Text('${((_zoom ?? 1) * 100).round()}%',
-                      style: const TextStyle(color: Colors.white)),
-                ])),
-            const Divider(height: 8, color: Colors.white24),
-            SizedBox(
-                width: 148,
-                child: Wrap(spacing: 2, runSpacing: 2, children: [
-                  _button(
-                      'Fit screen',
-                      Icons.fit_screen,
-                      () => setState(
-                          () => _setZoom(1, _viewport.center(Offset.zero)))),
-                  _button(
-                      'Zoom out',
-                      Icons.zoom_out,
-                      () => setState(() => _setZoom(
-                          (_zoom ?? 1) / 1.25, _viewport.center(Offset.zero)))),
-                  _button(
-                      'Zoom in',
-                      Icons.zoom_in,
-                      () => setState(() => _setZoom(
-                          (_zoom ?? 1) * 1.25, _viewport.center(Offset.zero)))),
-                  _button('Keyboard', Icons.keyboard_outlined,
-                      widget.canControl ? widget.onKeyboard : null),
-                  _button(
-                      'Right click',
-                      Icons.ads_click,
-                      widget.canControl
-                          ? () => widget.onPointer(3, _cursor)
-                          : null),
-                  _button(
-                      'Middle click',
-                      Icons.mouse_outlined,
-                      widget.canControl
-                          ? () => widget.onPointer(4, _cursor)
-                          : null),
-                  _button('Ctrl+Alt+Del', Icons.security,
-                      widget.canControl ? widget.onCtrlAltDel : null),
-                  _button('Gestures', Icons.help_outline, _showGestureHelp),
-                ])),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            _button('Right click', Icons.ads_click,
+                widget.canControl ? () => widget.onPointer(3, _cursor) : null),
+            _button('Middle click', Icons.mouse_outlined,
+                widget.canControl ? () => widget.onPointer(4, _cursor) : null),
+            _button('Ctrl+Alt+Del', Icons.security,
+                widget.canControl ? widget.onCtrlAltDel : null),
+            _button('Gestures', Icons.help_outline, _showGestureHelp),
+          ])));
+
+  Widget _displayPanel() => Material(
+      color: Colors.black87,
+      elevation: 8,
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            _button(
+                'Fit screen',
+                Icons.fit_screen,
+                () =>
+                    setState(() => _setZoom(1, _viewport.center(Offset.zero)))),
+            _button(
+                'Zoom out',
+                Icons.zoom_out,
+                () => setState(() => _setZoom(
+                    (_zoom ?? 1) / 1.25, _viewport.center(Offset.zero)))),
+            Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Text('${((_zoom ?? 1) * 100).round()}%',
+                    style: const TextStyle(color: Colors.white))),
+            _button(
+                'Zoom in',
+                Icons.zoom_in,
+                () => setState(() => _setZoom(
+                    (_zoom ?? 1) * 1.25, _viewport.center(Offset.zero)))),
+          ])));
+
+  Widget _toolbarButton(String tooltip, IconData icon, VoidCallback? action,
+          {bool selected = false}) =>
+      IconButton(
+          tooltip: tooltip,
+          color: selected ? const Color(0xFF2D8CFF) : Colors.white,
+          disabledColor: Colors.white38,
+          icon: Icon(icon),
+          onPressed: action);
+
+  Widget _sessionToolbar() => Material(
+      color: const Color(0xEE161B22),
+      elevation: 10,
+      borderRadius: BorderRadius.circular(18),
+      child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            _toolbarButton('Keyboard', Icons.keyboard_outlined,
+                widget.canControl ? widget.onKeyboard : null),
+            _toolbarButton(
+                'Actions',
+                Icons.bolt_outlined,
+                () => setState(() => _panel = _panel == _MonitorPanel.actions
+                    ? _MonitorPanel.none
+                    : _MonitorPanel.actions),
+                selected: _panel == _MonitorPanel.actions),
+            _toolbarButton(
+                'Display',
+                Icons.monitor_outlined,
+                () => setState(() => _panel = _panel == _MonitorPanel.display
+                    ? _MonitorPanel.none
+                    : _MonitorPanel.display),
+                selected: _panel == _MonitorPanel.display),
+            _toolbarButton('Switch view', Icons.view_carousel_outlined,
+                widget.onSwitchView),
+            _toolbarButton(
+                'Dashboard', Icons.grid_view_outlined, widget.onDashboard),
+            _toolbarButton('Hide toolbar', Icons.keyboard_arrow_down, () {
+              setState(() {
+                _toolbarVisible = false;
+                _panel = _MonitorPanel.none;
+              });
+            }),
           ])));
 
   @override
@@ -361,22 +402,15 @@ class _MonitorControlViewState extends State<MonitorControlView> {
           _offset = size.center(Offset.zero) - _cursor * _scale;
           _limitOffset();
         }
-        final menuTop = (_menuY ?? (size.height - 56) / 2)
-            .clamp(8.0, math.max(8.0, size.height - 64))
-            .toDouble();
-        final panelTop = (menuTop - 190)
-            .clamp(8.0, math.max(8.0, size.height - 420))
-            .toDouble();
         return Stack(children: [
           Positioned.fill(
               child: Listener(
                   onPointerDown: _rawPointerDown,
-                  onPointerMove: _rawPointerMove,
                   onPointerUp: _rawPointerUp,
                   onPointerCancel: _rawPointerUp,
                   child: Semantics(
                       label:
-                          'Windows trackpad. Swipe with one finger to move the pointer, tap to click, hold to right-click, use two fingers to zoom, and three fingers to scroll.',
+                          'Windows mouse interaction. Swipe with one finger to move the pointer, tap to click, hold to right-click, pinch to zoom, and drag with two fingers to scroll.',
                       child: GestureDetector(
                           key: const ValueKey('monitor-trackpad'),
                           behavior: HitTestBehavior.opaque,
@@ -390,6 +424,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                             _lastFocal = details.localFocalPoint;
                             _gestureScale = 1;
                             _wheel = 0;
+                            _twoFingerMode = _TwoFingerMode.undecided;
+                            _twoFingerUpdates = 0;
+                            _twoFingerStartScale = 1;
+                            _twoFingerPendingDelta = Offset.zero;
                           },
                           onScaleUpdate: _scaleUpdate,
                           onScaleEnd: _scaleEnd,
@@ -419,40 +457,41 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                                             blurRadius: 3, color: Colors.black)
                                       ]))),
                           ])))))),
-          if (_menuOpen)
+          if (_toolbarVisible && _panel != _MonitorPanel.none)
             Positioned(
-                right: 72,
-                top: panelTop,
-                child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                        maxHeight: math.max(120, size.height - 16)),
-                    child: SingleChildScrollView(child: _sessionPanel()))),
-          Positioned(
-              right: 8,
-              top: menuTop,
-              child: GestureDetector(
-                  onVerticalDragUpdate: (details) => setState(() {
-                        _menuY = (menuTop + details.delta.dy)
-                            .clamp(8.0, math.max(8.0, size.height - 64))
-                            .toDouble();
-                      }),
-                  child: Material(
-                      color: Colors.black87,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          side: const BorderSide(color: Colors.white24)),
-                      elevation: 8,
-                      child: SizedBox(
-                          width: 48,
-                          height: 56,
-                          child: IconButton(
-                              tooltip: 'Session menu',
-                              color: Colors.white,
-                              icon: Icon(_menuOpen
-                                  ? Icons.close
-                                  : Icons.mouse_outlined),
-                              onPressed: () =>
-                                  setState(() => _menuOpen = !_menuOpen)))))),
+                left: 8,
+                right: 8,
+                bottom: 72,
+                child: Center(
+                    child: _panel == _MonitorPanel.actions
+                        ? _actionsPanel()
+                        : _displayPanel())),
+          if (_toolbarVisible)
+            Positioned(
+                left: 8,
+                right: 8,
+                bottom: 8,
+                child: Center(child: _sessionToolbar()))
+          else
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 4,
+                child: Center(
+                    child: Material(
+                        color: const Color(0xEE161B22),
+                        elevation: 8,
+                        borderRadius: BorderRadius.circular(14),
+                        child: IconButton(
+                            tooltip: 'Show toolbar',
+                            color: Colors.white,
+                            icon: const Icon(Icons.keyboard_arrow_up),
+                            onPressed: () =>
+                                setState(() => _toolbarVisible = true))))),
         ]);
       });
 }
+
+enum _MonitorPanel { none, actions, display }
+
+enum _TwoFingerMode { undecided, scroll, pinch }
