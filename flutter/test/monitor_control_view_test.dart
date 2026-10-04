@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/mobile/widgets/monitor_control_view.dart';
 
@@ -33,11 +34,13 @@ void main() {
     const preferences = MonitorControlPreferences(
       preferredView: MonitorViewPreference.readable,
       precision: true,
+      precisionGain: 0.2,
       toolbarDock: MonitorToolbarDock.left,
       toolbarVisible: false,
       thumbwheelVisible: true,
       mouseButtonsVisible: true,
       mouseButtonsPosition: Offset(0.25, 0.65),
+      cursorOffset: true,
       orientation: MonitorOrientationPreference.portrait,
     );
 
@@ -51,6 +54,22 @@ void main() {
         monitorUsesLandscape(
             MonitorOrientationPreference.portrait, const Size(2560, 1440)),
         isFalse);
+  });
+
+  test('custom shortcut presets round trip with monitor preferences', () {
+    final preferences = MonitorControlPreferences(
+      shortcuts: [
+        kDefaultMonitorShortcuts[1].copyWith(
+          modifiers: const ['ctrl', 'alt'],
+        ),
+        kDefaultMonitorShortcuts[0],
+      ],
+    );
+
+    final restored = MonitorControlPreferences.fromJson(preferences.toJson());
+    expect(restored.shortcuts.map((item) => item.id).toList(),
+        ['copy', 'alt-tab']);
+    expect(restored.shortcuts.first.label, 'Ctrl+Alt+C');
   });
 
   testWidgets('Windows opens fit-to-screen with TeamViewer-style toolbar',
@@ -269,6 +288,80 @@ void main() {
     expect(changes.last.orientation, MonitorOrientationPreference.portrait);
   });
 
+  testWidgets('cursor offset maps taps above the finger and stays in bounds',
+      (tester) async {
+    final events = <(int, Offset)>[];
+    await show(tester,
+        preferences: const MonitorControlPreferences(cursorOffset: true),
+        pointer: (action, point) => events.add((action, point)));
+
+    final surface = find.byKey(const ValueKey('monitor-trackpad'));
+    final center = tester.getCenter(surface);
+    await tester.tapAt(center);
+    await tester.pump();
+
+    expect(events.map((event) => event.$1), containsAllInOrder([2, 0, 1]));
+    final click = events.last.$2;
+    expect(click.dx, closeTo(1920, 2));
+    expect(click.dy, lessThan(1080));
+    expect(click.dx, inInclusiveRange(0, 3839));
+    expect(click.dy, inInclusiveRange(0, 2159));
+  });
+
+  testWidgets('cursor offset toggle is persisted through control preferences',
+      (tester) async {
+    final changes = <MonitorControlPreferences>[];
+    await show(tester, onPreferencesChanged: changes.add);
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Cursor offset'));
+    await tester.pump();
+
+    expect(changes.last.cursorOffset, isTrue);
+    expect(find.text('Cursor offset'), findsOneWidget);
+  });
+
+  testWidgets('precision gain is adjustable and persisted', (tester) async {
+    final changes = <MonitorControlPreferences>[];
+    await show(tester, onPreferencesChanged: changes.add);
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Precision speed'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final slider = tester.widget<Slider>(find.byType(Slider));
+    expect(slider.value, closeTo(0.35, 0.001));
+    slider.onChanged!(0.2);
+    await tester.pump();
+
+    expect(changes.last.precisionGain, closeTo(0.2, 0.001));
+    expect(find.text('Pointer gain 20%'), findsOneWidget);
+  });
+
+  testWidgets('reset controls restores the persisted defaults', (tester) async {
+    final changes = <MonitorControlPreferences>[];
+    await show(tester,
+        preferences: const MonitorControlPreferences(
+          preferredView: MonitorViewPreference.readable,
+          precision: true,
+          precisionGain: 0.2,
+          toolbarDock: MonitorToolbarDock.left,
+          thumbwheelVisible: true,
+          mouseButtonsVisible: true,
+          cursorOffset: true,
+          orientation: MonitorOrientationPreference.portrait,
+        ),
+        onPreferencesChanged: changes.add);
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Reset controls'));
+    await tester.pump();
+
+    expect(changes.last, const MonitorControlPreferences());
+    expect(find.text('Cursor offset'), findsNothing);
+  });
+
   testWidgets(
       'local view only blocks monitor input without changing host access',
       (tester) async {
@@ -327,6 +420,45 @@ void main() {
     await tester.longPress(find.byKey(const ValueKey('monitor-trackpad')));
     await tester.pump();
     expect(events, [3]);
+  });
+
+  testWidgets('double tap still sends a balanced double click', (tester) async {
+    final events = <int>[];
+    await show(tester, pointer: (action, _) => events.add(action));
+    final surface = find.byKey(const ValueKey('monitor-trackpad'));
+
+    await tester.tap(surface);
+    await tester.pump(const Duration(milliseconds: 80));
+    await tester.tap(surface);
+    await tester.pump(const Duration(milliseconds: 350));
+
+    expect(events, [0, 1, 0, 1]);
+  });
+
+  testWidgets('double tap hold drags and releases when the finger lifts',
+      (tester) async {
+    final events = <int>[];
+    await show(tester, pointer: (action, _) => events.add(action));
+    final surface = find.byKey(const ValueKey('monitor-trackpad'));
+    final center = tester.getCenter(surface);
+
+    final first = await tester.startGesture(center, pointer: 41);
+    await first.up();
+    await tester.pump(const Duration(milliseconds: 80));
+    final second = await tester.startGesture(center, pointer: 42);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(events, [0, 1, 0]);
+    expect(find.text('Dragging'), findsOneWidget);
+    await second.moveBy(const Offset(60, 10));
+    await tester.pump();
+    expect(events, contains(2));
+    expect(events, isNot(contains(3)));
+
+    await second.up();
+    await tester.pump();
+    expect(events.last, 1);
+    expect(find.text('Dragging'), findsNothing);
   });
 
   testWidgets('TeamViewer two-finger drag scrolls without clicking',
@@ -393,6 +525,19 @@ void main() {
     await tester.tap(find.byTooltip('Dashboard'));
     expect(switches, 1);
     expect(dashboards, 1);
+  });
+
+  testWidgets('gesture guide identifies Windows pointer mode and held drag',
+      (tester) async {
+    await show(tester);
+    await tester.tap(find.byTooltip('Actions'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Gestures'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Windows Pointer'), findsOneWidget);
+    expect(find.textContaining('Double tap and hold'), findsOneWidget);
   });
 
   testWidgets(
@@ -468,5 +613,120 @@ void main() {
     await tester.tap(find.text('Text'));
     await tester.pump();
     expect(states, contains('Control Left:up'));
+  });
+
+  testWidgets('Keys mode exposes function keys F1 through F12', (tester) async {
+    final keys = <PhysicalKeyboardKey>[];
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: MonitorKeyboardPanel(
+          onText: (_) {},
+          onKey: keys.add,
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('Keys'));
+    await tester.pump();
+    for (var i = 1; i <= 12; i++) {
+      expect(find.text('F$i'), findsOneWidget);
+    }
+    await tester.tap(find.text('F12'));
+    await tester.pump();
+    expect(keys, [PhysicalKeyboardKey.f12]);
+  });
+
+  testWidgets('Text draft restores locally until explicit Send',
+      (tester) async {
+    final drafts = <String>[];
+    final sent = <String>[];
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: MonitorKeyboardPanel(
+          initialText: 'unfinished note',
+          onDraftChanged: drafts.add,
+          onText: sent.add,
+          onKey: (_) {},
+        ),
+      ),
+    ));
+
+    expect(find.text('unfinished note'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'still local');
+    await tester.pump();
+    expect(drafts.last, 'still local');
+    expect(sent, isEmpty);
+
+    await tester.tap(find.byTooltip('Send text'));
+    await tester.pump();
+    expect(sent, ['still local']);
+    expect(drafts.last, '');
+  });
+
+  testWidgets('phone clipboard is previewed locally before Send',
+      (tester) async {
+    final drafts = <String>[];
+    final sent = <String>[];
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.getData') return {'text': 'clipboard text'};
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: MonitorKeyboardPanel(
+          onDraftChanged: drafts.add,
+          onText: sent.add,
+          onKey: (_) {},
+        ),
+      ),
+    ));
+
+    await tester.tap(find.byTooltip('Paste phone clipboard'));
+    await tester.pump();
+    expect(find.text('clipboard text'), findsOneWidget);
+    expect(drafts.last, 'clipboard text');
+    expect(sent, isEmpty);
+  });
+
+  testWidgets('shortcut presets can be reordered edited and reset',
+      (tester) async {
+    final changes = <List<MonitorShortcutPreset>>[];
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: MonitorKeyboardPanel(
+          onText: (_) {},
+          onKey: (_) {},
+          onShortcutsChanged: (value) => changes.add(List.of(value)),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('Keys'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Customize shortcuts'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.byTooltip('Move Ctrl+C up'));
+    await tester.pump();
+    expect(changes.last.first.id, 'copy');
+
+    await tester.tap(find.byTooltip('Edit Ctrl+C'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.widgetWithText(FilterChip, 'Alt'));
+    await tester.pump();
+    await tester.tap(find.text('Save shortcut'));
+    await tester.pump();
+    expect(changes.last.first.label, 'Ctrl+Alt+C');
+
+    await tester.tap(find.text('Reset shortcuts'));
+    await tester.pump();
+    expect(changes.last.map((item) => item.id).toList(),
+        kDefaultMonitorShortcuts.map((item) => item.id).toList());
   });
 }

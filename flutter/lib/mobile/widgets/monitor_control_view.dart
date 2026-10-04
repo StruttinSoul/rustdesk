@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
@@ -10,57 +11,248 @@ enum MonitorOrientationPreference { auto, portrait, landscape }
 
 enum MonitorToolbarDock { left, right }
 
+const List<String> _monitorShortcutModifierOrder = <String>[
+  'ctrl',
+  'alt',
+  'shift',
+  'win'
+];
+
+const Map<String, String> _monitorShortcutKeyLabels = <String, String>{
+  'tab': 'Tab',
+  'c': 'C',
+  'v': 'V',
+  'z': 'Z',
+  'escape': 'Esc',
+  'enter': 'Enter',
+  'space': 'Space',
+  'backspace': 'Backspace',
+  'delete': 'Delete',
+  'home': 'Home',
+  'end': 'End',
+  'pageUp': 'Page Up',
+  'pageDown': 'Page Down',
+  'f1': 'F1',
+  'f2': 'F2',
+  'f3': 'F3',
+  'f4': 'F4',
+  'f5': 'F5',
+  'f6': 'F6',
+  'f7': 'F7',
+  'f8': 'F8',
+  'f9': 'F9',
+  'f10': 'F10',
+  'f11': 'F11',
+  'f12': 'F12',
+};
+
+String _monitorShortcutModifierLabel(String modifier) => switch (modifier) {
+      'ctrl' => 'Ctrl',
+      'alt' => 'Alt',
+      'shift' => 'Shift',
+      'win' => 'Win',
+      _ => modifier,
+    };
+
+PhysicalKeyboardKey? _monitorShortcutModifierKey(String modifier) =>
+    switch (modifier) {
+      'ctrl' => PhysicalKeyboardKey.controlLeft,
+      'alt' => PhysicalKeyboardKey.altLeft,
+      'shift' => PhysicalKeyboardKey.shiftLeft,
+      'win' => PhysicalKeyboardKey.metaLeft,
+      _ => null,
+    };
+
+PhysicalKeyboardKey? _monitorShortcutPhysicalKey(String key) => switch (key) {
+      'tab' => PhysicalKeyboardKey.tab,
+      'c' => PhysicalKeyboardKey.keyC,
+      'v' => PhysicalKeyboardKey.keyV,
+      'z' => PhysicalKeyboardKey.keyZ,
+      'escape' => PhysicalKeyboardKey.escape,
+      'enter' => PhysicalKeyboardKey.enter,
+      'space' => PhysicalKeyboardKey.space,
+      'backspace' => PhysicalKeyboardKey.backspace,
+      'delete' => PhysicalKeyboardKey.delete,
+      'home' => PhysicalKeyboardKey.home,
+      'end' => PhysicalKeyboardKey.end,
+      'pageUp' => PhysicalKeyboardKey.pageUp,
+      'pageDown' => PhysicalKeyboardKey.pageDown,
+      'f1' => PhysicalKeyboardKey.f1,
+      'f2' => PhysicalKeyboardKey.f2,
+      'f3' => PhysicalKeyboardKey.f3,
+      'f4' => PhysicalKeyboardKey.f4,
+      'f5' => PhysicalKeyboardKey.f5,
+      'f6' => PhysicalKeyboardKey.f6,
+      'f7' => PhysicalKeyboardKey.f7,
+      'f8' => PhysicalKeyboardKey.f8,
+      'f9' => PhysicalKeyboardKey.f9,
+      'f10' => PhysicalKeyboardKey.f10,
+      'f11' => PhysicalKeyboardKey.f11,
+      'f12' => PhysicalKeyboardKey.f12,
+      _ => null,
+    };
+
+class MonitorShortcutPreset {
+  const MonitorShortcutPreset({
+    required this.id,
+    required this.modifiers,
+    required this.key,
+  });
+
+  final String id;
+  final List<String> modifiers;
+  final String key;
+
+  String get label => [
+        ...modifiers.map(_monitorShortcutModifierLabel),
+        _monitorShortcutKeyLabels[key] ?? key,
+      ].join('+');
+
+  MonitorShortcutPreset copyWith({List<String>? modifiers, String? key}) =>
+      MonitorShortcutPreset(
+        id: id,
+        modifiers: modifiers ?? this.modifiers,
+        key: key ?? this.key,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'modifiers': modifiers,
+        'key': key,
+      };
+
+  static MonitorShortcutPreset? tryFromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final json = Map<String, dynamic>.from(raw);
+    final id = json['id'];
+    final key = json['key'];
+    if (id is! String ||
+        id.isEmpty ||
+        key is! String ||
+        !_monitorShortcutKeyLabels.containsKey(key)) {
+      return null;
+    }
+    final modifiers = <String>[];
+    final rawModifiers = json['modifiers'];
+    if (rawModifiers is List) {
+      for (final modifier in rawModifiers) {
+        if (modifier is String &&
+            _monitorShortcutModifierOrder.contains(modifier) &&
+            !modifiers.contains(modifier)) {
+          modifiers.add(modifier);
+        }
+      }
+    }
+    return MonitorShortcutPreset(
+        id: id, modifiers: List.unmodifiable(modifiers), key: key);
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is MonitorShortcutPreset &&
+      id == other.id &&
+      key == other.key &&
+      _stringListsEqual(modifiers, other.modifiers);
+
+  @override
+  int get hashCode => Object.hash(id, key, Object.hashAll(modifiers));
+}
+
+const List<MonitorShortcutPreset> kDefaultMonitorShortcuts =
+    <MonitorShortcutPreset>[
+  MonitorShortcutPreset(id: 'alt-tab', modifiers: ['alt'], key: 'tab'),
+  MonitorShortcutPreset(id: 'copy', modifiers: ['ctrl'], key: 'c'),
+  MonitorShortcutPreset(id: 'paste', modifiers: ['ctrl'], key: 'v'),
+  MonitorShortcutPreset(id: 'undo', modifiers: ['ctrl'], key: 'z'),
+  MonitorShortcutPreset(
+      id: 'task-manager', modifiers: ['ctrl', 'shift'], key: 'escape'),
+];
+
+bool _stringListsEqual(List<String> a, List<String> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+bool _shortcutListsEqual(
+    List<MonitorShortcutPreset> a, List<MonitorShortcutPreset> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
 class MonitorControlPreferences {
   const MonitorControlPreferences({
     this.preferredView = MonitorViewPreference.fit,
     this.precision = false,
+    this.precisionGain = 0.35,
     this.toolbarDock = MonitorToolbarDock.right,
     this.toolbarVisible = true,
     this.thumbwheelVisible = false,
     this.mouseButtonsVisible = false,
     this.mouseButtonsPosition = const Offset(0.78, 0.58),
+    this.cursorOffset = false,
+    this.shortcuts = kDefaultMonitorShortcuts,
     this.orientation = MonitorOrientationPreference.auto,
   });
 
   final MonitorViewPreference preferredView;
   final bool precision;
+  final double precisionGain;
   final MonitorToolbarDock toolbarDock;
   final bool toolbarVisible;
   final bool thumbwheelVisible;
   final bool mouseButtonsVisible;
   final Offset mouseButtonsPosition;
+  final bool cursorOffset;
+  final List<MonitorShortcutPreset> shortcuts;
   final MonitorOrientationPreference orientation;
 
   MonitorControlPreferences copyWith({
     MonitorViewPreference? preferredView,
     bool? precision,
+    double? precisionGain,
     MonitorToolbarDock? toolbarDock,
     bool? toolbarVisible,
     bool? thumbwheelVisible,
     bool? mouseButtonsVisible,
     Offset? mouseButtonsPosition,
+    bool? cursorOffset,
+    List<MonitorShortcutPreset>? shortcuts,
     MonitorOrientationPreference? orientation,
   }) =>
       MonitorControlPreferences(
         preferredView: preferredView ?? this.preferredView,
         precision: precision ?? this.precision,
+        precisionGain: precisionGain ?? this.precisionGain,
         toolbarDock: toolbarDock ?? this.toolbarDock,
         toolbarVisible: toolbarVisible ?? this.toolbarVisible,
         thumbwheelVisible: thumbwheelVisible ?? this.thumbwheelVisible,
         mouseButtonsVisible: mouseButtonsVisible ?? this.mouseButtonsVisible,
         mouseButtonsPosition: mouseButtonsPosition ?? this.mouseButtonsPosition,
+        cursorOffset: cursorOffset ?? this.cursorOffset,
+        shortcuts: shortcuts ?? this.shortcuts,
         orientation: orientation ?? this.orientation,
       );
 
   Map<String, dynamic> toJson() => {
         'view': preferredView.name,
         'precision': precision,
+        'precisionGain': precisionGain,
         'dock': toolbarDock.name,
         'toolbar': toolbarVisible,
         'thumbwheel': thumbwheelVisible,
         'mouseButtons': mouseButtonsVisible,
         'mouseX': mouseButtonsPosition.dx,
         'mouseY': mouseButtonsPosition.dy,
+        'cursorOffset': cursorOffset,
+        'shortcuts': shortcuts.map((shortcut) => shortcut.toJson()).toList(),
         'orientation': orientation.name,
       };
 
@@ -74,10 +266,29 @@ class MonitorControlPreferences {
       return parsed.clamp(0.0, 1.0).toDouble();
     }
 
+    double precisionGain(dynamic value) {
+      final parsed = value is num ? value.toDouble() : 0.35;
+      return parsed.clamp(0.1, 1.0).toDouble();
+    }
+
+    List<MonitorShortcutPreset> shortcuts(dynamic value) {
+      if (value is! List) return kDefaultMonitorShortcuts;
+      final parsed = <MonitorShortcutPreset>[];
+      final ids = <String>{};
+      for (final raw in value) {
+        final shortcut = MonitorShortcutPreset.tryFromJson(raw);
+        if (shortcut != null && ids.add(shortcut.id)) parsed.add(shortcut);
+      }
+      return parsed.isEmpty
+          ? kDefaultMonitorShortcuts
+          : List.unmodifiable(parsed);
+    }
+
     return MonitorControlPreferences(
       preferredView: enumValue(MonitorViewPreference.values, json['view'],
           MonitorViewPreference.fit),
       precision: json['precision'] == true,
+      precisionGain: precisionGain(json['precisionGain']),
       toolbarDock: enumValue(
           MonitorToolbarDock.values, json['dock'], MonitorToolbarDock.right),
       toolbarVisible: json['toolbar'] != false,
@@ -87,6 +298,8 @@ class MonitorControlPreferences {
         normalized(json['mouseX'], 0.78),
         normalized(json['mouseY'], 0.58),
       ),
+      cursorOffset: json['cursorOffset'] == true,
+      shortcuts: shortcuts(json['shortcuts']),
       orientation: enumValue(MonitorOrientationPreference.values,
           json['orientation'], MonitorOrientationPreference.auto),
     );
@@ -97,22 +310,28 @@ class MonitorControlPreferences {
       other is MonitorControlPreferences &&
       preferredView == other.preferredView &&
       precision == other.precision &&
+      precisionGain == other.precisionGain &&
       toolbarDock == other.toolbarDock &&
       toolbarVisible == other.toolbarVisible &&
       thumbwheelVisible == other.thumbwheelVisible &&
       mouseButtonsVisible == other.mouseButtonsVisible &&
       mouseButtonsPosition == other.mouseButtonsPosition &&
+      cursorOffset == other.cursorOffset &&
+      _shortcutListsEqual(shortcuts, other.shortcuts) &&
       orientation == other.orientation;
 
   @override
   int get hashCode => Object.hash(
       preferredView,
       precision,
+      precisionGain,
       toolbarDock,
       toolbarVisible,
       thumbwheelVisible,
       mouseButtonsVisible,
       mouseButtonsPosition,
+      cursorOffset,
+      Object.hashAll(shortcuts),
       orientation);
 }
 
@@ -164,10 +383,21 @@ class MonitorControlView extends StatefulWidget {
 
 class MonitorKeyboardPanel extends StatefulWidget {
   const MonitorKeyboardPanel(
-      {super.key, required this.onText, required this.onKey, this.onKeyState});
+      {super.key,
+      required this.onText,
+      required this.onKey,
+      this.onKeyState,
+      this.initialText = '',
+      this.onDraftChanged,
+      this.shortcuts = kDefaultMonitorShortcuts,
+      this.onShortcutsChanged});
   final ValueChanged<String> onText;
   final ValueChanged<PhysicalKeyboardKey> onKey;
   final void Function(PhysicalKeyboardKey key, bool down)? onKeyState;
+  final String initialText;
+  final ValueChanged<String>? onDraftChanged;
+  final List<MonitorShortcutPreset> shortcuts;
+  final ValueChanged<List<MonitorShortcutPreset>>? onShortcutsChanged;
 
   @override
   State<MonitorKeyboardPanel> createState() => _MonitorKeyboardPanelState();
@@ -175,15 +405,27 @@ class MonitorKeyboardPanel extends StatefulWidget {
 
 class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
     with WidgetsBindingObserver {
-  final _text = TextEditingController();
+  late final TextEditingController _text;
   final _textFocus = FocusNode();
   final _held = <PhysicalKeyboardKey>{};
+  late List<MonitorShortcutPreset> _shortcuts;
   _MonitorKeyboardMode _mode = _MonitorKeyboardMode.text;
 
   @override
   void initState() {
     super.initState();
+    _text = TextEditingController(text: widget.initialText);
+    _shortcuts = List.of(widget.shortcuts);
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didUpdateWidget(covariant MonitorKeyboardPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_shortcutListsEqual(oldWidget.shortcuts, widget.shortcuts) &&
+        !_shortcutListsEqual(_shortcuts, widget.shortcuts)) {
+      _shortcuts = List.of(widget.shortcuts);
+    }
   }
 
   @override
@@ -204,6 +446,19 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
     if (_text.text.isEmpty) return;
     widget.onText(_text.text);
     _text.clear();
+    widget.onDraftChanged?.call('');
+  }
+
+  Future<void> _pastePhoneClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (!mounted || data?.text == null || data!.text!.isEmpty) return;
+    final text = data.text!;
+    _text.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    widget.onDraftChanged?.call(text);
+    _textFocus.requestFocus();
   }
 
   void _releaseAll({bool rebuild = true}) {
@@ -252,6 +507,174 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
     }
   }
 
+  void _runShortcut(MonitorShortcutPreset preset) {
+    final key = _monitorShortcutPhysicalKey(preset.key);
+    if (key == null) return;
+    final modifiers = preset.modifiers
+        .map(_monitorShortcutModifierKey)
+        .whereType<PhysicalKeyboardKey>()
+        .toList();
+    _shortcut(modifiers, key);
+  }
+
+  void _emitShortcuts() =>
+      widget.onShortcutsChanged?.call(List.unmodifiable(_shortcuts));
+
+  void _moveShortcut(int index, int delta, StateSetter refreshSheet) {
+    final next = index + delta;
+    if (next < 0 || next >= _shortcuts.length) return;
+    setState(() {
+      final shortcut = _shortcuts.removeAt(index);
+      _shortcuts.insert(next, shortcut);
+    });
+    refreshSheet(() {});
+    _emitShortcuts();
+  }
+
+  void _editShortcut(
+      BuildContext sheetContext, int index, StateSetter refreshSheet) {
+    final preset = _shortcuts[index];
+    var key = preset.key;
+    final modifiers = preset.modifiers.toSet();
+    showDialog<void>(
+        context: sheetContext,
+        builder: (dialogContext) => StatefulBuilder(
+              builder: (dialogContext, refreshDialog) => AlertDialog(
+                title: Text('Edit ${preset.label}'),
+                content: SingleChildScrollView(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('Modifiers',
+                            style:
+                                Theme.of(dialogContext).textTheme.labelLarge)),
+                    const SizedBox(height: 8),
+                    Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _monitorShortcutModifierOrder
+                            .map((modifier) => FilterChip(
+                                  label: Text(
+                                      _monitorShortcutModifierLabel(modifier)),
+                                  selected: modifiers.contains(modifier),
+                                  onSelected: (selected) => refreshDialog(() {
+                                    if (selected) {
+                                      modifiers.add(modifier);
+                                    } else {
+                                      modifiers.remove(modifier);
+                                    }
+                                  }),
+                                ))
+                            .toList()),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      value: key,
+                      decoration: const InputDecoration(labelText: 'Key'),
+                      items: _monitorShortcutKeyLabels.entries
+                          .map((entry) => DropdownMenuItem<String>(
+                              value: entry.key, child: Text(entry.value)))
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) refreshDialog(() => key = value);
+                      },
+                    ),
+                  ]),
+                ),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('Cancel')),
+                  FilledButton(
+                      onPressed: () {
+                        final orderedModifiers = _monitorShortcutModifierOrder
+                            .where(modifiers.contains)
+                            .toList(growable: false);
+                        setState(() => _shortcuts[index] = preset.copyWith(
+                            modifiers: orderedModifiers, key: key));
+                        refreshSheet(() {});
+                        _emitShortcuts();
+                        Navigator.of(dialogContext).pop();
+                      },
+                      child: const Text('Save shortcut')),
+                ],
+              ),
+            ));
+  }
+
+  void _showShortcutSettings() {
+    showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (sheetContext) => StatefulBuilder(
+              builder: (sheetContext, refreshSheet) => SizedBox(
+                height: math.min(
+                    MediaQuery.of(sheetContext).size.height * 0.78, 560),
+                child: Column(children: [
+                  ListTile(
+                    title: const Text('Shortcut presets'),
+                    subtitle: const Text(
+                        'Edit the chord or move presets into your preferred order.'),
+                    trailing: IconButton(
+                        tooltip: 'Close shortcut settings',
+                        onPressed: () => Navigator.of(sheetContext).pop(),
+                        icon: const Icon(Icons.close)),
+                  ),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: _shortcuts.length,
+                      itemBuilder: (_, index) {
+                        final preset = _shortcuts[index];
+                        return ListTile(
+                          key: ValueKey('monitor-shortcut-${preset.id}'),
+                          title: Text(preset.label),
+                          trailing:
+                              Row(mainAxisSize: MainAxisSize.min, children: [
+                            IconButton(
+                                tooltip: 'Move ${preset.label} up',
+                                onPressed: index == 0
+                                    ? null
+                                    : () =>
+                                        _moveShortcut(index, -1, refreshSheet),
+                                icon: const Icon(Icons.arrow_upward)),
+                            IconButton(
+                                tooltip: 'Move ${preset.label} down',
+                                onPressed: index == _shortcuts.length - 1
+                                    ? null
+                                    : () =>
+                                        _moveShortcut(index, 1, refreshSheet),
+                                icon: const Icon(Icons.arrow_downward)),
+                            IconButton(
+                                tooltip: 'Edit ${preset.label}',
+                                onPressed: () => _editShortcut(
+                                    sheetContext, index, refreshSheet),
+                                icon: const Icon(Icons.edit_outlined)),
+                          ]),
+                        );
+                      },
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          setState(() =>
+                              _shortcuts = List.of(kDefaultMonitorShortcuts));
+                          refreshSheet(() {});
+                          _emitShortcuts();
+                        },
+                        icon: const Icon(Icons.restart_alt),
+                        label: const Text('Reset shortcuts'),
+                      ),
+                    ),
+                  ),
+                ]),
+              ),
+            ));
+  }
+
   Widget _keyButton(String label, PhysicalKeyboardKey key) => OutlinedButton(
       style: OutlinedButton.styleFrom(minimumSize: const Size(48, 48)),
       onPressed: () => widget.onKey(key),
@@ -298,10 +721,11 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
               onSelectionChanged: (selection) => _setMode(selection.single),
             ),
             const SizedBox(height: 12),
-            if (_mode == _MonitorKeyboardMode.text)
+            if (_mode == _MonitorKeyboardMode.text) ...[
               TextField(
                   controller: _text,
                   focusNode: _textFocus,
+                  onChanged: widget.onDraftChanged,
                   autofocus: true,
                   autocorrect: false,
                   enableSuggestions: false,
@@ -314,8 +738,21 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
                       suffixIcon: IconButton(
                           tooltip: 'Send text',
                           onPressed: _send,
-                          icon: const Icon(Icons.send_outlined))))
-            else ...[
+                          icon: const Icon(Icons.send_outlined)))),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Tooltip(
+                  message: 'Paste phone clipboard',
+                  child: TextButton.icon(
+                    onPressed: _pastePhoneClipboard,
+                    icon: const Icon(Icons.content_paste_outlined),
+                    label: const Text('Paste phone clipboard'),
+                    style:
+                        TextButton.styleFrom(minimumSize: const Size(48, 48)),
+                  ),
+                ),
+              ),
+            ] else ...[
               Wrap(spacing: 8, runSpacing: 8, children: [
                 _modifierButton('Ctrl', PhysicalKeyboardKey.controlLeft),
                 _modifierButton('Alt', PhysicalKeyboardKey.altLeft),
@@ -337,34 +774,36 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
                           const BoxConstraints(minWidth: 48, minHeight: 48),
                       onPressed: () => widget.onKey(key.key),
                       icon: Icon(key.value)),
+                for (final entry in <String, PhysicalKeyboardKey>{
+                  'F1': PhysicalKeyboardKey.f1,
+                  'F2': PhysicalKeyboardKey.f2,
+                  'F3': PhysicalKeyboardKey.f3,
+                  'F4': PhysicalKeyboardKey.f4,
+                  'F5': PhysicalKeyboardKey.f5,
+                  'F6': PhysicalKeyboardKey.f6,
+                  'F7': PhysicalKeyboardKey.f7,
+                  'F8': PhysicalKeyboardKey.f8,
+                  'F9': PhysicalKeyboardKey.f9,
+                  'F10': PhysicalKeyboardKey.f10,
+                  'F11': PhysicalKeyboardKey.f11,
+                  'F12': PhysicalKeyboardKey.f12,
+                }.entries)
+                  _keyButton(entry.key, entry.value),
               ]),
               const SizedBox(height: 12),
               Wrap(spacing: 8, runSpacing: 8, children: [
-                OutlinedButton(
-                    onPressed: () => _shortcut(
-                        [PhysicalKeyboardKey.altLeft], PhysicalKeyboardKey.tab),
-                    child: const Text('Alt+Tab')),
-                OutlinedButton(
-                    onPressed: () => _shortcut(
-                        [PhysicalKeyboardKey.controlLeft],
-                        PhysicalKeyboardKey.keyC),
-                    child: const Text('Ctrl+C')),
-                OutlinedButton(
-                    onPressed: () => _shortcut(
-                        [PhysicalKeyboardKey.controlLeft],
-                        PhysicalKeyboardKey.keyV),
-                    child: const Text('Ctrl+V')),
-                OutlinedButton(
-                    onPressed: () => _shortcut(
-                        [PhysicalKeyboardKey.controlLeft],
-                        PhysicalKeyboardKey.keyZ),
-                    child: const Text('Ctrl+Z')),
-                OutlinedButton(
-                    onPressed: () => _shortcut([
-                          PhysicalKeyboardKey.controlLeft,
-                          PhysicalKeyboardKey.shiftLeft
-                        ], PhysicalKeyboardKey.escape),
-                    child: const Text('Ctrl+Shift+Esc')),
+                for (final preset in _shortcuts)
+                  OutlinedButton(
+                      onPressed: () => _runShortcut(preset),
+                      child: Text(preset.label)),
+                Tooltip(
+                  message: 'Customize shortcuts',
+                  child: OutlinedButton.icon(
+                    onPressed: _showShortcutSettings,
+                    icon: const Icon(Icons.tune),
+                    label: const Text('Customize'),
+                  ),
+                ),
                 if (_held.isNotEmpty)
                   FilledButton.tonalIcon(
                       onPressed: _releaseAll,
@@ -376,8 +815,8 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
 }
 
 class _MonitorControlViewState extends State<MonitorControlView> {
-  static const double _precisionGain = 0.35;
   static const Size _floatingMouseSize = Size(132, 52);
+  static const Offset _cursorFingerOffset = Offset(0, -56);
   late Offset _cursor = widget.desktopSize.center(Offset.zero);
   Size _viewport = Size.zero;
   Offset _offset = Offset.zero;
@@ -387,12 +826,22 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   late MonitorViewPreference _preferredView;
   bool _panMode = false;
   late bool _precision;
+  late double _precisionGain;
   bool _dragLocked = false;
+  bool _gestureDragHeld = false;
+  bool _doubleTapArmed = false;
+  bool _doubleTapCandidate = false;
+  Timer? _doubleTapHoldTimer;
+  Timer? _doubleTapWindowTimer;
+  Offset? _doubleTapLocalPosition;
+  double _doubleTapPendingTravel = 0;
   late MonitorToolbarDock _toolbarDock;
   late bool _toolbarVisible;
   late bool _thumbwheelVisible;
   late bool _mouseButtonsVisible;
   late Offset _mouseButtonsPosition;
+  late bool _cursorOffset;
+  late List<MonitorShortcutPreset> _shortcuts;
   late MonitorOrientationPreference _orientationPreference;
   bool _floatingLeftPressed = false;
   bool _floatingRightPressed = false;
@@ -404,6 +853,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   final Set<int> _rawPointers = <int>{};
   int _rawMaxFingers = 0;
   bool _suppressTap = false;
+  Offset? _tapLocalPosition;
   Offset _lastFocal = Offset.zero;
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undecided;
   int _twoFingerUpdates = 0;
@@ -425,16 +875,36 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     if (oldWidget.preferences != widget.preferences) {
       _loadPreferences(widget.preferences, keepCustomZoom: true);
     }
-    if (_dragLocked && !_canSendInput) {
+    if ((_dragLocked || _gestureDragHeld) && !_canSendInput) {
+      final shouldRelease = oldWidget.canControl && !oldWidget.localViewOnly;
       _dragLocked = false;
-      if (oldWidget.canControl && !oldWidget.localViewOnly) {
+      _gestureDragHeld = false;
+      _doubleTapHoldTimer?.cancel();
+      _doubleTapHoldTimer = null;
+      if (shouldRelease) {
         widget.onPointer(1, _cursor);
       }
     }
     if (!_canSendInput) {
+      _doubleTapHoldTimer?.cancel();
+      _doubleTapWindowTimer?.cancel();
+      _doubleTapHoldTimer = null;
+      _doubleTapWindowTimer = null;
+      _doubleTapArmed = false;
+      _doubleTapCandidate = false;
       _floatingLeftPressed = false;
       _floatingRightPressed = false;
     }
+  }
+
+  @override
+  void dispose() {
+    _doubleTapHoldTimer?.cancel();
+    _doubleTapWindowTimer?.cancel();
+    if ((_dragLocked || _gestureDragHeld) && _canSendInput) {
+      widget.onPointer(1, _cursor);
+    }
+    super.dispose();
   }
 
   void _loadPreferences(MonitorControlPreferences preferences,
@@ -447,11 +917,14 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       _zoom = null;
     }
     _precision = preferences.precision;
+    _precisionGain = preferences.precisionGain;
     _toolbarDock = preferences.toolbarDock;
     _toolbarVisible = preferences.toolbarVisible;
     _thumbwheelVisible = preferences.thumbwheelVisible;
     _mouseButtonsVisible = preferences.mouseButtonsVisible;
     _mouseButtonsPosition = preferences.mouseButtonsPosition;
+    _cursorOffset = preferences.cursorOffset;
+    _shortcuts = List.of(preferences.shortcuts);
     _orientationPreference = preferences.orientation;
   }
 
@@ -459,11 +932,14 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     widget.onPreferencesChanged?.call(MonitorControlPreferences(
       preferredView: _preferredView,
       precision: _precision,
+      precisionGain: _precisionGain,
       toolbarDock: _toolbarDock,
       toolbarVisible: _toolbarVisible,
       thumbwheelVisible: _thumbwheelVisible,
       mouseButtonsVisible: _mouseButtonsVisible,
       mouseButtonsPosition: _mouseButtonsPosition,
+      cursorOffset: _cursorOffset,
+      shortcuts: List.unmodifiable(_shortcuts),
       orientation: _orientationPreference,
     ));
   }
@@ -565,6 +1041,21 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     widget.onPointer(2, _cursor);
   }
 
+  Offset _sourcePointForLocal(Offset localPosition) {
+    final viewportPoint = localPosition + _cursorFingerOffset;
+    final point = (viewportPoint - _offset) / _scale;
+    return Offset(
+      point.dx.clamp(0, widget.desktopSize.width - 1).toDouble(),
+      point.dy.clamp(0, widget.desktopSize.height - 1).toDouble(),
+    );
+  }
+
+  void _moveToLocal(Offset localPosition) {
+    if (!_canSendInput) return;
+    _cursor = _sourcePointForLocal(localPosition);
+    widget.onPointer(2, _cursor);
+  }
+
   void _click([int count = 1]) {
     if (!_canSendInput) return;
     for (var i = 0; i < count; i++) {
@@ -576,9 +1067,72 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   void _tap() {
     if (_suppressTap) {
       _suppressTap = false;
+      _doubleTapCandidate = false;
       return;
     }
+    final secondTap = _doubleTapCandidate;
+    _doubleTapHoldTimer?.cancel();
+    _doubleTapHoldTimer = null;
+    _doubleTapCandidate = false;
+    if (_cursorOffset && _tapLocalPosition != null) {
+      _moveToLocal(_tapLocalPosition!);
+    }
     _click();
+    if (!secondTap && _canSendInput && _tapLocalPosition != null) {
+      _armDoubleTap(_tapLocalPosition!);
+    }
+  }
+
+  void _armDoubleTap(Offset localPosition) {
+    _doubleTapWindowTimer?.cancel();
+    _doubleTapArmed = true;
+    _doubleTapLocalPosition = localPosition;
+    _doubleTapWindowTimer = Timer(const Duration(milliseconds: 350), () {
+      _doubleTapWindowTimer = null;
+      _doubleTapArmed = false;
+    });
+  }
+
+  void _beginDoubleTapHold(Offset localPosition) {
+    _doubleTapWindowTimer?.cancel();
+    _doubleTapWindowTimer = null;
+    _doubleTapArmed = false;
+    _doubleTapCandidate = true;
+    _doubleTapPendingTravel = 0;
+    _doubleTapLocalPosition = localPosition;
+    _doubleTapHoldTimer?.cancel();
+    _doubleTapHoldTimer = Timer(const Duration(milliseconds: 250), () {
+      _doubleTapHoldTimer = null;
+      if (!mounted ||
+          !_canSendInput ||
+          _panMode ||
+          _rawPointers.length != 1 ||
+          _rawMaxFingers > 1 ||
+          !_doubleTapCandidate) {
+        return;
+      }
+      setState(() {
+        if (_cursorOffset && _doubleTapLocalPosition != null) {
+          _moveToLocal(_doubleTapLocalPosition!);
+        }
+        _gestureDragHeld = true;
+        _doubleTapCandidate = false;
+      });
+      widget.onPointer(0, _cursor);
+    });
+  }
+
+  void _cancelDoubleTapCandidate() {
+    _doubleTapHoldTimer?.cancel();
+    _doubleTapHoldTimer = null;
+    _doubleTapCandidate = false;
+    _doubleTapPendingTravel = 0;
+  }
+
+  void _releaseGestureDrag() {
+    if (!_gestureDragHeld) return;
+    setState(() => _gestureDragHeld = false);
+    widget.onPointer(1, _cursor);
   }
 
   void _scaleUpdate(ScaleUpdateDetails details) {
@@ -597,6 +1151,12 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     }
     final delta = details.localFocalPoint - _lastFocal;
     final factor = details.scale / _gestureScale;
+    if (_doubleTapCandidate &&
+        !_gestureDragHeld &&
+        _doubleTapHoldTimer != null) {
+      _doubleTapPendingTravel += delta.distance;
+      if (_doubleTapPendingTravel > 8) _cancelDoubleTapCandidate();
+    }
     setState(() {
       if (_maxFingers >= 2) {
         _twoFingerUpdates++;
@@ -625,7 +1185,11 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         _offset += delta;
         _limitOffset();
       } else if (_canSendInput) {
-        _move(delta);
+        if (_cursorOffset) {
+          _moveToLocal(details.localFocalPoint);
+        } else {
+          _move(delta);
+        }
       }
       _lastFocal = details.localFocalPoint;
       _gestureScale = details.scale;
@@ -642,17 +1206,37 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   }
 
   void _rawPointerDown(PointerDownEvent event) {
-    if (_rawPointers.isEmpty) {
+    final firstPointer = _rawPointers.isEmpty;
+    if (firstPointer) {
       _rawMaxFingers = 0;
     }
     _rawPointers.add(event.pointer);
     _rawMaxFingers = math.max(_rawMaxFingers, _rawPointers.length);
+    if (firstPointer &&
+        _doubleTapArmed &&
+        _doubleTapLocalPosition != null &&
+        (event.localPosition - _doubleTapLocalPosition!).distance <= 48 &&
+        _canSendInput &&
+        !_panMode) {
+      _beginDoubleTapHold(event.localPosition);
+    }
+    if (_rawPointers.length > 1) {
+      _cancelDoubleTapCandidate();
+      if (_gestureDragHeld) _releaseGestureDrag();
+    }
   }
 
   void _rawPointerUp(PointerEvent event) {
     _rawPointers.remove(event.pointer);
     if (_rawPointers.isNotEmpty) return;
-    _suppressTap = _rawMaxFingers >= 2;
+    _doubleTapHoldTimer?.cancel();
+    _doubleTapHoldTimer = null;
+    final releasedGestureDrag = _gestureDragHeld;
+    if (_gestureDragHeld) {
+      _releaseGestureDrag();
+    }
+    if (event is PointerCancelEvent) _doubleTapCandidate = false;
+    _suppressTap = releasedGestureDrag || _rawMaxFingers >= 2;
     _rawMaxFingers = 0;
   }
 
@@ -673,20 +1257,82 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     showModalBottomSheet<void>(
         context: context,
         useSafeArea: true,
-        builder: (_) => const Padding(
-            padding: EdgeInsets.all(20),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              ListTile(
-                  leading: Icon(Icons.touch_app_outlined),
-                  title: Text('One finger'),
-                  subtitle: Text(
-                      'Swipe to move the pointer. Tap to left-click. Hold to right-click.')),
-              ListTile(
-                  leading: Icon(Icons.zoom_out_map),
-                  title: Text('Two fingers'),
-                  subtitle: Text(
-                      'Pinch to zoom. Drag together to scroll the remote computer.')),
-            ])));
+        builder: (_) => SingleChildScrollView(
+            child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  const ListTile(
+                      leading: Icon(Icons.mouse_outlined),
+                      title: Text('Windows Pointer'),
+                      subtitle: Text(
+                          'Phone gestures control the Windows mouse. Local zoom and Pan never change Windows resolution.')),
+                  ListTile(
+                      leading: const Icon(Icons.touch_app_outlined),
+                      title: const Text('One finger'),
+                      subtitle: Text(_cursorOffset
+                          ? 'Cursor offset is on. The pointer stays above your finger; tap to left-click and hold to right-click.'
+                          : 'Swipe to move the pointer. Tap to left-click. Hold to right-click.')),
+                  const ListTile(
+                      leading: Icon(Icons.drag_indicator),
+                      title: Text('Double tap and hold'),
+                      subtitle: Text(
+                          'Hold the second tap to drag. Lift your finger to release the left mouse button.')),
+                  const ListTile(
+                      leading: Icon(Icons.zoom_out_map),
+                      title: Text('Two fingers'),
+                      subtitle: Text(
+                          'Pinch to zoom. Drag together to scroll the remote computer.')),
+                ]))));
+  }
+
+  void _showPrecisionSettings() {
+    showModalBottomSheet<void>(
+        context: context,
+        useSafeArea: true,
+        builder: (_) => StatefulBuilder(builder: (context, setSheetState) {
+              final percent = (_precisionGain * 100).round();
+              return Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Row(children: [
+                      const Expanded(
+                          child: Text('Precision pointer speed',
+                              style: TextStyle(fontWeight: FontWeight.w600))),
+                      IconButton(
+                          tooltip: 'Close precision settings',
+                          onPressed: () => Navigator.of(context).pop(),
+                          icon: const Icon(Icons.close)),
+                    ]),
+                    Text('Pointer gain $percent%'),
+                    Slider(
+                        value: _precisionGain,
+                        min: 0.1,
+                        max: 1,
+                        divisions: 18,
+                        label: '$percent%',
+                        onChanged: (value) {
+                          setState(() => _precisionGain = value);
+                          setSheetState(() {});
+                          _emitPreferences();
+                        }),
+                    TextButton(
+                        onPressed: () {
+                          setState(() => _precisionGain = 0.35);
+                          setSheetState(() {});
+                          _emitPreferences();
+                        },
+                        child: const Text('Reset to 35%')),
+                  ]));
+            }));
+  }
+
+  void _resetControls() {
+    const defaults = MonitorControlPreferences();
+    setState(() {
+      _loadPreferences(defaults);
+      _limitOffset();
+    });
+    _emitPreferences();
   }
 
   Widget _actionsPanel() => Material(
@@ -717,6 +1363,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                           }
                         : null,
                     selected: _precision),
+                _button('Precision speed', Icons.tune, _showPrecisionSettings),
                 _button('Drag lock', Icons.drag_indicator,
                     _canSendInput ? () => _setDragLocked(!_dragLocked) : null,
                     selected: _dragLocked),
@@ -758,9 +1405,14 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   setState(() => _thumbwheelVisible = !_thumbwheelVisible);
                   _emitPreferences();
                 }, selected: _thumbwheelVisible),
+                _button('Cursor offset', Icons.touch_app_outlined, () {
+                  setState(() => _cursorOffset = !_cursorOffset);
+                  _emitPreferences();
+                }, selected: _cursorOffset),
                 _button('Ctrl+Alt+Del', Icons.security,
                     _canSendInput ? widget.onCtrlAltDel : null),
                 _button('Gestures', Icons.help_outline, _showGestureHelp),
+                _button('Reset controls', Icons.restart_alt, _resetControls),
               ]))));
 
   Widget _displayPanel() => Material(
@@ -1074,8 +1726,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   Widget _modeBadge() {
     final labels = <String>[
       if (_dragLocked) 'Drag locked',
+      if (_gestureDragHeld) 'Dragging',
       if (_panMode) 'Pan',
-      if (_precision) 'Precision 35%',
+      if (_precision) 'Precision ${(_precisionGain * 100).round()}%',
+      if (_cursorOffset) 'Cursor offset',
     ];
     return Material(
       color: const Color(0xF2191F22),
@@ -1129,9 +1783,24 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                       child: GestureDetector(
                           key: const ValueKey('monitor-trackpad'),
                           behavior: HitTestBehavior.opaque,
+                          onTapDown: _panMode
+                              ? null
+                              : (details) =>
+                                  _tapLocalPosition = details.localPosition,
                           onTap: _panMode ? null : _tap,
-                          onLongPress: _canSendInput && !_panMode
-                              ? () => widget.onPointer(3, _cursor)
+                          onLongPressStart: _canSendInput && !_panMode
+                              ? (details) {
+                                  if (_doubleTapCandidate ||
+                                      _doubleTapHoldTimer != null ||
+                                      _gestureDragHeld) {
+                                    return;
+                                  }
+                                  if (_cursorOffset) {
+                                    setState(() =>
+                                        _moveToLocal(details.localPosition));
+                                  }
+                                  widget.onPointer(3, _cursor);
+                                }
                               : null,
                           onScaleStart: (details) {
                             _fingers = details.pointerCount;
@@ -1175,7 +1844,11 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                           ])))))),
           if ((_zoom ?? 1) > 1.01)
             Positioned(top: 12, right: 12, child: _minimap()),
-          if (_dragLocked || _panMode || _precision)
+          if (_dragLocked ||
+              _gestureDragHeld ||
+              _panMode ||
+              _precision ||
+              _cursorOffset)
             Positioned(top: 12, left: 12, child: _modeBadge()),
           if (_mouseButtonsVisible)
             Positioned(

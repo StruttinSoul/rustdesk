@@ -43,6 +43,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   bool _monitorRightDown = false;
   bool _monitorLocalViewOnly = false;
   final Set<int> _monitorHeldKeys = <int>{};
+  final Map<int, String> _monitorDrafts = <int, String>{};
   final Map<int, MonitorControlPreferences> _monitorPreferences =
       <int, MonitorControlPreferences>{};
   Future<void> _monitorEvents = Future.value();
@@ -86,6 +87,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     unawaited(bind.setLocalFlutterOption(
         k: _monitorPreferenceKey(display),
         v: jsonEncode(preferences.toJson())));
+    if (mounted) setState(() {});
     if (previous.orientation != preferences.orientation &&
         _fullscreen?.display == display) {
       _landscape = null;
@@ -728,6 +730,19 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           isScrollControlled: true,
           useSafeArea: true,
           builder: (_) => MonitorKeyboardPanel(
+                initialText: _monitorDrafts[index] ?? '',
+                shortcuts: _preferencesForMonitor(index).shortcuts,
+                onShortcutsChanged: (shortcuts) => _saveMonitorPreferences(
+                    index,
+                    _preferencesForMonitor(index)
+                        .copyWith(shortcuts: shortcuts)),
+                onDraftChanged: (value) {
+                  if (value.isEmpty) {
+                    _monitorDrafts.remove(index);
+                  } else {
+                    _monitorDrafts[index] = value;
+                  }
+                },
                 onText: (text) => _queueMonitor(() async {
                   if (_canControlMonitor(index)) {
                     await bind.sessionInputString(
