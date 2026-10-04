@@ -242,6 +242,9 @@ jobs:
           ORG_GRADLE_PROJECT_mirpgTestApk: "true"
         run: |
           export PATH="$JAVA_HOME/bin:$PATH"
+          # Match the repository's production Android CI heap setting so R8 and
+          # lint do not exhaust Gradle's 1 GiB default during release builds.
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
           cd flutter
           flutter build apk --release --target-platform android-arm64 --split-per-abi \
             --build-name "1.5.0-ci.${{ github.run_number }}" \
