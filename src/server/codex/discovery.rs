@@ -75,27 +75,15 @@ fn installation_candidates() -> Vec<PathBuf> {
         }
     }
 
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        let local_app_data = PathBuf::from(local_app_data);
-        candidates.push(
-            local_app_data
-                .join("Programs")
-                .join("OpenAI")
-                .join("Codex")
-                .join("bin")
-                .join("codex.exe"),
-        );
-
-        let desktop_bin = local_app_data.join("OpenAI").join("Codex").join("bin");
-        candidates.push(desktop_bin.join("codex.exe"));
-        if let Ok(entries) = std::fs::read_dir(&desktop_bin) {
-            let mut bundled = entries
-                .flatten()
-                .map(|entry| entry.path().join("codex.exe"))
-                .collect::<Vec<_>>();
-            bundled.sort();
-            candidates.extend(bundled);
+    #[cfg(target_os = "windows")]
+    if crate::platform::is_root() {
+        if let Some(home) = crate::platform::windows::get_active_user_home() {
+            append_local_app_data_candidates(&mut candidates, &home.join("AppData").join("Local"));
         }
+    }
+
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        append_local_app_data_candidates(&mut candidates, &PathBuf::from(local_app_data));
     }
 
     if let Some(path) = std::env::var_os("PATH") {
@@ -111,12 +99,42 @@ fn codex_home_candidate() -> ResultType<PathBuf> {
             return Ok(PathBuf::from(codex_home));
         }
     }
+
+    #[cfg(target_os = "windows")]
+    if crate::platform::is_root() {
+        if let Some(home) = crate::platform::windows::get_active_user_home() {
+            return Ok(home.join(".codex"));
+        }
+    }
+
     if let Some(user_profile) = std::env::var_os("USERPROFILE") {
         if !user_profile.is_empty() {
             return Ok(PathBuf::from(user_profile).join(".codex"));
         }
     }
     bail!("Unable to determine Codex home: CODEX_HOME and USERPROFILE are unset")
+}
+
+fn append_local_app_data_candidates(candidates: &mut Vec<PathBuf>, local_app_data: &Path) {
+    candidates.push(
+        local_app_data
+            .join("Programs")
+            .join("OpenAI")
+            .join("Codex")
+            .join("bin")
+            .join("codex.exe"),
+    );
+
+    let desktop_bin = local_app_data.join("OpenAI").join("Codex").join("bin");
+    candidates.push(desktop_bin.join("codex.exe"));
+    if let Ok(entries) = std::fs::read_dir(&desktop_bin) {
+        let mut bundled = entries
+            .flatten()
+            .map(|entry| entry.path().join("codex.exe"))
+            .collect::<Vec<_>>();
+        bundled.sort();
+        candidates.extend(bundled);
+    }
 }
 
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -222,5 +240,21 @@ mod tests {
             });
 
         assert!(selected.is_some());
+    }
+
+    #[test]
+    fn local_app_data_candidates_cover_codex_install_locations() {
+        let mut candidates = Vec::new();
+        append_local_app_data_candidates(
+            &mut candidates,
+            Path::new(r"C:\Users\person\AppData\Local"),
+        );
+
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\person\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\person\AppData\Local\OpenAI\Codex\bin\codex.exe"
+        )));
     }
 }
