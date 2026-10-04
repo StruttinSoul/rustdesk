@@ -48,7 +48,14 @@ jobs:
         run: |
           cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff "$(dirname "$(dirname "$(which flutter)")")"
           cd "$(dirname "$(dirname "$(which flutter)")")"
-          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if git apply --check flutter_3.24.4_dropdown_menu_enableFilter.diff; then
+            git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          elif git apply --reverse --check flutter_3.24.4_dropdown_menu_enableFilter.diff; then
+            echo "Flutter dropdown patch already applied"
+          else
+            echo "::error::Flutter dropdown patch is neither applicable nor already applied"
+            exit 1
+          fi
 
       - name: Run focused Flutter tests
         shell: bash
@@ -106,7 +113,14 @@ jobs:
         run: |
           cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff "$(dirname "$(dirname "$(which flutter)")")"
           cd "$(dirname "$(dirname "$(which flutter)")")"
-          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if git apply --check flutter_3.24.4_dropdown_menu_enableFilter.diff; then
+            git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          elif git apply --reverse --check flutter_3.24.4_dropdown_menu_enableFilter.diff; then
+            echo "Flutter dropdown patch already applied"
+          else
+            echo "::error::Flutter dropdown patch is neither applicable nor already applied"
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
@@ -195,7 +209,15 @@ jobs:
         shell: bash
         run: |
           cd "$(dirname "$(dirname "$(which flutter)")")"
-          git apply "${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+          patch_file="${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+          if git apply --check "$patch_file"; then
+            git apply "$patch_file"
+          elif git apply --reverse --check "$patch_file"; then
+            echo "Flutter dropdown patch already applied"
+          else
+            echo "::error::Flutter dropdown patch is neither applicable nor already applied"
+            exit 1
+          fi
 
       - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         id: setup-ndk
