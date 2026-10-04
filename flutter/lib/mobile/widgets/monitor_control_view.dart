@@ -256,14 +256,15 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   }
 
   Widget _button(String tooltip, IconData icon, VoidCallback? action) =>
-      Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
+      SizedBox(
+          width: 48,
+          height: 48,
           child: IconButton(
               tooltip: tooltip,
               icon: Icon(icon),
               color: Colors.white,
               disabledColor: Colors.white38,
-              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+              padding: EdgeInsets.zero,
               onPressed: action));
 
   void _showGestureHelp() {
@@ -294,37 +295,56 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   Widget _sessionPanel() => Material(
       color: Colors.black87,
       elevation: 8,
-      borderRadius: BorderRadius.circular(18),
+      borderRadius: BorderRadius.circular(16),
       child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
+          padding: const EdgeInsets.all(6),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            _button(
-                'Zoom in',
-                Icons.zoom_in,
-                () => setState(() => _setZoom(
-                    (_zoom ?? 1) * 1.25, _viewport.center(Offset.zero)))),
-            Text('${((_zoom ?? 1) * 100).round()}%',
-                style: const TextStyle(color: Colors.white)),
-            _button(
-                'Zoom out',
-                Icons.zoom_out,
-                () => setState(() => _setZoom(
-                    (_zoom ?? 1) / 1.25, _viewport.center(Offset.zero)))),
-            _button(
-                'Fit screen',
-                Icons.fit_screen,
-                () =>
-                    setState(() => _setZoom(1, _viewport.center(Offset.zero)))),
+            SizedBox(
+                width: 148,
+                child: Row(children: [
+                  const Icon(Icons.desktop_windows_outlined,
+                      size: 18, color: Colors.white70),
+                  const SizedBox(width: 8),
+                  Text('${((_zoom ?? 1) * 100).round()}%',
+                      style: const TextStyle(color: Colors.white)),
+                ])),
             const Divider(height: 8, color: Colors.white24),
-            _button('Keyboard', Icons.keyboard_outlined,
-                widget.canControl ? widget.onKeyboard : null),
-            _button('Right click', Icons.ads_click,
-                widget.canControl ? () => widget.onPointer(3, _cursor) : null),
-            _button('Middle click', Icons.mouse_outlined,
-                widget.canControl ? () => widget.onPointer(4, _cursor) : null),
-            _button('Ctrl+Alt+Del', Icons.security,
-                widget.canControl ? widget.onCtrlAltDel : null),
-            _button('Gestures', Icons.help_outline, _showGestureHelp),
+            SizedBox(
+                width: 148,
+                child: Wrap(spacing: 2, runSpacing: 2, children: [
+                  _button(
+                      'Fit screen',
+                      Icons.fit_screen,
+                      () => setState(
+                          () => _setZoom(1, _viewport.center(Offset.zero)))),
+                  _button(
+                      'Zoom out',
+                      Icons.zoom_out,
+                      () => setState(() => _setZoom(
+                          (_zoom ?? 1) / 1.25, _viewport.center(Offset.zero)))),
+                  _button(
+                      'Zoom in',
+                      Icons.zoom_in,
+                      () => setState(() => _setZoom(
+                          (_zoom ?? 1) * 1.25, _viewport.center(Offset.zero)))),
+                  _button('Keyboard', Icons.keyboard_outlined,
+                      widget.canControl ? widget.onKeyboard : null),
+                  _button(
+                      'Right click',
+                      Icons.ads_click,
+                      widget.canControl
+                          ? () => widget.onPointer(3, _cursor)
+                          : null),
+                  _button(
+                      'Middle click',
+                      Icons.mouse_outlined,
+                      widget.canControl
+                          ? () => widget.onPointer(4, _cursor)
+                          : null),
+                  _button('Ctrl+Alt+Del', Icons.security,
+                      widget.canControl ? widget.onCtrlAltDel : null),
+                  _button('Gestures', Icons.help_outline, _showGestureHelp),
+                ])),
           ])));
 
   @override
@@ -337,7 +357,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
           _viewport = size;
           _fit = math.min(size.width / widget.desktopSize.width,
               size.height / widget.desktopSize.height);
-          _zoom ??= (1 / _fit).clamp(1, 6).toDouble();
+          _zoom ??= 1;
           _offset = size.center(Offset.zero) - _cursor * _scale;
           _limitOffset();
         }
@@ -418,15 +438,21 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                       }),
                   child: Material(
                       color: Colors.black87,
-                      shape: const CircleBorder(),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          side: const BorderSide(color: Colors.white24)),
                       elevation: 8,
-                      child: IconButton(
-                          tooltip: 'Session menu',
-                          color: Colors.white,
-                          icon:
-                              Icon(_menuOpen ? Icons.close : Icons.more_horiz),
-                          onPressed: () =>
-                              setState(() => _menuOpen = !_menuOpen))))),
+                      child: SizedBox(
+                          width: 48,
+                          height: 56,
+                          child: IconButton(
+                              tooltip: 'Session menu',
+                              color: Colors.white,
+                              icon: Icon(_menuOpen
+                                  ? Icons.close
+                                  : Icons.mouse_outlined),
+                              onPressed: () =>
+                                  setState(() => _menuOpen = !_menuOpen)))))),
         ]);
       });
 }

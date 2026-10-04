@@ -21,20 +21,22 @@ void main() {
         ))));
   }
 
-  testWidgets(
-      'Windows starts readable and offers an explicit full-screen overview',
-      (tester) async {
+  testWidgets('Windows opens fit-to-screen like AnyDesk', (tester) async {
     await show(tester);
-    expect(tester.getSize(find.byType(RawImage)).width,
-        greaterThanOrEqualTo(3840));
+    final surface =
+        tester.getSize(find.byKey(const ValueKey('monitor-trackpad')));
+    final desktop = tester.getSize(find.byType(RawImage));
+    expect(desktop.width, closeTo(surface.width, 0.01));
+    expect(desktop.height, lessThanOrEqualTo(surface.height));
+    expect(find.byIcon(Icons.mouse_outlined), findsOneWidget);
     await tester.tap(find.byTooltip('Session menu'));
     await tester.pump();
-    await tester.tap(find.byTooltip('Fit screen'));
-    await tester.pump(const Duration(milliseconds: 350));
     expect(find.text('100%'), findsOneWidget);
     await tester.tap(find.byTooltip('Zoom in'));
     await tester.pump(const Duration(milliseconds: 350));
     expect(find.text('125%'), findsOneWidget);
+    expect(tester.getSize(find.byType(RawImage)).width,
+        greaterThan(desktop.width));
   });
 
   testWidgets(
