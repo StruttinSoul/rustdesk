@@ -4,18 +4,107 @@ import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:uuid/uuid.dart';
 
 void main() {
-  test('a retained preview can finish starting after the visible set changes', () async {
+  test('preview control is acknowledged only by the current request', () async {
     final sent = <Map<String, dynamic>>[];
-    final model = EmulatorModel(Uuid().v4obj(), commandSender: (_, value) async => sent.add(jsonDecode(value)));
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, value) async => sent.add(jsonDecode(value)));
+
+    await model.setPreviews([], [0]);
+    final first = sent.last['request_id'] as int;
+    expect(model.previewRequest, first);
+    expect(model.previewsAcknowledged, isFalse);
+
+    await model.setPreviews([], [1]);
+    final current = sent.last['request_id'] as int;
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'previews',
+      'request_id': first,
+      'enabled': true,
+      'session_ids': const [],
+    });
+    expect(model.previewsAcknowledged, isFalse);
+
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'previews',
+      'request_id': current,
+      'enabled': true,
+      'session_ids': const [],
+    });
+    expect(model.previewAcknowledgedRequest, current);
+    expect(model.previewsAcknowledged, isTrue);
+    model.dispose();
+  });
+
+  test('preview acknowledgement can be invalidated before resubscribe',
+      () async {
+    final sent = <Map<String, dynamic>>[];
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, value) async => sent.add(jsonDecode(value)));
+
+    await model.setPreviews([], [0]);
+    final request = sent.last['request_id'] as int;
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'previews',
+      'request_id': request,
+      'enabled': true,
+      'session_ids': const [],
+    });
+    expect(model.previewsAcknowledged, isTrue);
+
+    model.invalidatePreviewAcknowledgement();
+    expect(model.previewsAcknowledged, isFalse);
+    expect(model.previewRequest, request);
+    expect(model.previewAcknowledgedRequest, 0);
+    model.dispose();
+  });
+
+  test('a retained preview can finish starting after the visible set changes',
+      () async {
+    final sent = <Map<String, dynamic>>[];
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, value) async => sent.add(jsonDecode(value)));
     await model.setPreviews(['bluestacks:one'], []);
     final first = sent.last['request_id'];
     await model.setPreviews(['bluestacks:one', 'bluestacks:two'], []);
-    model.handleResponse({'protocol_version': 1, 'type': 'status', 'request_id': first, 'preview': true, 'target_id': 'bluestacks:one', 'session_id': 5, 'state': 'starting'});
-    model.handleResponse({'protocol_version': 1, 'type': 'status', 'request_id': first, 'preview': true, 'target_id': 'bluestacks:one', 'session_id': 5, 'state': 'streaming', 'width': 360, 'height': 200});
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': first,
+      'preview': true,
+      'target_id': 'bluestacks:one',
+      'session_id': 5,
+      'state': 'starting'
+    });
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': first,
+      'preview': true,
+      'target_id': 'bluestacks:one',
+      'session_id': 5,
+      'state': 'streaming',
+      'width': 360,
+      'height': 200
+    });
     expect(model.previews['bluestacks:one']?.state, 'streaming');
-    model.instances = [const RemoteEmulator(id: 'bluestacks:one', name: 'One', provider: 'bluestacks', state: 'ready')];
+    model.instances = [
+      const RemoteEmulator(
+          id: 'bluestacks:one',
+          name: 'One',
+          provider: 'bluestacks',
+          state: 'ready')
+    ];
     await model.desktop();
-    model.handleResponse({'protocol_version': 1, 'type': 'status', 'request_id': sent.last['request_id'], 'session_id': 0, 'state': 'desktop'});
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': sent.last['request_id'],
+      'session_id': 0,
+      'state': 'desktop'
+    });
     expect(model.dashboardActive, true);
     expect(model.instances.single.name, 'One');
     expect(model.previews['bluestacks:one']?.state, 'streaming');

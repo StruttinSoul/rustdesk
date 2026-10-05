@@ -19,6 +19,8 @@ import 'settings_page.dart';
 import 'terminal_page.dart';
 import '../widgets/mirpg_remote_theme.dart';
 import '../widgets/monitor_control_view.dart';
+import '../widgets/monitor_session_continuity.dart';
+import '../widgets/session_quality_panel.dart';
 
 enum _ConnectedPcSection { devices, system, files, powershell, codex }
 
@@ -36,12 +38,14 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   final _monitorFocus = FocusNode();
   Timer? _scrollDebounce;
   Timer? _refreshTimer;
+  Timer? _healthTimer;
   _Target? _fullscreen;
   bool _chooser = false;
   bool _background = false;
   bool _monitorDown = false;
   bool _monitorRightDown = false;
   bool _monitorLocalViewOnly = false;
+  final MonitorInputEpoch _monitorInputEpoch = MonitorInputEpoch();
   final Set<int> _monitorHeldKeys = <int>{};
   final Map<int, String> _monitorDrafts = <int, String>{};
   final Map<int, MonitorControlPreferences> _monitorPreferences =
@@ -58,7 +62,16 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   bool _systemOpened = false;
   bool _powershellOpened = false;
   bool _codexOpened = false;
+  MirpgQualityProfile _qualityProfile = MirpgQualityProfile.auto;
+  String? _effectiveImageQuality;
+  String _qualityError = '';
+  bool _qualityApplying = false;
+  bool _hasStoredQualityPreference = false;
+  int _peerInfoGeneration = 0;
+  int _reconnectGeneration = 0;
   EmulatorModel get model => widget.ffi.emulatorModel;
+
+  String get _qualityPreferenceKey => 'mirpg-quality-profile:${widget.ffi.id}';
 
   String _monitorPreferenceKey(int display) =>
       'mirpg-monitor-controls:${widget.ffi.id}:monitor:$display';
@@ -108,6 +121,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     WidgetsBinding.instance.addObserver(this);
     model.addListener(_changed);
     widget.ffi.ffiModel.addListener(_changed);
+    widget.ffi.qualityMonitorModel.addListener(_qualityChanged);
+    _peerInfoGeneration = widget.ffi.ffiModel.peerInfoGeneration;
+    _reconnectGeneration = widget.ffi.ffiModel.reconnectGeneration;
     _scroll.addListener(_scrolled);
     unawaited(model.refresh());
     _refreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -115,15 +131,134 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         unawaited(model.refresh());
       }
     });
+    _healthTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (mounted &&
+          !_background &&
+          widget.ffi.qualityMonitorModel.data.latestUpdatedAt != null) {
+        setState(() {});
+      }
+    });
     unawaited(SystemChrome.setPreferredOrientations(const []));
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
-    WidgetsBinding.instance.addPostFrameCallback((_) => _subscribe());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _subscribe();
+      unawaited(_loadQualityProfile());
+    });
+  }
+
+  void _qualityChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _loadQualityProfile() async {
+    final stored = bind.getLocalFlutterOption(k: _qualityPreferenceKey);
+    _hasStoredQualityPreference = stored.isNotEmpty;
+    String? effective;
+    try {
+      effective =
+          await bind.sessionGetImageQuality(sessionId: widget.ffi.sessionId);
+    } catch (_) {
+      // A connecting session can report the effective value on the next open.
+    }
+    if (!mounted) return;
+    final preferred = stored.isNotEmpty
+        ? mirpgQualityProfileFromStored(stored)
+        : mirpgQualityProfileFromEffective(effective);
+    setState(() {
+      _qualityProfile = preferred;
+      _effectiveImageQuality = effective;
+    });
+    if (stored.isNotEmpty && effective != mirpgQualityProfileValue(preferred)) {
+      await _applyQualityProfile(preferred, persist: false);
+    }
+  }
+
+  Future<void> _applyQualityProfile(MirpgQualityProfile profile,
+      {bool persist = true}) async {
+    if (persist) {
+      _hasStoredQualityPreference = true;
+      unawaited(bind.setLocalFlutterOption(
+          k: _qualityPreferenceKey, v: profile.name));
+    }
+    if (mounted) {
+      setState(() {
+        _qualityProfile = profile;
+        _qualityApplying = true;
+        _qualityError = '';
+      });
+    }
+    String? effective;
+    String error = '';
+    try {
+      await bind.sessionSetImageQuality(
+          sessionId: widget.ffi.sessionId,
+          value: mirpgQualityProfileValue(profile));
+      effective =
+          await bind.sessionGetImageQuality(sessionId: widget.ffi.sessionId);
+    } catch (e) {
+      error = 'Could not apply this quality profile: $e';
+    }
+    if (!mounted) return;
+    setState(() {
+      _effectiveImageQuality = effective ?? _effectiveImageQuality;
+      _qualityApplying = false;
+      _qualityError = error;
+    });
+  }
+
+  Future<void> _showQualityConnection() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, sheetSetState) => AnimatedBuilder(
+          animation: widget.ffi.qualityMonitorModel,
+          builder: (_, __) => SessionQualityConnectionSheet(
+            preferredProfile: _qualityProfile,
+            effectiveQuality: _effectiveImageQuality,
+            applying: _qualityApplying,
+            direct: widget.ffi.ffiModel.direct,
+            data: widget.ffi.qualityMonitorModel.data,
+            now: DateTime.now(),
+            error: _qualityError,
+            onProfileChanged: (profile) async {
+              sheetSetState(() {});
+              await _applyQualityProfile(profile);
+              if (sheetContext.mounted) sheetSetState(() {});
+            },
+          ),
+        ),
+      ),
+    );
   }
 
   void _changed() {
     if (!mounted) return;
     if (!widget.ffi.ffiModel.keyboard || widget.ffi.ffiModel.viewOnly) {
       unawaited(_releaseMonitorInput());
+    }
+    final reconnectGeneration = widget.ffi.ffiModel.reconnectGeneration;
+    if (reconnectGeneration != _reconnectGeneration) {
+      _reconnectGeneration = reconnectGeneration;
+      model.invalidatePreviewAcknowledgement();
+      if (_fullscreen?.display != null) {
+        unawaited(_releaseMonitorInput());
+        _subscription = '';
+      }
+    }
+    final peerInfoGeneration = widget.ffi.ffiModel.peerInfoGeneration;
+    if (peerInfoGeneration != _peerInfoGeneration) {
+      _peerInfoGeneration = peerInfoGeneration;
+      model.invalidatePreviewAcknowledgement();
+      if (_hasStoredQualityPreference) {
+        unawaited(_applyQualityProfile(_qualityProfile, persist: false));
+      }
+      if (_fullscreen?.display != null) {
+        unawaited(_releaseMonitorInput());
+        _subscription = '';
+      }
     }
     if (_fullscreen != null &&
         !targets.any((target) => target.id == _fullscreen!.id)) {
@@ -182,6 +317,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   void _retainImages(List<int> displays) {
     widget.ffi.imageModel.retainDashboardImages({
       ...displays,
+      if (_fullscreen?.display != null) _fullscreen!.display!,
       for (final preview in model.previews.values) preview.channel,
       if (model.selected && model.guestSessionId != 0) model.videoChannel,
     });
@@ -315,8 +451,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     WidgetsBinding.instance.removeObserver(this);
     model.removeListener(_changed);
     widget.ffi.ffiModel.removeListener(_changed);
+    widget.ffi.qualityMonitorModel.removeListener(_qualityChanged);
     _scrollDebounce?.cancel();
     _refreshTimer?.cancel();
+    _healthTimer?.cancel();
     _scroll.dispose();
     _monitorFocus.dispose();
     unawaited(model.setPreviews([], [], enabled: false));
@@ -419,14 +557,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                 ? 'Your PC'
                 : widget.ffi.ffiModel.pi.hostname),
             actions: [
-              Center(
-                  child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Text(widget.ffi.ffiModel.direct == null
-                          ? 'Connecting'
-                          : widget.ffi.ffiModel.direct!
-                              ? 'Direct'
-                              : 'Relay'))),
+              SessionStatusButton(
+                direct: widget.ffi.ffiModel.direct,
+                data: widget.ffi.qualityMonitorModel.data,
+                now: DateTime.now(),
+                onPressed: () => unawaited(_showQualityConnection()),
+              ),
               if (activeSection == _ConnectedPcSection.devices)
                 IconButton(
                     tooltip: 'Refresh views',
@@ -445,6 +581,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         ? null
                         : () => unawaited(model.refreshHost())),
               ConnectedPcSessionMenu(
+                onQualityConnection: () => unawaited(_showQualityConnection()),
                 onSettings: _openSettings,
                 onEndSession: () =>
                     clientClose(widget.ffi.sessionId, widget.ffi),
@@ -613,6 +750,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                           widget.ffi.ffiModel.pi.displays[target.display!];
                       final preferences =
                           _preferencesForMonitor(target.display!);
+                      final frameStatus =
+                          _monitorFrameStatus(target.display!, image);
                       return MonitorControlView(
                         key: ValueKey(
                             '${target.id}:${display.width}x${display.height}'),
@@ -621,6 +760,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         image: image,
                         canControl: image != null &&
                             _hostCanControlMonitor(target.display!),
+                        frameStatus: frameStatus,
                         preferences: preferences,
                         onPreferencesChanged: (next) =>
                             _saveMonitorPreferences(target.display!, next),
@@ -638,6 +778,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                             unawaited(_monitorKeyboard(target.display!)),
                         onSwitchView: () => unawaited(_choose()),
                         onDashboard: () => unawaited(_dashboard()),
+                        onSessionStatus: () =>
+                            unawaited(_showQualityConnection()),
                         onCtrlAltDel: (widget.ffi.ffiModel.pi.platform ==
                                     kPeerPlatformLinux ||
                                 widget.ffi.ffiModel.pi.sasEnabled)
@@ -663,7 +805,27 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       widget.ffi.ffiModel.keyboard &&
       !widget.ffi.ffiModel.viewOnly &&
       index >= 0 &&
-      index < widget.ffi.ffiModel.pi.displays.length;
+      index < widget.ffi.ffiModel.pi.displays.length &&
+      _monitorFrameIsCurrent(index);
+
+  bool _monitorFrameIsCurrent(int index) => monitorFrameIsCurrent(
+        previewRequest: model.previewRequest,
+        acknowledgedRequest: model.previewAcknowledgedRequest,
+        frameRequest: widget.ffi.imageModel.dashboardImagePreviewRequest(index),
+      );
+
+  String? _monitorFrameStatus(int index, ui.Image? image) {
+    if (_monitorFrameIsCurrent(index)) return null;
+    if (image == null) return 'Waiting for live video';
+    if (!model.previewsAcknowledged) return 'Last frame · reconnecting';
+    final updatedAt = widget.ffi.imageModel.dashboardImageUpdatedAt(index);
+    if (updatedAt == null) return 'Last frame · waiting for fresh video';
+    final age = DateTime.now().difference(updatedAt);
+    if (age.isNegative || age.inSeconds < 2) {
+      return 'Last frame · waiting for fresh video';
+    }
+    return 'Last frame · ${age.inSeconds}s old';
+  }
 
   bool _canControlMonitor(int index) =>
       !_monitorLocalViewOnly && _hostCanControlMonitor(index);
@@ -710,8 +872,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   void _queueMonitor(Future<void> Function() action) {
-    _monitorEvents =
-        _monitorEvents.then((_) => action()).catchError((Object error) {
+    final epoch = _monitorInputEpoch.capture();
+    _monitorEvents = _monitorEvents.then((_) {
+      if (!_monitorInputEpoch.accepts(epoch)) return Future<void>.value();
+      return action();
+    }).catchError((Object error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Monitor input failed: $error')));
@@ -791,7 +956,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     }
   }
 
-  Future<void> _releaseMonitorInput() async {
+  Future<void> _releaseMonitorInput({bool invalidateQueued = true}) async {
+    if (invalidateQueued) _monitorInputEpoch.invalidate();
     await _releaseMonitor();
     widget.ffi.inputModel.toReleaseKeys
         .release(widget.ffi.inputModel.handleKeyEvent);
@@ -877,15 +1043,17 @@ class ConnectedPcTabBar extends StatelessWidget {
   }
 }
 
-enum _ConnectedPcSessionAction { settings, endSession }
+enum _ConnectedPcSessionAction { qualityConnection, settings, endSession }
 
 class ConnectedPcSessionMenu extends StatelessWidget {
   const ConnectedPcSessionMenu({
     super.key,
+    this.onQualityConnection,
     required this.onSettings,
     required this.onEndSession,
   });
 
+  final VoidCallback? onQualityConnection;
   final VoidCallback onSettings;
   final VoidCallback onEndSession;
 
@@ -896,6 +1064,8 @@ class ConnectedPcSessionMenu extends StatelessWidget {
         icon: const Icon(Icons.more_vert),
         onSelected: (action) {
           switch (action) {
+            case _ConnectedPcSessionAction.qualityConnection:
+              onQualityConnection?.call();
             case _ConnectedPcSessionAction.settings:
               onSettings();
             case _ConnectedPcSessionAction.endSession:
@@ -903,6 +1073,14 @@ class ConnectedPcSessionMenu extends StatelessWidget {
           }
         },
         itemBuilder: (context) => const [
+          PopupMenuItem(
+            value: _ConnectedPcSessionAction.qualityConnection,
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.network_check),
+              title: Text('Quality & connection'),
+            ),
+          ),
           PopupMenuItem(
             value: _ConnectedPcSessionAction.settings,
             child: ListTile(

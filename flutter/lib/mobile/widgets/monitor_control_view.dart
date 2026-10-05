@@ -362,6 +362,8 @@ class MonitorControlView extends StatefulWidget {
       required this.onKeyboard,
       this.onSwitchView,
       this.onDashboard,
+      this.onSessionStatus,
+      this.frameStatus,
       this.onCtrlAltDel});
   final Size desktopSize;
   final ui.Image? image;
@@ -375,6 +377,8 @@ class MonitorControlView extends StatefulWidget {
   final VoidCallback onKeyboard;
   final VoidCallback? onSwitchView;
   final VoidCallback? onDashboard;
+  final VoidCallback? onSessionStatus;
+  final String? frameStatus;
   final VoidCallback? onCtrlAltDel;
 
   @override
@@ -1479,6 +1483,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                     ? _MonitorPanel.none
                     : _MonitorPanel.display),
                 selected: _panel == _MonitorPanel.display),
+            _toolbarButton('Quality & connection', Icons.network_check,
+                widget.onSessionStatus),
             _toolbarButton('Switch view', Icons.view_carousel_outlined,
                 widget.onSwitchView),
             _toolbarButton(
@@ -1850,6 +1856,24 @@ class _MonitorControlViewState extends State<MonitorControlView> {
               _precision ||
               _cursorOffset)
             Positioned(top: 12, left: 12, child: _modeBadge()),
+          if (widget.frameStatus != null)
+            Positioned(
+                top: 12,
+                left: 0,
+                right: 0,
+                child: IgnorePointer(
+                    child: Center(
+                        child: DecoratedBox(
+                            decoration: BoxDecoration(
+                                color: const Color(0xE61C2225),
+                                borderRadius: BorderRadius.circular(999)),
+                            child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 7),
+                                child: Text(widget.frameStatus!,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w600))))))),
           if (_mouseButtonsVisible)
             Positioned(
                 left: floatingMouse.dx,

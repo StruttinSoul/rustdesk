@@ -1,8 +1,46 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/mobile/pages/target_dashboard_page.dart';
+import 'package:flutter_hbb/mobile/widgets/session_quality_panel.dart';
+import 'package:flutter_hbb/mobile/widgets/monitor_session_continuity.dart';
+import 'package:flutter_hbb/models/model.dart';
 
 void main() {
+  test('a monitor frame is usable only for the acknowledged preview request',
+      () {
+    expect(
+        monitorFrameIsCurrent(
+          previewRequest: 12,
+          acknowledgedRequest: 12,
+          frameRequest: 12,
+        ),
+        isTrue);
+    expect(
+        monitorFrameIsCurrent(
+          previewRequest: 13,
+          acknowledgedRequest: 13,
+          frameRequest: 12,
+        ),
+        isFalse);
+    expect(
+        monitorFrameIsCurrent(
+          previewRequest: 13,
+          acknowledgedRequest: 12,
+          frameRequest: 13,
+        ),
+        isFalse);
+  });
+
+  test('monitor input queued before an interruption is rejected', () {
+    final epoch = MonitorInputEpoch();
+    final queued = epoch.capture();
+    expect(epoch.accepts(queued), isTrue);
+
+    epoch.invalidate();
+    expect(epoch.accepts(queued), isFalse);
+    expect(epoch.accepts(epoch.capture()), isTrue);
+  });
+
   test('connected workspace Back returns tabs to Overview without ending', () {
     var returnedToOverview = 0;
     var stayedConnected = 0;
@@ -145,12 +183,14 @@ void main() {
 
   testWidgets('connected PC session menu exposes settings and explicit end',
       (tester) async {
+    var quality = 0;
     var settings = 0;
     var endSession = 0;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         appBar: AppBar(actions: [
           ConnectedPcSessionMenu(
+            onQualityConnection: () => quality++,
             onSettings: () => settings++,
             onEndSession: () => endSession++,
           ),
@@ -160,9 +200,18 @@ void main() {
 
     await tester.tap(find.byTooltip('Session menu'));
     await tester.pumpAndSettle();
+    expect(find.text('Quality & connection'), findsOneWidget);
     expect(find.text('App settings'), findsOneWidget);
     expect(find.text('End session'), findsOneWidget);
 
+    await tester.tap(find.text('Quality & connection'));
+    await tester.pumpAndSettle();
+    expect(quality, 1);
+    expect(settings, 0);
+    expect(endSession, 0);
+
+    await tester.tap(find.byTooltip('Session menu'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('App settings'));
     await tester.pumpAndSettle();
     expect(settings, 1);
@@ -173,6 +222,52 @@ void main() {
     await tester.tap(find.text('End session'));
     await tester.pumpAndSettle();
     expect(endSession, 1);
+  });
+
+  test('quality profiles map only to supported RustDesk presets', () {
+    expect(mirpgQualityProfileValue(MirpgQualityProfile.auto), 'balanced');
+    expect(mirpgQualityProfileValue(MirpgQualityProfile.sharpText), 'best');
+    expect(mirpgQualityProfileValue(MirpgQualityProfile.smoothMotion), 'low');
+    expect(
+        mirpgQualityProfileFromEffective('custom'), MirpgQualityProfile.auto);
+  });
+
+  test('slow warning requires a fresh measured delay', () {
+    final now = DateTime(2026, 10, 4, 12);
+    final data = QualityMonitorData()
+      ..delay = '312'
+      ..delayUpdatedAt = now.subtract(const Duration(seconds: 1));
+
+    expect(qualityConnectionIsSlow(data, now), isTrue);
+
+    data.delayUpdatedAt = now.subtract(const Duration(seconds: 8));
+    expect(qualityConnectionIsSlow(data, now), isFalse);
+  });
+
+  testWidgets('session diagnostics show honest unavailable and stale states',
+      (tester) async {
+    final now = DateTime(2026, 10, 4, 12);
+    final data = QualityMonitorData()
+      ..delay = '45'
+      ..delayUpdatedAt = now.subtract(const Duration(seconds: 8));
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SessionQualityConnectionSheet(
+          preferredProfile: MirpgQualityProfile.auto,
+          effectiveQuality: 'balanced',
+          applying: false,
+          direct: false,
+          data: data,
+          now: now,
+          onProfileChanged: (_) {},
+        ),
+      ),
+    ));
+
+    expect(find.textContaining('Relay'), findsWidgets);
+    expect(find.text('45 ms · stale'), findsOneWidget);
+    expect(find.text('Unavailable'), findsWidgets);
+    expect(find.textContaining('prove a LAN route'), findsOneWidget);
   });
 
   testWidgets('stopped cards boot only after an explicit tap', (tester) async {

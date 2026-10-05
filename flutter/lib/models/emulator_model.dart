@@ -89,9 +89,19 @@ class EmulatorModel extends ChangeNotifier {
   bool dashboardSupported = false;
   bool dashboardActive = false;
   int _previewRequest = 0;
+  int _previewAcknowledgedRequest = 0;
   int _hostRequest = 0;
   Set<String> _previewTargets = {};
   final Map<String, RemotePreview> previews = {};
+  int get previewRequest => _previewRequest;
+  int get previewAcknowledgedRequest => _previewAcknowledgedRequest;
+  bool get previewsAcknowledged =>
+      _previewRequest != 0 && _previewAcknowledgedRequest == _previewRequest;
+
+  void invalidatePreviewAcknowledgement() {
+    _previewAcknowledgedRequest = 0;
+  }
+
   HostSystemSnapshot? hostSnapshot;
   bool hostLoading = false;
   String hostError = '';
@@ -300,6 +310,7 @@ class EmulatorModel extends ChangeNotifier {
       error = (response['provider_errors'] as List? ?? []).join('\n');
     } else if (response['type'] == 'previews' && id == _previewRequest) {
       dashboardActive = response['enabled'] == true;
+      _previewAcknowledgedRequest = id is int ? id : 0;
       final sessions = response['session_ids'] as List? ?? [];
       previews.removeWhere((_, preview) =>
           !dashboardActive || !sessions.contains(preview.sessionId));
@@ -407,6 +418,7 @@ class EmulatorModel extends ChangeNotifier {
     previews.clear();
     _previewTargets.clear();
     _selectionRequest = _desktopRequest = _inventoryRequest = _hostRequest = 0;
+    _previewRequest = _previewAcknowledgedRequest = 0;
     notifyListeners();
   }
 

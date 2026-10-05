@@ -12,7 +12,8 @@ void main() {
       ValueChanged<MonitorControlPreferences>? onPreferencesChanged,
       VoidCallback? ctrlAltDel,
       VoidCallback? switchView,
-      VoidCallback? dashboard}) async {
+      VoidCallback? dashboard,
+      String? frameStatus}) async {
     await tester.pumpWidget(MaterialApp(
         theme: ThemeData(splashFactory: NoSplash.splashFactory),
         home: Scaffold(
@@ -26,9 +27,20 @@ void main() {
           onKeyboard: () {},
           onSwitchView: switchView,
           onDashboard: dashboard,
+          frameStatus: frameStatus,
           onCtrlAltDel: ctrlAltDel,
         ))));
   }
+
+  testWidgets('stale video is visibly marked while controls stay disabled',
+      (tester) async {
+    await show(tester,
+        control: false, frameStatus: 'Last frame · waiting for fresh video');
+    expect(find.text('Last frame · waiting for fresh video'), findsOneWidget);
+    final keyboardButton = find.ancestor(
+        of: find.byTooltip('Keyboard'), matching: find.byType(IconButton));
+    expect(tester.widget<IconButton>(keyboardButton).onPressed, isNull);
+  });
 
   test('monitor preferences round trip safely', () {
     const preferences = MonitorControlPreferences(
