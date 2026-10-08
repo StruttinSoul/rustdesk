@@ -21,6 +21,7 @@ import '../../common/widgets/remote_input.dart';
 import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
+import '../../models/task_notification_policy.dart';
 import '../../utils/image.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
@@ -194,6 +195,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   // For client side
   // When swithing from other app to this app, try to sync clipboard.
   void trySyncClipboard() {
+    if (!gFFI.ffiModel.authenticatedPeer ||
+        gFFI.ffiModel.pi.features.manualClipboard) {
+      return;
+    }
     gFFI.invokeMethod("try_sync_clipboard");
   }
 
@@ -204,10 +209,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         !gFFI.ffiModel.authenticatedPeer ||
         !gFFI.ffiModel.pi.features.targetDashboard) return;
     _dashboardOpened = true;
+    final notificationTarget =
+        TaskNotificationDeepLinkStore.takeForRuntime(widget.id);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => TargetDashboardPage(ffi: gFFI),
+          builder: (_) => TargetDashboardPage(
+            ffi: gFFI,
+            initialCodexThreadId: notificationTarget?.taskId,
+          ),
         ));
       }
     });

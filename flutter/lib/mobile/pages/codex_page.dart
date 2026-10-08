@@ -3,17 +3,22 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../models/codex_model.dart';
+import '../../models/remote_operation_state.dart';
+import '../widgets/codex_review_panel.dart';
+import '../widgets/codex_workspace_picker.dart';
 
 class CodexPage extends StatefulWidget {
   const CodexPage({
     super.key,
     required this.model,
     this.embedded = false,
+    this.initialThreadId,
     this.onWindowsAppOpened,
   });
 
   final CodexModel model;
   final bool embedded;
+  final String? initialThreadId;
   final VoidCallback? onWindowsAppOpened;
 
   @override
@@ -21,12 +26,14 @@ class CodexPage extends StatefulWidget {
 }
 
 class _CodexPageState extends State<CodexPage> {
-  CodexThread? _selectedThread;
+  String? _selectedThreadId;
   String _seenStartedThreadId = '';
 
   @override
   void initState() {
     super.initState();
+    final initial = widget.initialThreadId?.trim() ?? '';
+    if (initial.isNotEmpty) _selectedThreadId = initial;
     widget.model.addListener(_handleModelChanged);
     unawaited(widget.model.listThreads());
   }
@@ -37,7 +44,8 @@ class _CodexPageState extends State<CodexPage> {
     if (oldWidget.model == widget.model) return;
     oldWidget.model.removeListener(_handleModelChanged);
     widget.model.addListener(_handleModelChanged);
-    _selectedThread = null;
+    final initial = widget.initialThreadId?.trim() ?? '';
+    _selectedThreadId = initial.isEmpty ? null : initial;
     _seenStartedThreadId = '';
     unawaited(widget.model.listThreads());
   }
@@ -54,17 +62,17 @@ class _CodexPageState extends State<CodexPage> {
     final match = widget.model.threads.where((thread) => thread.id == started);
     if (match.isEmpty) return;
     _seenStartedThreadId = started;
-    setState(() => _selectedThread = match.first);
+    setState(() => _selectedThreadId = match.first.id);
   }
 
   void _selectThread(CodexThread thread) {
-    if (_selectedThread?.id == thread.id) return;
-    setState(() => _selectedThread = thread);
+    if (_selectedThreadId == thread.id) return;
+    setState(() => _selectedThreadId = thread.id);
   }
 
   void _clearSelection() {
-    if (_selectedThread == null) return;
-    setState(() => _selectedThread = null);
+    if (_selectedThreadId == null) return;
+    setState(() => _selectedThreadId = null);
   }
 
   Future<void> _openWindowsApp([String threadId = '']) async {
@@ -146,12 +154,12 @@ class _CodexPageState extends State<CodexPage> {
   }
 
   CodexThread? _currentThread() {
-    final selected = _selectedThread;
-    if (selected == null) return null;
+    final selectedId = _selectedThreadId;
+    if (selectedId == null) return null;
     for (final thread in widget.model.threads) {
-      if (thread.id == selected.id) return thread;
+      if (thread.id == selectedId) return thread;
     }
-    return selected;
+    return null;
   }
 }
 
@@ -171,6 +179,7 @@ class _TaskListPane extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final groups = _groupThreads(model.threads);
     if (model.loadingThreads && model.threads.isEmpty) {
       return Column(
         children: [
@@ -218,20 +227,112 @@ class _TaskListPane extends StatelessWidget {
                   )
                 : RefreshIndicator(
                     onRefresh: model.listThreads,
-                    child: ListView.builder(
+                    child: ListView(
                       physics: const AlwaysScrollableScrollPhysics(),
                       padding: const EdgeInsets.fromLTRB(10, 4, 10, 20),
-                      itemCount: model.threads.length,
-                      itemBuilder: (context, index) {
-                        final thread = model.threads[index];
-                        return _TaskRow(
-                          thread: thread,
-                          selected: selectedThreadId == thread.id,
-                          onTap: () => onSelect(thread),
-                        );
-                      },
+                      children: [
+                        for (final group in groups) ...[
+                          _TaskGroupHeader(
+                            label: group.label,
+                            count: group.threads.length,
+                          ),
+                          for (final thread in group.threads)
+                            _TaskRow(
+                              thread: thread,
+                              selected: selectedThreadId == thread.id,
+                              onTap: () => onSelect(thread),
+                            ),
+                          const SizedBox(height: 8),
+                        ],
+                      ],
                     ),
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TaskGroup {
+  const _TaskGroup(this.label, this.threads);
+
+  final String label;
+  final List<CodexThread> threads;
+}
+
+List<_TaskGroup> _groupThreads(List<CodexThread> threads) {
+  final needsYou = <CodexThread>[];
+  final running = <CodexThread>[];
+  final review = <CodexThread>[];
+  final desktopHistory = <CodexThread>[];
+
+  for (final thread in threads) {
+    final state = thread.state.toLowerCase();
+    final originator = thread.originator.toLowerCase().replaceAll('_', ' ');
+    final desktopImported =
+        state == 'resumable' && originator.contains('codex desktop');
+    if (desktopImported) {
+      desktopHistory.add(thread);
+    } else if (state == 'waiting_for_approval' ||
+        state == 'waiting_for_input') {
+      needsYou.add(thread);
+    } else if (state == 'working' ||
+        state == 'starting' ||
+        state == 'interrupting') {
+      running.add(thread);
+    } else {
+      review.add(thread);
+    }
+  }
+
+  void sortNewestFirst(List<CodexThread> items) {
+    items.sort((a, b) {
+      final byUpdated = b.updatedAt.compareTo(a.updatedAt);
+      return byUpdated != 0 ? byUpdated : a.id.compareTo(b.id);
+    });
+  }
+
+  for (final items in [needsYou, running, review, desktopHistory]) {
+    sortNewestFirst(items);
+  }
+
+  return [
+    if (needsYou.isNotEmpty) _TaskGroup('Needs you', needsYou),
+    if (running.isNotEmpty) _TaskGroup('Running', running),
+    if (review.isNotEmpty) _TaskGroup('Review', review),
+    if (desktopHistory.isNotEmpty)
+      _TaskGroup('Desktop history', desktopHistory),
+  ];
+}
+
+class _TaskGroupHeader extends StatelessWidget {
+  const _TaskGroupHeader({required this.label, required this.count});
+
+  final String label;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Text(
+            '$count',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
         ],
       ),
@@ -243,6 +344,46 @@ class _TaskListHeader extends StatelessWidget {
   const _TaskListHeader({required this.model});
 
   final CodexModel model;
+
+  Future<void> _handleAlertAction(BuildContext context, String action) async {
+    if (action == 'toggle') {
+      final enabling = !model.taskNotificationsEnabled;
+      final ok = await model.setTaskNotificationsEnabled(enabling);
+      if (!context.mounted || !enabling || ok) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            model.notificationSettingsError.isEmpty
+                ? 'Task alerts could not be enabled.'
+                : model.notificationSettingsError,
+          ),
+        ),
+      );
+      return;
+    }
+    if (action == 'privacy') {
+      await model.setHideSensitiveNotificationContent(
+        !model.hideSensitiveNotificationContent,
+      );
+    }
+  }
+
+  Future<void> _chooseWorkspace(BuildContext context) async {
+    if (!model.canStartInWorkspace) return;
+    await model.listWorkspaces();
+    if (!context.mounted) return;
+    final workspace = await showModalBottomSheet<CodexWorkspace>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: false,
+      builder: (sheetContext) => CodexWorkspacePicker(
+        model: model,
+        onSelected: (workspace) => Navigator.of(sheetContext).pop(workspace),
+      ),
+    );
+    if (workspace == null) return;
+    await model.startThread(workspaceId: workspace.id);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -300,6 +441,74 @@ class _TaskListHeader extends StatelessWidget {
                   ],
                 ),
               ),
+              PopupMenuButton<String>(
+                tooltip: 'Task alerts',
+                enabled: !model.notificationSettingsPending,
+                icon: model.notificationSettingsPending
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        model.taskNotificationsEnabled
+                            ? Icons.notifications_active_outlined
+                            : Icons.notifications_none_outlined,
+                      ),
+                onSelected: (action) =>
+                    unawaited(_handleAlertAction(context, action)),
+                itemBuilder: (context) => [
+                  PopupMenuItem<String>(
+                    value: 'toggle',
+                    enabled: model.taskNotificationsSupported,
+                    child: Row(
+                      children: [
+                        Icon(
+                          model.taskNotificationsEnabled
+                              ? Icons.check_circle_outline
+                              : Icons.notifications_outlined,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(model.taskNotificationsEnabled
+                              ? 'Disable task alerts'
+                              : model.taskNotificationsSupported
+                                  ? 'Enable task alerts'
+                                  : 'Task alerts unavailable'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'privacy',
+                    child: Row(
+                      children: [
+                        Icon(
+                          model.hideSensitiveNotificationContent
+                              ? Icons.lock_outline
+                              : Icons.lock_open_outlined,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            model.hideSensitiveNotificationContent
+                                ? 'Task names hidden on lock screen'
+                                : 'Task names visible in alerts',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem<String>(
+                    enabled: false,
+                    child: Text(
+                      'Alerts are generated while this remote session is connected. Android may stop them after the app process is closed.',
+                    ),
+                  ),
+                ],
+              ),
               IconButton(
                 tooltip: 'Refresh tasks',
                 onPressed: model.loadingThreads
@@ -315,9 +524,9 @@ class _TaskListHeader extends StatelessWidget {
               width: double.infinity,
               height: 48,
               child: FilledButton.icon(
-                onPressed: model.isStartingThread
+                onPressed: model.isStartingThread || !model.canStartInWorkspace
                     ? null
-                    : () => unawaited(model.startThread()),
+                    : () => unawaited(_chooseWorkspace(context)),
                 icon: model.isStartingThread
                     ? const SizedBox(
                         width: 16,
@@ -328,6 +537,15 @@ class _TaskListHeader extends StatelessWidget {
                 label: const Text('New task'),
               ),
             ),
+            if (!model.supportsWorkspaces) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Workspace selection is unavailable on this host.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
           ],
           if (!model.hasInteractiveControl && model.isReady) ...[
             const SizedBox(height: 10),
@@ -346,6 +564,15 @@ class _TaskListHeader extends StatelessWidget {
                   ),
                 ),
               ],
+            ),
+          ],
+          if (model.notificationSettingsError.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              model.notificationSettingsError,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
             ),
           ],
         ],
@@ -452,12 +679,17 @@ class _CodexThreadView extends StatefulWidget {
 
 class _CodexThreadViewState extends State<_CodexThreadView> {
   final ScrollController _scrollController = ScrollController();
-  final TextEditingController _composerController = TextEditingController();
+  late final TextEditingController _composerController;
   int _lastVisibleItemCount = 0;
+  bool _showReview = false;
 
   @override
   void initState() {
     super.initState();
+    _composerController = TextEditingController(
+      text: widget.model.draftFor(widget.thread.id),
+    );
+    _composerController.addListener(_onComposerChanged);
     widget.model.addListener(_onModelChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(widget.model.selectThread(widget.thread.id));
@@ -470,8 +702,10 @@ class _CodexThreadViewState extends State<_CodexThreadView> {
     if (oldWidget.model != widget.model) {
       oldWidget.model.removeListener(_onModelChanged);
       widget.model.addListener(_onModelChanged);
+      _syncComposerDraft();
     }
     if (oldWidget.thread.id != widget.thread.id) {
+      _showReview = false;
       _leaveThreadAfterFrame(oldWidget.model, oldWidget.thread.id);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(widget.model.selectThread(widget.thread.id));
@@ -483,12 +717,14 @@ class _CodexThreadViewState extends State<_CodexThreadView> {
   void dispose() {
     widget.model.removeListener(_onModelChanged);
     _leaveThreadAfterFrame(widget.model, widget.thread.id);
+    _composerController.removeListener(_onComposerChanged);
     _composerController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   void _onModelChanged() {
+    _syncComposerDraft();
     final count = widget.model.historyFor(widget.thread.id).length +
         widget.model.approvalsFor(widget.thread.id).length;
     if (count == _lastVisibleItemCount) return;
@@ -502,6 +738,27 @@ class _CodexThreadViewState extends State<_CodexThreadView> {
     });
   }
 
+  void _onComposerChanged() {
+    widget.model.updateDraft(widget.thread.id, _composerController.text);
+  }
+
+  void _syncComposerDraft() {
+    final draft = widget.model.draftFor(widget.thread.id);
+    if (_composerController.text == draft) return;
+    _composerController.value = TextEditingValue(
+      text: draft,
+      selection: TextSelection.collapsed(offset: draft.length),
+    );
+  }
+
+  void _setReviewMode(bool showReview) {
+    if (_showReview == showReview) return;
+    setState(() => _showReview = showReview);
+    if (!showReview) return;
+    unawaited(widget.model.loadTaskChanges(widget.thread.id));
+    unawaited(widget.model.loadArtifacts(widget.thread.id));
+  }
+
   @override
   Widget build(BuildContext context) {
     final model = widget.model;
@@ -510,6 +767,7 @@ class _CodexThreadViewState extends State<_CodexThreadView> {
       orElse: () => widget.thread,
     );
     final error = model.errorFor(thread.id);
+    final showingReview = _showReview && model.supportsReview;
     return Column(
       children: [
         _ThreadHeader(
@@ -518,18 +776,29 @@ class _CodexThreadViewState extends State<_CodexThreadView> {
           onBack: widget.onBack,
           readOnly: !model.hasInteractiveControl,
         ),
+        if (model.supportsReview)
+          _ThreadModeBar(
+            showingReview: showingReview,
+            onConversation: () => _setReviewMode(false),
+            onReview: () => _setReviewMode(true),
+          ),
         if (error.isNotEmpty)
           _InlineError(
             message: error,
             onRetry: () => unawaited(model.loadHistory(thread.id)),
           ),
-        Expanded(child: _buildTimeline(context, thread)),
-        _Composer(
-          model: model,
-          thread: thread,
-          controller: _composerController,
-          onOpenWindowsApp: widget.onOpenWindowsApp,
+        Expanded(
+          child: showingReview
+              ? CodexReviewPanel(model: model, threadId: thread.id)
+              : _buildTimeline(context, thread),
         ),
+        if (!showingReview)
+          _Composer(
+            model: model,
+            thread: thread,
+            controller: _composerController,
+            onOpenWindowsApp: widget.onOpenWindowsApp,
+          ),
       ],
     );
   }
@@ -622,6 +891,113 @@ class CodexThreadPage extends StatelessWidget {
           ),
         ),
       );
+}
+
+class _ThreadModeBar extends StatelessWidget {
+  const _ThreadModeBar({
+    required this.showingReview,
+    required this.onConversation,
+    required this.onReview,
+  });
+
+  final bool showingReview;
+  final VoidCallback onConversation;
+  final VoidCallback onReview;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        border: Border(
+          bottom: BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _ThreadModeButton(
+              key: const ValueKey('codex-conversation-tab'),
+              label: 'Conversation',
+              icon: Icons.chat_bubble_outline_rounded,
+              selected: !showingReview,
+              onTap: onConversation,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _ThreadModeButton(
+              key: const ValueKey('codex-review-tab'),
+              label: 'Review',
+              icon: Icons.difference_outlined,
+              selected: showingReview,
+              onTap: onReview,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ThreadModeButton extends StatelessWidget {
+  const _ThreadModeButton({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Material(
+          color: selected
+              ? theme.colorScheme.secondaryContainer
+              : theme.colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, size: 17),
+                  const SizedBox(width: 7),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        fontWeight:
+                            selected ? FontWeight.w700 : FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _ThreadHeader extends StatelessWidget {
@@ -879,6 +1255,38 @@ class _ApprovalInline extends StatelessWidget {
               ),
             ),
           ],
+          if (approval.workingDirectory.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Working directory',
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 3),
+            SelectableText(
+              approval.workingDirectory,
+              style:
+                  theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+            ),
+          ],
+          if (approval.scope.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Scope',
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 3),
+            SelectableText(
+              approval.scope,
+              style:
+                  theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+            ),
+          ],
           const SizedBox(height: 12),
           if (approval.actionable && model.canRespondToApprovals)
             Row(
@@ -911,7 +1319,7 @@ class _ApprovalInline extends StatelessWidget {
             )
           else
             Text(
-              'Handle this approval in the Windows Codex app.',
+              'This request needs a compatible MIRPG bridge action. Opening Windows Codex does not transfer this approval.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -987,7 +1395,11 @@ class _Composer extends StatelessWidget {
                                     ),
                                   )
                                 : const Icon(Icons.play_arrow_rounded),
-                            label: const Text('Resume'),
+                            label: Text(
+                              pending && !handoffPending
+                                  ? 'Connecting to task…'
+                                  : 'Resume',
+                            ),
                           ),
                         ),
                         const SizedBox(width: 8),
@@ -1022,15 +1434,39 @@ class _InteractiveComposer extends StatelessWidget {
   final bool pending;
   final Widget openWindowsButton;
 
+  Future<void> _submit(BuildContext context, {bool steerNow = false}) async {
+    final text = controller.text.trim();
+    if (text.isEmpty) return;
+    final working = model.activeTurnIdFor(thread.id).isNotEmpty;
+    final operationId = steerNow
+        ? await model.steer(thread.id, text)
+        : working
+            ? await model.queue(thread.id, text)
+            : await model.send(thread.id, text);
+    if (operationId == null) return;
+    final outcome = await model.waitForOperation(operationId);
+    if (!context.mounted) return;
+    if (outcome == RemoteOperationState.applied &&
+        controller.text.trim() == text) {
+      controller.clear();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final turnId = model.activeTurnIdFor(thread.id);
     final starting = model.isTurnStarting(thread.id);
     final working = turnId.isNotEmpty;
-    final canSubmit =
-        !starting && (working ? model.canSteerTurn : model.canStartTurn);
-    final actionLabel = starting ? 'Starting' : (working ? 'Steer' : 'Send');
+    final canType = !starting &&
+        (working
+            ? model.canQueueTurn || model.canSteerTurn
+            : model.canStartTurn);
+    final canPrimary =
+        !starting && (working ? model.canQueueTurn : model.canStartTurn);
+    final actionLabel =
+        starting ? 'Starting' : (working ? 'Queue next' : 'Send');
+    final queued = model.queuedInstructionsFor(thread.id);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -1048,7 +1484,7 @@ class _InteractiveComposer extends StatelessWidget {
               Expanded(
                 child: TextField(
                   controller: controller,
-                  enabled: !pending && canSubmit,
+                  enabled: canType,
                   minLines: 1,
                   maxLines: 5,
                   textCapitalization: TextCapitalization.sentences,
@@ -1056,7 +1492,7 @@ class _InteractiveComposer extends StatelessWidget {
                     hintText: starting
                         ? 'Starting Codex turn…'
                         : working
-                            ? 'Steer the active Codex turn…'
+                            ? 'Add the next instruction or steer this run…'
                             : 'Message Codex…',
                     border: InputBorder.none,
                     enabledBorder: InputBorder.none,
@@ -1068,40 +1504,100 @@ class _InteractiveComposer extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(bottom: 3),
                 child: FilledButton(
-                  onPressed: pending || !canSubmit
-                      ? null
-                      : () async {
-                          final text = controller.text.trim();
-                          if (text.isEmpty) return;
-                          if (working) {
-                            await model.steer(thread.id, text);
-                          } else {
-                            await model.send(thread.id, text);
-                          }
-                          controller.clear();
-                        },
+                  onPressed:
+                      pending || !canPrimary ? null : () => _submit(context),
                   child: Text(actionLabel),
                 ),
               ),
             ],
           ),
         ),
+        if (queued.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.secondaryContainer.withOpacity(0.45),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Queued next · ${queued.length}',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                for (final instruction in queued.take(3))
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      instruction.text,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                if (queued.length > 3)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      '+${queued.length - 3} more',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 4),
-        Row(
-          children: [
-            if (working && model.canInterruptTurn)
-              TextButton.icon(
-                onPressed: pending
-                    ? null
-                    : () => unawaited(model.interrupt(thread.id)),
-                icon: const Icon(Icons.stop_circle_outlined, size: 17),
-                label: const Text('Stop'),
-              )
-            else
-              const Spacer(),
-            if (working && model.canInterruptTurn) const Spacer(),
-            openWindowsButton,
-          ],
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final turnActions = <Widget>[
+              if (working && model.canInterruptTurn)
+                TextButton.icon(
+                  onPressed: pending
+                      ? null
+                      : () => unawaited(model.interrupt(thread.id)),
+                  icon: const Icon(Icons.stop_circle_outlined, size: 17),
+                  label: const Text('Stop'),
+                ),
+              if (working && model.canSteerTurn)
+                TextButton.icon(
+                  onPressed:
+                      pending ? null : () => _submit(context, steerNow: true),
+                  icon: const Icon(Icons.tune_rounded, size: 17),
+                  label: const Text('Steer now'),
+                ),
+            ];
+            if (constraints.maxWidth < 560) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (turnActions.isNotEmpty)
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 2,
+                      children: turnActions,
+                    ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: openWindowsButton,
+                  ),
+                ],
+              );
+            }
+            return Row(
+              children: [
+                ...turnActions,
+                const Spacer(),
+                openWindowsButton,
+              ],
+            );
+          },
         ),
       ],
     );
@@ -1347,6 +1843,7 @@ String _twoDigits(int value) => value.toString().padLeft(2, '0');
 
 String _stateLabel(String state) {
   if (state.isEmpty) return 'Ready';
+  if (state == 'resumable') return 'History';
   return state
       .split('_')
       .where((part) => part.isNotEmpty)

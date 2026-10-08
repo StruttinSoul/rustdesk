@@ -13,7 +13,7 @@ class _FakeFFI implements FFI {
   late final FfiModel ffiModel = FfiModel(WeakReference(this));
 
   @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+  dynamic noSuchMethod(Invocation invocation) => null;
 }
 
 void main() {

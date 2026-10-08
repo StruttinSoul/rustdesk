@@ -5,11 +5,13 @@ mod events;
 mod history;
 mod process;
 mod protocol;
+mod review;
 mod rpc;
 mod service;
 mod threads;
 #[cfg(target_os = "windows")]
 mod windows_app;
+mod workspaces;
 
 pub use approvals::{
     CodexApproval, CodexApprovalDecision, CodexApprovalKind, CodexResolvedApproval,
@@ -19,8 +21,10 @@ pub use events::{CodexEvent, CodexEventKind};
 pub use history::{CodexHistoryItem, CodexHistoryItemKind, CodexHistoryPage};
 pub use process::CodexConnectionMode;
 pub use protocol::CodexServerInfo;
+pub(crate) use review::{CodexArtifact, CodexReviewPage, CodexTaskChange, CodexTextPage};
 pub use service::is_available;
 pub use threads::{CodexThreadStatus, CodexThreadSummary};
+pub(crate) use workspaces::CodexWorkspace;
 
 #[cfg(target_os = "windows")]
 pub(crate) use service::{disconnect_client, submit_control_request, submit_read_request};
@@ -42,6 +46,8 @@ pub struct CodexBridge {
     connection_mode: CodexConnectionMode,
     owned_threads: HashSet<String>,
     approvals: approvals::PendingApprovals,
+    workspaces: workspaces::CodexWorkspaceRegistry,
+    review: review::CodexReviewRegistry,
 }
 
 pub(crate) enum CodexBridgeUpdate {
@@ -75,6 +81,11 @@ impl CodexBridge {
 
     pub(crate) fn list_threads(&mut self) -> Result<Vec<CodexThreadSummary>, rpc::RpcCallError> {
         let mut threads = threads::list_threads(&mut self.protocol, Duration::from_secs(10))?;
+        self.workspaces.refresh(
+            threads
+                .iter()
+                .filter_map(|thread| thread.workspace_path.clone()),
+        );
         for thread in &mut threads {
             if !self.owned_threads.contains(&thread.id) {
                 // A fresh app-server can see persisted threads created by Codex Desktop,
@@ -90,6 +101,15 @@ impl CodexBridge {
         control::support(&self.protocol)
     }
 
+    pub(crate) fn list_workspaces(&mut self) -> Result<Vec<CodexWorkspace>, rpc::RpcCallError> {
+        let threads = threads::list_threads(&mut self.protocol, Duration::from_secs(10))?;
+        Ok(self.workspaces.refresh(
+            threads
+                .into_iter()
+                .filter_map(|thread| thread.workspace_path),
+        ))
+    }
+
     pub(crate) fn resume_thread(
         &mut self,
         thread_id: &str,
@@ -101,18 +121,24 @@ impl CodexBridge {
 
     pub(crate) fn start_thread(
         &mut self,
-        workspace_thread_id: Option<&str>,
+        workspace_id: &str,
     ) -> Result<control::CodexControlOutcome, rpc::RpcCallError> {
-        let workspace = match workspace_thread_id {
-            Some(thread_id) => Some(control::workspace_for_thread(
-                &mut self.protocol,
-                thread_id,
-                CONTROL_TIMEOUT,
-            )?),
-            None => None,
-        };
-        let outcome =
-            control::start_thread(&mut self.protocol, workspace.as_deref(), CONTROL_TIMEOUT)?;
+        let workspace = self.workspaces.resolve_for_start(workspace_id)?;
+        let outcome = control::start_thread(&mut self.protocol, Some(&workspace), CONTROL_TIMEOUT)?;
+        self.owned_threads.insert(outcome.thread_id.clone());
+        Ok(outcome)
+    }
+
+    pub(crate) fn start_thread_from_workspace_thread(
+        &mut self,
+        workspace_thread_id: &str,
+    ) -> Result<control::CodexControlOutcome, rpc::RpcCallError> {
+        let workspace = control::workspace_for_thread(
+            &mut self.protocol,
+            workspace_thread_id,
+            CONTROL_TIMEOUT,
+        )?;
+        let outcome = control::start_thread(&mut self.protocol, Some(&workspace), CONTROL_TIMEOUT)?;
         self.owned_threads.insert(outcome.thread_id.clone());
         Ok(outcome)
     }
@@ -191,6 +217,73 @@ impl CodexBridge {
         )
     }
 
+    pub(crate) fn task_changes(
+        &mut self,
+        thread_id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<CodexReviewPage<CodexTaskChange>, rpc::RpcCallError> {
+        self.require_owned_thread(thread_id)?;
+        let workspace =
+            control::workspace_for_thread(&mut self.protocol, thread_id, Duration::from_secs(10))?;
+        let workspace = self.workspaces.resolve_approved_root(&workspace)?;
+        self.review.list_changes(
+            &mut self.protocol,
+            thread_id,
+            &workspace,
+            cursor,
+            limit,
+            Duration::from_secs(10),
+        )
+    }
+
+    pub(crate) fn task_diff(
+        &self,
+        thread_id: &str,
+        change_id: &str,
+        offset: u64,
+        limit: u32,
+    ) -> Result<CodexTextPage, rpc::RpcCallError> {
+        self.require_owned_thread(thread_id)?;
+        self.review.read_diff(thread_id, change_id, offset, limit)
+    }
+
+    pub(crate) fn artifacts(
+        &mut self,
+        thread_id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<CodexReviewPage<CodexArtifact>, rpc::RpcCallError> {
+        self.require_owned_thread(thread_id)?;
+        let workspace =
+            control::workspace_for_thread(&mut self.protocol, thread_id, Duration::from_secs(10))?;
+        let workspace = self.workspaces.resolve_approved_root(&workspace)?;
+        self.review.list_artifacts(
+            &mut self.protocol,
+            thread_id,
+            &workspace,
+            cursor,
+            limit,
+            Duration::from_secs(10),
+        )
+    }
+
+    pub(crate) fn artifact(
+        &self,
+        thread_id: &str,
+        artifact_id: &str,
+        offset: u64,
+        limit: u32,
+    ) -> Result<CodexTextPage, rpc::RpcCallError> {
+        self.require_owned_thread(thread_id)?;
+        self.review
+            .read_artifact(thread_id, artifact_id, offset, limit)
+    }
+
+    pub(crate) fn clear_review_for_thread(&mut self, thread_id: &str) {
+        self.review.clear_thread(thread_id);
+    }
+
     pub(crate) fn drain_updates(&mut self) -> Result<Vec<CodexBridgeUpdate>, rpc::RpcCallError> {
         let mut updates = Vec::new();
         for message in self.protocol.drain_available()? {
@@ -257,6 +350,8 @@ impl CodexBridge {
             connection_mode,
             owned_threads: HashSet::new(),
             approvals: approvals::PendingApprovals::default(),
+            workspaces: workspaces::CodexWorkspaceRegistry::default(),
+            review: review::CodexReviewRegistry::default(),
         })
     }
 }
@@ -347,9 +442,15 @@ mod tests {
         assert!(support.start_turn, "turn/start must be available");
         assert!(support.interrupt_turn, "turn/interrupt must be available");
 
+        let workspace = bridge
+            .list_workspaces()
+            .expect("local Codex workspaces should enumerate")
+            .into_iter()
+            .find(|workspace| workspace.accessible)
+            .expect("at least one accessible Codex workspace is required for this smoke test");
         let thread_outcome = bridge
-            .start_thread(None)
-            .expect("fresh disposable Codex thread should start");
+            .start_thread(&workspace.id)
+            .expect("fresh disposable Codex thread should start in the selected workspace");
         assert!(!thread_outcome.thread_id.is_empty());
 
         let turn_outcome = bridge

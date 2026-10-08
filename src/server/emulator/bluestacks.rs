@@ -74,7 +74,10 @@ impl BlueStacksConfigDocument {
             };
             let key = key.trim();
             if key.is_empty() {
-                bail!("BlueStacks config line {} has an empty key", line_number + 1);
+                bail!(
+                    "BlueStacks config line {} has an empty key",
+                    line_number + 1
+                );
             }
             let encoded_value = encoded_value.trim();
             let value = encoded_value
@@ -409,10 +412,7 @@ pub enum AndroidPackageClassification {
     Unknown,
 }
 
-fn classify_android_package(
-    package: &str,
-    user_installed: bool,
-) -> AndroidPackageClassification {
+fn classify_android_package(package: &str, user_installed: bool) -> AndroidPackageClassification {
     let package = package.trim().to_ascii_lowercase();
     if package == "com.uncube.gamevantage" {
         return AndroidPackageClassification::OptionalPromotional;
@@ -981,7 +981,10 @@ fn load_default_apps() -> DefaultApps {
 }
 
 pub(super) fn default_app_for_instance(instance_id: &str) -> String {
-    load_default_apps().get(instance_id).unwrap_or_default().to_owned()
+    load_default_apps()
+        .get(instance_id)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn save_default_apps(apps: &DefaultApps) {
@@ -1241,7 +1244,11 @@ fn registry_root(hive: &str) -> Option<RegKey> {
 }
 
 fn registry_view_flags(view: &str, write: bool) -> u32 {
-    let base = if write { KEY_READ | KEY_WRITE } else { KEY_READ };
+    let base = if write {
+        KEY_READ | KEY_WRITE
+    } else {
+        KEY_READ
+    };
     match view {
         "64" => base | KEY_WOW64_64KEY,
         "32" => base | KEY_WOW64_32KEY,
@@ -1257,10 +1264,9 @@ fn enumerate_startup_entries() -> Vec<BlueStacksStartupEntry> {
         ("HKLM", RegKey::predef(HKEY_LOCAL_MACHINE)),
     ] {
         for view in ["64", "32", "default"] {
-            let Ok(key) = root.open_subkey_with_flags(
-                WINDOWS_RUN_KEY,
-                registry_view_flags(view, false),
-            ) else {
+            let Ok(key) =
+                root.open_subkey_with_flags(WINDOWS_RUN_KEY, registry_view_flags(view, false))
+            else {
                 continue;
             };
             for value in key.enum_values().flatten() {
@@ -1303,10 +1309,16 @@ fn disable_startup_entry(
     journal: &mut CleanupJournal,
 ) -> ResultType<bool> {
     if !entry.safe_to_disable {
-        bail!("startup entry '{}' is not approved for cleanup", entry.value_name);
+        bail!(
+            "startup entry '{}' is not approved for cleanup",
+            entry.value_name
+        );
     }
     let Some(root) = registry_root(&entry.hive) else {
-        bail!("unsupported startup registry hive '{}': refusing change", entry.hive);
+        bail!(
+            "unsupported startup registry hive '{}': refusing change",
+            entry.hive
+        );
     };
     let key = root.open_subkey_with_flags(
         &entry.key_path,
@@ -1384,7 +1396,10 @@ fn collect_bluestacks_shortcuts(
             continue;
         }
         let recommended_cleanup = location == ShortcutLocation::Desktop
-            && matches!(lower.as_str(), "bluestacks 5.lnk" | "bluestacks manager.lnk");
+            && matches!(
+                lower.as_str(),
+                "bluestacks 5.lnk" | "bluestacks manager.lnk"
+            );
         output.push(BlueStacksShortcut {
             path: path.to_string_lossy().into_owned(),
             name: name.to_owned(),
@@ -1445,10 +1460,9 @@ fn enumerate_components() -> Vec<BlueStacksComponent> {
         ("HKLM", RegKey::predef(HKEY_LOCAL_MACHINE)),
     ] {
         for view in ["64", "32", "default"] {
-            let Ok(uninstall) = root.open_subkey_with_flags(
-                WINDOWS_UNINSTALL_KEY,
-                registry_view_flags(view, false),
-            ) else {
+            let Ok(uninstall) = root
+                .open_subkey_with_flags(WINDOWS_UNINSTALL_KEY, registry_view_flags(view, false))
+            else {
                 continue;
             };
             for subkey_name in uninstall.enum_keys().flatten() {
@@ -1555,7 +1569,10 @@ fn parse_registered_uninstall_command(command: &str) -> ResultType<(PathBuf, Vec
     if command.is_empty() {
         bail!("registered uninstaller command is empty")
     }
-    if command.chars().any(|ch| matches!(ch, '&' | '|' | '<' | '>' | '^' | '\n' | '\r')) {
+    if command
+        .chars()
+        .any(|ch| matches!(ch, '&' | '|' | '<' | '>' | '^' | '\n' | '\r'))
+    {
         bail!("registered uninstaller contains shell metacharacters")
     }
 
@@ -1580,7 +1597,10 @@ fn parse_registered_uninstall_command(command: &str) -> ResultType<(PathBuf, Vec
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if matches!(file_name.as_str(), "cmd.exe" | "powershell.exe" | "pwsh.exe" | "wscript.exe" | "cscript.exe") {
+    if matches!(
+        file_name.as_str(),
+        "cmd.exe" | "powershell.exe" | "pwsh.exe" | "wscript.exe" | "cscript.exe"
+    ) {
         bail!("script/shell uninstallers are not accepted")
     }
     if !program_path.is_absolute() && file_name != "msiexec.exe" {
@@ -1612,7 +1632,10 @@ fn parse_registered_uninstall_command(command: &str) -> ResultType<(PathBuf, Vec
 
 fn validate_component_removal(component: &BlueStacksComponent) -> ResultType<()> {
     if !component.can_remove {
-        bail!("component '{}' is not marked removable", component.display_name)
+        bail!(
+            "component '{}' is not marked removable",
+            component.display_name
+        )
     }
     if !matches!(
         component.classification,
@@ -1624,7 +1647,10 @@ fn validate_component_removal(component: &BlueStacksComponent) -> ResultType<()>
         )
     }
     if component.uninstall_command.trim().is_empty() {
-        bail!("component '{}' has no registered uninstaller", component.display_name)
+        bail!(
+            "component '{}' has no registered uninstaller",
+            component.display_name
+        )
     }
     Ok(())
 }
@@ -1642,7 +1668,9 @@ fn enumerate_services() -> Vec<BlueStacksService> {
         let display_name = service
             .get_value::<String, _>("DisplayName")
             .unwrap_or_else(|_| name.clone());
-        let image_path = service.get_value::<String, _>("ImagePath").unwrap_or_default();
+        let image_path = service
+            .get_value::<String, _>("ImagePath")
+            .unwrap_or_default();
         let lower = format!("{} {} {}", name, display_name, image_path).to_ascii_lowercase();
         if !lower.contains("bluestacks") && !lower.contains("bstksvc") {
             continue;
@@ -1760,7 +1788,11 @@ fn run_adb_with_mode(
             let error = connect.stderr.trim().to_owned();
             bail!(
                 "BlueStacks ADB connect failed for {serial}: {}",
-                if error.is_empty() { "non-zero exit status" } else { &error }
+                if error.is_empty() {
+                    "non-zero exit status"
+                } else {
+                    &error
+                }
             );
         }
     }
@@ -1774,7 +1806,11 @@ fn run_adb_with_mode(
         let error = output.stderr.trim().to_owned();
         bail!(
             "BlueStacks ADB command failed for {serial}: {}",
-            if error.is_empty() { "non-zero exit status" } else { &error }
+            if error.is_empty() {
+                "non-zero exit status"
+            } else {
+                &error
+            }
         );
     }
     Ok(output.stdout)
@@ -1790,9 +1826,11 @@ fn adb_health(connection_mode: AdbConnectionMode) -> ResultType<(usize, usize)> 
     };
     let mut expected = 0usize;
     let mut healthy = 0usize;
-    for instance in provider.instances()?.iter().filter(|instance| {
-        instance.running && instance.adb_enabled && instance.adb_port.is_some()
-    }) {
+    for instance in provider
+        .instances()?
+        .iter()
+        .filter(|instance| instance.running && instance.adb_enabled && instance.adb_port.is_some())
+    {
         expected += 1;
         if run_adb_with_mode(&provider, instance, &["get-state"], connection_mode)
             .map(|state| state.trim().eq_ignore_ascii_case("device"))
@@ -1832,9 +1870,7 @@ fn android_package_inventory_unavailable_reason(
         return Some("ADB is disabled in BlueStacks; Android packages were not inspected");
     }
     if !instance.running {
-        return Some(
-            "BlueStacks instance is stopped; start it before inspecting Android packages",
-        );
+        return Some("BlueStacks instance is stopped; start it before inspecting Android packages");
     }
     None
 }
@@ -1953,7 +1989,9 @@ pub fn remove_optional_component(component_id: &str) -> ResultType<()> {
     let component = enumerate_components()
         .into_iter()
         .find(|component| component.id == component_id)
-        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks component '{component_id}' was not found"))?;
+        .ok_or_else(|| {
+            hbb_common::anyhow::anyhow!("BlueStacks component '{component_id}' was not found")
+        })?;
     validate_component_removal(&component)?;
     let (mut program, args) = parse_registered_uninstall_command(&component.uninstall_command)?;
     if program
@@ -2037,13 +2075,19 @@ pub fn launch_default_app(instance_id: &str) -> ResultType<LaunchReport> {
     let apps = load_default_apps();
     let package = apps
         .get(instance_id)
-        .ok_or_else(|| hbb_common::anyhow::anyhow!("no default app is configured for BlueStacks instance '{instance_id}'"))?
+        .ok_or_else(|| {
+            hbb_common::anyhow::anyhow!(
+                "no default app is configured for BlueStacks instance '{instance_id}'"
+            )
+        })?
         .to_owned();
     let target = provider
         .discover()?
         .into_iter()
         .find(|target| target.provider_instance_id == instance_id)
-        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks instance '{instance_id}' does not exist"))?;
+        .ok_or_else(|| {
+            hbb_common::anyhow::anyhow!("BlueStacks instance '{instance_id}' does not exist")
+        })?;
     let started_instance = target.state == EmulatorState::Stopped;
     let instance = find_instance(&provider, instance_id)?;
 
@@ -2062,12 +2106,11 @@ pub fn launch_default_app(instance_id: &str) -> ResultType<LaunchReport> {
         provider.start(&target)?;
     }
     let ready = wait_for_android_ready(&provider, instance_id, DEFAULT_LAUNCH_TIMEOUT)?;
-    let package_path = run_adb(
-        &provider,
-        &ready,
-        &["shell", "pm", "path", &package],
-    )?;
-    if !package_path.lines().any(|line| line.trim().starts_with("package:")) {
+    let package_path = run_adb(&provider, &ready, &["shell", "pm", "path", &package])?;
+    if !package_path
+        .lines()
+        .any(|line| line.trim().starts_with("package:"))
+    {
         bail!(
             "default Android package '{package}' is not installed on BlueStacks instance '{instance_id}'"
         )
@@ -2076,7 +2119,11 @@ pub fn launch_default_app(instance_id: &str) -> ResultType<LaunchReport> {
         .discover()?
         .into_iter()
         .find(|target| target.provider_instance_id == instance_id)
-        .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks instance '{instance_id}' disappeared before app launch"))?;
+        .ok_or_else(|| {
+            hbb_common::anyhow::anyhow!(
+                "BlueStacks instance '{instance_id}' disappeared before app launch"
+            )
+        })?;
     provider.launch_package(&refreshed_target, &package)?;
     Ok(LaunchReport {
         instance_id: instance_id.to_owned(),
@@ -2122,9 +2169,14 @@ pub fn apply_cleanup(selection: CleanupSelection) -> ResultType<CleanupApplyRepo
             .filter(|entry| entry.safe_to_disable)
         {
             if disable_startup_entry(&entry, &mut journal)? {
-                report.disabled_startup_entries.push(entry.value_name.clone());
+                report
+                    .disabled_startup_entries
+                    .push(entry.value_name.clone());
                 save_cleanup_journal(&journal);
-                log::info!("BlueStacks cleanup disabled startup entry {}", entry.value_name);
+                log::info!(
+                    "BlueStacks cleanup disabled startup entry {}",
+                    entry.value_name
+                );
             }
         }
     }
@@ -2212,9 +2264,9 @@ pub fn restore_cleanup() -> ResultType<CleanupRestoreReport> {
         if preparation == AndroidRestorePreparation::StartAndWait {
             let target = instance_to_target(&instance);
             if let Err(error) = provider.start(&target) {
-                report
-                    .skipped_conflicts
-                    .push(format!("{instance_id}: failed to start for Android restore: {error}"));
+                report.skipped_conflicts.push(format!(
+                    "{instance_id}: failed to start for Android restore: {error}"
+                ));
                 continue;
             }
             match wait_for_android_ready(&provider, &instance_id, DEFAULT_LAUNCH_TIMEOUT) {
@@ -2229,16 +2281,18 @@ pub fn restore_cleanup() -> ResultType<CleanupRestoreReport> {
         }
         for package in packages {
             let inventory = android_packages(&instance_id)?;
-            let Some(info) = inventory.packages.iter().find(|info| info.package == package) else {
-                report.skipped_conflicts.push(format!("{instance_id}:{package}"));
+            let Some(info) = inventory
+                .packages
+                .iter()
+                .find(|info| info.package == package)
+            else {
+                report
+                    .skipped_conflicts
+                    .push(format!("{instance_id}:{package}"));
                 continue;
             };
             if info.disabled {
-                let _ = run_adb(
-                    &provider,
-                    &instance,
-                    &["shell", "pm", "enable", &package],
-                )?;
+                let _ = run_adb(&provider, &instance, &["shell", "pm", "enable", &package])?;
             }
             report
                 .restored_android_packages
@@ -2613,11 +2667,17 @@ impl BlueStacksProvider {
         match running_player_ports(&system) {
             Ok(ports) => {
                 for instance in &mut instances {
-                    instance.running |= instance.adb_port.map(|port| ports.contains(&port)).unwrap_or(false);
+                    instance.running |= instance
+                        .adb_port
+                        .map(|port| ports.contains(&port))
+                        .unwrap_or(false);
                 }
             }
-            Err(error) => hbb_common::throttled_log!(Duration::from_secs(5), warn,
-                "BlueStacks listener discovery failed: {error}"),
+            Err(error) => hbb_common::throttled_log!(
+                Duration::from_secs(5),
+                warn,
+                "BlueStacks listener discovery failed: {error}"
+            ),
         }
         Ok(instances)
     }
@@ -2643,7 +2703,9 @@ impl BlueStacksProvider {
     pub fn launch_package(&self, target: &EmulatorTarget, package: &str) -> ResultType<()> {
         let instance_id = self.target_instance_id(target)?;
         let args = direct_launch_args(instance_id, package)?;
-        Command::new(self.installation.player_path()).args(args).spawn()?;
+        Command::new(self.installation.player_path())
+            .args(args)
+            .spawn()?;
         Ok(())
     }
 }
@@ -2654,11 +2716,7 @@ impl EmulatorProvider for BlueStacksProvider {
     }
 
     fn discover(&self) -> ResultType<Vec<EmulatorTarget>> {
-        Ok(self
-            .instances()?
-            .iter()
-            .map(instance_to_target)
-            .collect())
+        Ok(self.instances()?.iter().map(instance_to_target).collect())
     }
 
     fn refresh(&self, target: &EmulatorTarget) -> ResultType<EmulatorRuntimeState> {
@@ -2668,9 +2726,7 @@ impl EmulatorProvider for BlueStacksProvider {
             .into_iter()
             .find(|instance| instance.id == instance_id)
             .ok_or_else(|| {
-                hbb_common::anyhow::anyhow!(
-                    "BlueStacks instance '{instance_id}' no longer exists"
-                )
+                hbb_common::anyhow::anyhow!("BlueStacks instance '{instance_id}' no longer exists")
             })?;
         let normalized = instance_to_target(&instance);
         Ok(EmulatorRuntimeState {
@@ -2708,9 +2764,7 @@ impl EmulatorProvider for BlueStacksProvider {
             .into_iter()
             .find(|instance| instance.id == instance_id)
             .ok_or_else(|| {
-                hbb_common::anyhow::anyhow!(
-                    "BlueStacks instance '{instance_id}' no longer exists"
-                )
+                hbb_common::anyhow::anyhow!("BlueStacks instance '{instance_id}' no longer exists")
             })?;
         if !instance.adb_enabled {
             bail!("BlueStacks ADB access is disabled")
@@ -2732,7 +2786,11 @@ impl EmulatorProvider for BlueStacksProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn watchdog_probe_does_not_request_adb_reconnect() {
@@ -2796,10 +2854,7 @@ bst.status.hypervisor="hyperv"
             android_metadata("Nougat64_2"),
             (Some("Nougat 64-bit"), Some("7.1.2"))
         );
-        assert_eq!(
-            android_metadata("Pie64"),
-            (Some("Pie 64-bit"), Some("9"))
-        );
+        assert_eq!(android_metadata("Pie64"), (Some("Pie 64-bit"), Some("9")));
         assert_eq!(
             android_metadata("Rvc64_1"),
             (Some("Android 11"), Some("11"))
@@ -2879,7 +2934,10 @@ bst.status.hypervisor="hyperv"
         assert!(!target.capabilities.stop);
         assert!(!target.capabilities.restart);
         assert_eq!(target.android_version.as_deref(), Some("7.1.2"));
-        assert_eq!(target.display.as_ref().map(|display| display.width), Some(1920));
+        assert_eq!(
+            target.display.as_ref().map(|display| display.width),
+            Some(1920)
+        );
     }
 
     #[test]
@@ -2903,7 +2961,8 @@ bst.status.hypervisor="hyperv"
 
     #[test]
     fn android_package_inventory_requires_a_running_adb_instance() {
-        let raw = CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
+        let raw =
+            CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
         let document = BlueStacksConfigDocument::parse(&raw).unwrap();
         let stopped = instances_from_config(&document, &[]).remove(0);
         assert_eq!(
@@ -2922,7 +2981,8 @@ bst.status.hypervisor="hyperv"
 
     #[test]
     fn android_ready_probe_does_not_depend_on_process_running_detection() {
-        let raw = CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
+        let raw =
+            CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
         let document = BlueStacksConfigDocument::parse(&raw).unwrap();
         let stopped = instances_from_config(&document, &[]).remove(0);
 
@@ -2960,7 +3020,9 @@ bst.status.hypervisor="hyperv"
         assert!(!document.set_existing("bst.feature.future_setting", "0"));
         assert_eq!(document.get("bst.enable_programmatic_ads"), Some("0"));
         assert!(!document.render().contains("bst.feature.future_setting"));
-        assert!(document.render().contains("bst.enable_programmatic_ads=\"0\""));
+        assert!(document
+            .render()
+            .contains("bst.enable_programmatic_ads=\"0\""));
     }
 
     #[test]
@@ -2983,7 +3045,8 @@ bst.status.hypervisor="hyperv"
             key_path: WINDOWS_RUN_KEY.to_owned(),
             registry_view: registry_view.to_owned(),
             value_name: "BlueStacks X".to_owned(),
-            command: r#""C:\Program Files (x86)\BlueStacks X\BlueStacks X.exe" --hidden"#.to_owned(),
+            command: r#""C:\Program Files (x86)\BlueStacks X\BlueStacks X.exe" --hidden"#
+                .to_owned(),
             classification: ComponentClassification::PromotionalFrontend,
             safe_to_disable: true,
         };
@@ -2993,15 +3056,20 @@ bst.status.hypervisor="hyperv"
         journal.record_startup_change(&entry("64"));
 
         assert_eq!(journal.startup_changes.len(), 2);
-        assert!(journal.startup_changes.iter().any(|change| change.registry_view == "32"));
-        assert!(journal.startup_changes.iter().any(|change| change.registry_view == "64"));
+        assert!(journal
+            .startup_changes
+            .iter()
+            .any(|change| change.registry_view == "32"));
+        assert!(journal
+            .startup_changes
+            .iter()
+            .any(|change| change.registry_view == "64"));
     }
 
     #[test]
     fn parses_bluestacks_bridge_actions_from_tagged_json() {
         let apply: BlueStacksAction =
-            serde_json::from_str(r#"{"action":"apply_profile","profile":"clean_gaming"}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"action":"apply_profile","profile":"clean_gaming"}"#).unwrap();
         assert!(matches!(
             apply,
             BlueStacksAction::ApplyProfile {
@@ -3021,8 +3089,7 @@ bst.status.hypervisor="hyperv"
         ));
 
         assert!(
-            serde_json::from_str::<BlueStacksAction>(r#"{"action":"delete_everything"}"#)
-                .is_err()
+            serde_json::from_str::<BlueStacksAction>(r#"{"action":"delete_everything"}"#).is_err()
         );
     }
 
@@ -3070,7 +3137,10 @@ bst.status.hypervisor="hyperv"
         let report = restore_config_changes(&mut document, &journal);
 
         assert_eq!(report.restored, vec!["bst.enable_smart_downloads"]);
-        assert_eq!(report.skipped_conflicts, vec!["bst.enable_programmatic_ads"]);
+        assert_eq!(
+            report.skipped_conflicts,
+            vec!["bst.enable_programmatic_ads"]
+        );
         assert_eq!(document.get("bst.enable_programmatic_ads"), Some("2"));
         assert_eq!(document.get("bst.enable_smart_downloads"), Some("1"));
     }
@@ -3080,11 +3150,7 @@ bst.status.hypervisor="hyperv"
         let mut document =
             BlueStacksConfigDocument::parse("bst.enable_programmatic_ads=\"1\"\n").unwrap();
         let journal = CleanupJournal {
-            config_changes: vec![ConfigChange::new(
-                "bst.enable_programmatic_ads",
-                "1",
-                "0",
-            )],
+            config_changes: vec![ConfigChange::new("bst.enable_programmatic_ads", "1", "0")],
             ..Default::default()
         };
 
@@ -3097,7 +3163,8 @@ bst.status.hypervisor="hyperv"
 
     #[test]
     fn android_restore_preparation_starts_only_stopped_adb_instances() {
-        let raw = CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
+        let raw =
+            CURRENT_CONF.replace("bst.enable_adb_access=\"0\"", "bst.enable_adb_access=\"1\"");
         let document = BlueStacksConfigDocument::parse(&raw).unwrap();
         let stopped = instances_from_config(&document, &[]).remove(0);
         assert_eq!(
@@ -3116,11 +3183,9 @@ bst.status.hypervisor="hyperv"
             AndroidRestorePreparation::Ready
         );
 
-        let adb_disabled = instances_from_config(
-            &BlueStacksConfigDocument::parse(CURRENT_CONF).unwrap(),
-            &[],
-        )
-        .remove(0);
+        let adb_disabled =
+            instances_from_config(&BlueStacksConfigDocument::parse(CURRENT_CONF).unwrap(), &[])
+                .remove(0);
         assert!(android_restore_preparation(&adb_disabled).is_err());
     }
 
@@ -3134,11 +3199,7 @@ bst.status.hypervisor="hyperv"
         ]];
         let running = instances_from_config(&document, &running_commands);
         let journal = CleanupJournal {
-            config_changes: vec![ConfigChange::new(
-                "bst.enable_programmatic_ads",
-                "1",
-                "0",
-            )],
+            config_changes: vec![ConfigChange::new("bst.enable_programmatic_ads", "1", "0")],
             ..Default::default()
         };
 
@@ -3207,7 +3268,11 @@ bst.status.hypervisor="hyperv"
             ComponentClassification::Required
         );
         assert_eq!(
-            classify_service("BstkSVC", "BlueStacks Service", r"C:\BlueStacks\BstkSVC.exe"),
+            classify_service(
+                "BstkSVC",
+                "BlueStacks Service",
+                r"C:\BlueStacks\BstkSVC.exe"
+            ),
             ComponentClassification::Required
         );
         assert_eq!(
@@ -3264,21 +3329,30 @@ bst.status.hypervisor="hyperv"
             "electron.app.BlueStacks Services",
             r#""C:\Users\me\bluestacks-services\BlueStacksServices.exe" --hidden"#,
         );
-        assert_eq!(services.classification, ComponentClassification::FeatureSpecific);
+        assert_eq!(
+            services.classification,
+            ComponentClassification::FeatureSpecific
+        );
         assert!(services.safe_to_disable);
 
         let x = classify_startup_entry(
             "BlueStacks X",
             r#""C:\Program Files (x86)\BlueStacks X\BlueStacks X.exe" --hidden"#,
         );
-        assert_eq!(x.classification, ComponentClassification::PromotionalFrontend);
+        assert_eq!(
+            x.classification,
+            ComponentClassification::PromotionalFrontend
+        );
         assert!(x.safe_to_disable);
 
         let player = classify_startup_entry(
             "BlueStacks 5",
             r#""C:\Program Files\BlueStacks_nxt\HD-Player.exe" --instance Nougat32"#,
         );
-        assert_eq!(player.classification, ComponentClassification::FeatureSpecific);
+        assert_eq!(
+            player.classification,
+            ComponentClassification::FeatureSpecific
+        );
         assert!(player.safe_to_disable);
 
         let updater = classify_startup_entry(
@@ -3372,8 +3446,14 @@ bst.status.hypervisor="hyperv"
         drop(lock);
         fs::remove_dir_all(&dir).unwrap();
 
-        assert!(result.is_ok(), "one shortcut failure should not abort cleanup");
-        assert!(writable_hidden, "cleanup should continue to later shortcuts");
+        assert!(
+            result.is_ok(),
+            "one shortcut failure should not abort cleanup"
+        );
+        assert!(
+            writable_hidden,
+            "cleanup should continue to later shortcuts"
+        );
         assert_eq!(journal.shortcut_changes.len(), 1);
         assert_eq!(report.hidden_shortcuts.len(), 1);
         assert_eq!(
@@ -3400,9 +3480,10 @@ bst.status.hypervisor="hyperv"
     fn cleanup_journal_and_default_apps_round_trip_json() {
         let mut journal = CleanupJournal::default();
         journal.record_config_change("bst.enable_programmatic_ads", "1", "0");
-        journal
-            .disabled_android_packages
-            .insert("Nougat32".to_owned(), vec!["com.uncube.gamevantage".to_owned()]);
+        journal.disabled_android_packages.insert(
+            "Nougat32".to_owned(),
+            vec!["com.uncube.gamevantage".to_owned()],
+        );
         let encoded = serde_json::to_string(&journal).unwrap();
         let decoded: CleanupJournal = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, journal);
@@ -3448,7 +3529,10 @@ bst.status.hypervisor="hyperv"
             r#""C:\Program Files (x86)\BlueStacks X\Uninstall.exe" --uninstall --silent"#,
         )
         .unwrap();
-        assert_eq!(program, PathBuf::from(r"C:\Program Files (x86)\BlueStacks X\Uninstall.exe"));
+        assert_eq!(
+            program,
+            PathBuf::from(r"C:\Program Files (x86)\BlueStacks X\Uninstall.exe")
+        );
         assert_eq!(args, vec!["--uninstall", "--silent"]);
         assert!(parse_registered_uninstall_command("cmd.exe /c del C:\\important").is_err());
         assert!(parse_registered_uninstall_command(
@@ -3471,7 +3555,10 @@ bst.status.hypervisor="hyperv"
         assert!(validate_component_removal(&component(ComponentClassification::Required)).is_err());
         assert!(validate_component_removal(&component(ComponentClassification::Unknown)).is_err());
         assert!(validate_component_removal(&component(ComponentClassification::Optional)).is_ok());
-        assert!(validate_component_removal(&component(ComponentClassification::PromotionalFrontend)).is_ok());
+        assert!(validate_component_removal(&component(
+            ComponentClassification::PromotionalFrontend
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -3500,10 +3587,17 @@ bst.status.hypervisor="hyperv"
     fn discovers_running_instance_without_readable_player_command_line() {
         let instance_id = std::env::var("BLUESTACKS_RUNNING_INSTANCE").unwrap();
         let provider = BlueStacksProvider::detect().unwrap().unwrap();
-        let target = provider.discover().unwrap().into_iter()
-            .find(|target| target.provider_instance_id == instance_id).unwrap();
-        assert_ne!(target.state, EmulatorState::Stopped,
-            "A running elevated player must not be reported as stopped");
+        let target = provider
+            .discover()
+            .unwrap()
+            .into_iter()
+            .find(|target| target.provider_instance_id == instance_id)
+            .unwrap();
+        assert_ne!(
+            target.state,
+            EmulatorState::Stopped,
+            "A running elevated player must not be reported as stopped"
+        );
     }
 
     #[test]
@@ -3538,9 +3632,8 @@ bst.status.hypervisor="hyperv"
             "instance_id": instance_id,
             "package": package,
         });
-        let result: serde_json::Value = serde_json::from_str(
-            &handle_action_json(&payload.to_string()),
-        ).unwrap();
+        let result: serde_json::Value =
+            serde_json::from_str(&handle_action_json(&payload.to_string())).unwrap();
         println!("launch result: {}", result["data"]["report"]);
         assert_eq!(result["ok"], true, "{}", result["error"]);
         assert_eq!(result["data"]["report"]["package"], package);
@@ -3564,10 +3657,12 @@ bst.status.hypervisor="hyperv"
         println!("shortcuts={shortcuts:#?}");
         println!("services={services:#?}");
 
-        assert!(components.iter().any(|component| {
-            component.classification == ComponentClassification::Required
-        }));
-        assert!(shortcuts.iter().any(|shortcut| shortcut.name.eq_ignore_ascii_case("BlueStacks 5.lnk")));
+        assert!(components
+            .iter()
+            .any(|component| { component.classification == ComponentClassification::Required }));
+        assert!(shortcuts
+            .iter()
+            .any(|shortcut| shortcut.name.eq_ignore_ascii_case("BlueStacks 5.lnk")));
     }
 
     fn temp_dir(suffix: &str) -> PathBuf {

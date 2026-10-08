@@ -732,6 +732,28 @@ impl InvokeUiSession for FlutterHandler {
         );
     }
 
+    fn update_stream_liveness(&self, display: usize, sequence: u64) {
+        self.push_event(
+            "update_stream_liveness",
+            &[
+                ("display", &display.to_string()),
+                ("sequence", &sequence.to_string()),
+            ],
+            &[],
+        );
+    }
+
+    fn update_decoder_health(&self, display: usize, healthy: bool) {
+        self.push_event(
+            "update_decoder_health",
+            &[
+                ("display", &display.to_string()),
+                ("healthy", &healthy.to_string()),
+            ],
+            &[],
+        );
+    }
+
     fn set_connection_type(&self, is_secured: bool, direct: bool, stream_type: &str) {
         self.push_event(
             "connection_ready",
@@ -764,6 +786,31 @@ impl InvokeUiSession for FlutterHandler {
         self.push_event(
             "job_done",
             &[("id", &id.to_string()), ("file_num", &file_num.to_string())],
+            &[],
+        );
+    }
+
+    fn job_paused(&self, id: i32, accepted: bool, error: String) {
+        self.push_event(
+            "job_paused",
+            &[
+                ("id", &id.to_string()),
+                ("accepted", &accepted.to_string()),
+                ("error", &error),
+            ],
+            &[],
+        );
+    }
+
+    fn job_cancelled(&self, id: i32, applied: bool, confirmed: bool, error: String) {
+        self.push_event(
+            "job_cancelled",
+            &[
+                ("id", &id.to_string()),
+                ("applied", &applied.to_string()),
+                ("confirmed", &confirmed.to_string()),
+                ("error", &error),
+            ],
             &[],
         );
     }
@@ -829,6 +876,7 @@ impl InvokeUiSession for FlutterHandler {
         to: String,
         is_upload: bool,
         is_identical: bool,
+        conflict_token: String,
     ) {
         self.push_event(
             "override_file_confirm",
@@ -838,6 +886,7 @@ impl InvokeUiSession for FlutterHandler {
                 ("read_path", &to),
                 ("is_upload", &is_upload.to_string()),
                 ("is_identical", &is_identical.to_string()),
+                ("conflict_token", &conflict_token),
             ],
             &[],
         );
@@ -900,6 +949,10 @@ impl InvokeUiSession for FlutterHandler {
             features.insert("emulator", f.emulator);
             features.insert("target_dashboard", f.target_dashboard);
             features.insert("host_management", f.host_management);
+            features.insert("manual_clipboard", f.manual_clipboard);
+            features.insert("file_pause", f.file_pause);
+            features.insert("file_keep_both", f.file_keep_both);
+            features.insert("file_cancel_ack", f.file_cancel_ack);
         }
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {
@@ -1102,7 +1155,11 @@ impl InvokeUiSession for FlutterHandler {
     #[inline]
     fn next_rgba(&self, _display: usize) {
         let mut buffers = self.display_rgbas.write().unwrap();
-        if buffers.get(&_display).map(|rgba| rgba.retired).unwrap_or(false) {
+        if buffers
+            .get(&_display)
+            .map(|rgba| rgba.retired)
+            .unwrap_or(false)
+        {
             buffers.remove(&_display);
         } else if let Some(rgba_data) = buffers.get_mut(&_display) {
             rgba_data.valid = false;
@@ -1205,6 +1262,12 @@ impl InvokeUiSession for FlutterHandler {
                     json!(codex_state_name(list.service_state.enum_value_or_default())),
                 ),
                 ("codex_version", json!(list.codex_version)),
+                ("capabilities", json!(list.capabilities)),
+                (
+                    "operation_session_identity",
+                    json!(list.operation_session_identity),
+                ),
+                ("operation_generation", json!(list.operation_generation)),
                 (
                     "control",
                     json!(list
@@ -1215,6 +1278,7 @@ impl InvokeUiSession for FlutterHandler {
                             "start_thread": control.start_thread,
                             "start_turn": control.start_turn,
                             "steer_turn": control.steer_turn,
+                            "queue_turn": control.queue_turn,
                             "interrupt_turn": control.interrupt_turn,
                             "approvals": control.approvals,
                         }))
@@ -1279,6 +1343,7 @@ impl InvokeUiSession for FlutterHandler {
                 ),
                 ("text", json!(event.text)),
                 ("status", json!(event.status)),
+                ("operation_id", json!(event.operation_id)),
             ],
             Some(Union::Approval(approval)) => vec![
                 ("type", json!("approval")),
@@ -1311,11 +1376,99 @@ impl InvokeUiSession for FlutterHandler {
                     )),
                 ),
             ],
+            Some(Union::WorkspaceList(list)) => vec![
+                ("type", json!("workspace_list")),
+                ("request_id", json!(request_id)),
+                ("next_cursor", json!(list.next_cursor)),
+                (
+                    "workspaces",
+                    json!(list
+                        .workspaces
+                        .into_iter()
+                        .map(|workspace| json!({
+                            "id": workspace.id,
+                            "name": workspace.name,
+                            "path": workspace.path,
+                            "accessible": workspace.accessible,
+                            "status": workspace.status,
+                        }))
+                        .collect::<Vec<_>>()),
+                ),
+            ],
+            Some(Union::TaskChangeList(list)) => vec![
+                ("type", json!("task_change_list")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(list.thread_id)),
+                ("next_cursor", json!(list.next_cursor)),
+                (
+                    "changes",
+                    json!(list
+                        .changes
+                        .into_iter()
+                        .map(|change| json!({
+                            "change_id": change.change_id,
+                            "artifact_id": change.artifact_id,
+                            "path": change.path,
+                            "kind": change.kind,
+                            "binary": change.binary,
+                            "large": change.large,
+                            "size_bytes": change.size_bytes,
+                            "diff_available": change.diff_available,
+                            "fallback_reason": change.fallback_reason,
+                        }))
+                        .collect::<Vec<_>>()),
+                ),
+            ],
+            Some(Union::TaskDiff(page)) => vec![
+                ("type", json!("task_diff")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(page.thread_id)),
+                ("id", json!(page.id)),
+                ("text", json!(page.text)),
+                ("offset", json!(page.offset)),
+                ("next_offset", json!(page.next_offset)),
+                ("complete", json!(page.complete)),
+                ("fallback_reason", json!(page.fallback_reason)),
+            ],
+            Some(Union::ArtifactList(list)) => vec![
+                ("type", json!("artifact_list")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(list.thread_id)),
+                ("next_cursor", json!(list.next_cursor)),
+                (
+                    "artifacts",
+                    json!(list
+                        .artifacts
+                        .into_iter()
+                        .map(|artifact| json!({
+                            "artifact_id": artifact.artifact_id,
+                            "path": artifact.path,
+                            "size_bytes": artifact.size_bytes,
+                            "binary": artifact.binary,
+                            "large": artifact.large,
+                            "readable": artifact.readable,
+                            "fallback_reason": artifact.fallback_reason,
+                        }))
+                        .collect::<Vec<_>>()),
+                ),
+            ],
+            Some(Union::Artifact(page)) => vec![
+                ("type", json!("artifact")),
+                ("request_id", json!(request_id)),
+                ("thread_id", json!(page.thread_id)),
+                ("id", json!(page.id)),
+                ("text", json!(page.text)),
+                ("offset", json!(page.offset)),
+                ("next_offset", json!(page.next_offset)),
+                ("complete", json!(page.complete)),
+                ("fallback_reason", json!(page.fallback_reason)),
+            ],
             Some(Union::Error(error)) => vec![
                 ("type", json!("error")),
                 ("request_id", json!(request_id)),
                 ("thread_id", json!(error.thread_id)),
                 ("message", json!(error.message)),
+                ("error_code", json!(error.error_code)),
             ],
             None => return,
             Some(_) => {
@@ -1334,36 +1487,86 @@ impl InvokeUiSession for FlutterHandler {
                 self.retire_emulator_rgba(|id| id == channel);
             } else {
                 let previous = channels.selected;
-                channels.selected = if matches!(status.state.enum_value_or_default(), EmulatorSessionState::EmulatorStarting | EmulatorSessionState::EmulatorStreaming) { channel } else { 0 };
+                channels.selected = if matches!(
+                    status.state.enum_value_or_default(),
+                    EmulatorSessionState::EmulatorStarting
+                        | EmulatorSessionState::EmulatorStreaming
+                ) {
+                    channel
+                } else {
+                    0
+                };
                 self.retire_emulator_rgba(|id| id == channel || id == previous);
             }
         }
         let request_id = response.request_id;
-        let mut event = vec![("request_id", json!(request_id)), ("protocol_version", json!(response.protocol_version))];
+        let mut event = vec![
+            ("request_id", json!(request_id)),
+            ("protocol_version", json!(response.protocol_version)),
+        ];
         match response.union {
             Some(emulator_response::Union::Inventory(inventory)) => {
                 event.push(("type", json!("inventory")));
                 event.push(("instances", json!(inventory.instances.into_iter().map(|instance| json!({"target_id": instance.target_id, "provider": instance.provider, "name": instance.name, "state": instance.state, "android_version": instance.android_version, "default_package": instance.default_package, "last_error": instance.last_error})).collect::<Vec<_>>())));
                 event.push(("provider_errors", json!(inventory.provider_errors)));
                 event.push(("dashboard", json!(inventory.dashboard)));
+                event.push(("capabilities", json!(inventory.capabilities)));
+                event.push((
+                    "operation_session_identity",
+                    json!(inventory.operation_session_identity),
+                ));
+                event.push((
+                    "operation_generation",
+                    json!(inventory.operation_generation),
+                ));
             }
             Some(emulator_response::Union::Status(status)) => {
-                let state = match status.state.enum_value_or_default() { EmulatorSessionState::EmulatorStarting => "starting", EmulatorSessionState::EmulatorStreaming => "streaming", EmulatorSessionState::EmulatorDesktop => "desktop", EmulatorSessionState::EmulatorFailed => "failed", _ => "unknown" };
-                event.extend([("type", json!("status")), ("session_id", json!(status.session_id)), ("target_id", json!(status.target_id)), ("state", json!(state)), ("width", json!(status.width)), ("height", json!(status.height)), ("error", json!(status.error)), ("preview", json!(status.preview))]);
+                let state = match status.state.enum_value_or_default() {
+                    EmulatorSessionState::EmulatorStarting => "starting",
+                    EmulatorSessionState::EmulatorStreaming => "streaming",
+                    EmulatorSessionState::EmulatorDesktop => "desktop",
+                    EmulatorSessionState::EmulatorFailed => "failed",
+                    _ => "unknown",
+                };
+                event.extend([
+                    ("type", json!("status")),
+                    ("session_id", json!(status.session_id)),
+                    ("target_id", json!(status.target_id)),
+                    ("state", json!(state)),
+                    ("width", json!(status.width)),
+                    ("height", json!(status.height)),
+                    ("error", json!(status.error)),
+                    ("preview", json!(status.preview)),
+                    ("phase", json!(status.phase)),
+                ]);
             }
             Some(emulator_response::Union::Previews(previews)) => {
-                let channels = previews.session_ids.iter().map(|id| 0x40000000 | (*id as usize & 0x3fffffff)).collect::<Vec<_>>();
+                let channels = previews
+                    .session_ids
+                    .iter()
+                    .map(|id| 0x40000000 | (*id as usize & 0x3fffffff))
+                    .collect::<Vec<_>>();
                 let mut owned = self.emulator_rgba_channels.lock().unwrap();
                 owned.previews = channels;
-                self.retire_emulator_rgba(|channel| channel >= 0x40000000 && channel != owned.selected && !owned.previews.contains(&channel));
-                event.extend([("type", json!("previews")), ("enabled", json!(previews.enabled)), ("session_ids", json!(previews.session_ids))]);
+                self.retire_emulator_rgba(|channel| {
+                    channel >= 0x40000000
+                        && channel != owned.selected
+                        && !owned.previews.contains(&channel)
+                });
+                event.extend([
+                    ("type", json!("previews")),
+                    ("enabled", json!(previews.enabled)),
+                    ("session_ids", json!(previews.session_ids)),
+                ]);
             }
             Some(emulator_response::Union::Host(host)) => {
                 let payload = serde_json::from_str::<serde_json::Value>(&host.json)
                     .unwrap_or_else(|error| json!({"ok": false, "error": format!("Invalid host response: {error}")}));
                 event.extend([("type", json!("host")), ("host", payload)]);
             }
-            Some(emulator_response::Union::Error(error)) => event.extend([("type", json!("error")), ("error", json!(error))]),
+            Some(emulator_response::Union::Error(error)) => {
+                event.extend([("type", json!("error")), ("error", json!(error))])
+            }
             _ => return,
         }
         self.push_event_("emulator_response", &event, &[], &[]);
@@ -1373,10 +1576,24 @@ impl InvokeUiSession for FlutterHandler {
         use base::message_proto::codex_control_response::Union;
 
         let request_id = response.request_id;
+        let operation_id = response.operation_id;
+        let session_identity = response.session_identity;
+        let target_identity = response.target_identity;
+        let session_generation = response.session_generation;
+        let accepted = response.accepted;
+        let applied = response.applied;
+        let error_code = response.error_code;
         let event_data: Vec<(&str, serde_json::Value)> = match response.union {
             Some(Union::Result(result)) => vec![
                 ("type", json!("result")),
                 ("request_id", json!(request_id)),
+                ("operation_id", json!(operation_id)),
+                ("session_identity", json!(session_identity)),
+                ("target_identity", json!(target_identity)),
+                ("session_generation", json!(session_generation)),
+                ("accepted", json!(accepted)),
+                ("applied", json!(applied)),
+                ("error_code", json!(error_code)),
                 (
                     "action",
                     json!(codex_control_action_name(
@@ -1385,6 +1602,7 @@ impl InvokeUiSession for FlutterHandler {
                 ),
                 ("thread_id", json!(result.thread_id)),
                 ("turn_id", json!(result.turn_id)),
+                ("queued_operation_ids", json!(result.queued_operation_ids)),
                 (
                     "state",
                     json!(codex_state_name(result.state.enum_value_or_default())),
@@ -1393,6 +1611,13 @@ impl InvokeUiSession for FlutterHandler {
             Some(Union::Error(error)) => vec![
                 ("type", json!("error")),
                 ("request_id", json!(request_id)),
+                ("operation_id", json!(operation_id)),
+                ("session_identity", json!(session_identity)),
+                ("target_identity", json!(target_identity)),
+                ("session_generation", json!(session_generation)),
+                ("accepted", json!(accepted)),
+                ("applied", json!(applied)),
+                ("error_code", json!(error_code)),
                 ("thread_id", json!(error.thread_id)),
                 ("message", json!(error.message)),
             ],
@@ -1403,6 +1628,29 @@ impl InvokeUiSession for FlutterHandler {
             }
         };
         self.push_event_("codex_control_response", &event_data, &[], &[]);
+    }
+
+    fn handle_manual_clipboard_response(&self, response: ManualClipboardResponse) {
+        let direction = match response.direction.enum_value_or_default() {
+            ManualClipboardDirection::ManualClipboardPhoneToHost => "phone_to_host",
+            ManualClipboardDirection::ManualClipboardHostToPhone => "host_to_phone",
+            ManualClipboardDirection::ManualClipboardUnknown => "unknown",
+        };
+        self.push_event_(
+            "manual_clipboard_response",
+            &[
+                ("request_id", json!(response.request_id)),
+                ("direction", json!(direction)),
+                ("accepted", json!(response.accepted)),
+                ("applied", json!(response.applied)),
+                ("text", json!(response.text)),
+                ("error_code", json!(response.error_code)),
+                ("error", json!(response.error)),
+                ("target_identity", json!(response.target_identity)),
+            ],
+            &[],
+            &[],
+        );
     }
 }
 
@@ -1430,6 +1678,7 @@ fn codex_control_action_name(action: CodexControlAction) -> &'static str {
         CodexControlAction::CodexControlThreadStarted => "thread_started",
         CodexControlAction::CodexControlTurnStarted => "turn_started",
         CodexControlAction::CodexControlTurnSteered => "turn_steered",
+        CodexControlAction::CodexControlTurnQueued => "turn_queued",
         CodexControlAction::CodexControlTurnInterrupted => "turn_interrupted",
         CodexControlAction::CodexControlApprovalApproved => "approval_approved",
         CodexControlAction::CodexControlApprovalDenied => "approval_denied",
@@ -1447,6 +1696,8 @@ fn codex_approval_json(approval: CodexApprovalRequest) -> serde_json::Value {
         "title": approval.title,
         "summary": approval.summary,
         "reason": approval.reason,
+        "working_directory": approval.working_directory,
+        "scope": approval.scope,
         "started_at_ms": approval.started_at_ms,
         "actionable": approval.actionable,
     })
@@ -1499,7 +1750,9 @@ fn codex_event_kind_name(kind: CodexEventKind) -> &'static str {
 impl FlutterHandler {
     fn retire_emulator_rgba(&self, retire: impl Fn(usize) -> bool) {
         self.display_rgbas.write().unwrap().retain(|channel, rgba| {
-            if !retire(*channel) { return true; }
+            if !retire(*channel) {
+                return true;
+            }
             if rgba.valid {
                 // Dart may still be decoding this published native allocation.
                 rgba.retired = true;
@@ -1753,7 +2006,21 @@ pub fn update_text_clipboard_required() {
     let is_required = sessions::get_sessions()
         .iter()
         .filter(|s| s.connection_round_state.lock().unwrap().is_connected())
-        .any(|s| s.is_default() && s.is_text_clipboard_required());
+        .any(|s| {
+            #[cfg(target_os = "android")]
+            let manual_clipboard = s
+                .ui_handler
+                .peer_info
+                .read()
+                .unwrap()
+                .features
+                .as_ref()
+                .map(|features| features.manual_clipboard)
+                .unwrap_or(false);
+            #[cfg(not(target_os = "android"))]
+            let manual_clipboard = false;
+            s.is_default() && s.is_text_clipboard_required() && !manual_clipboard
+        });
     #[cfg(target_os = "android")]
     let _ = scrap::android::ffi::call_clipboard_manager_enable_client_clipboard(is_required);
     Client::set_is_text_clipboard_required(is_required);
@@ -1783,6 +2050,18 @@ pub fn send_clipboard_msg_to_other_sessions(msg: Message, except_session_id: u64
 fn send_clipboard_msg_impl(msg: Message, _is_file: bool, except_session_id: Option<u64>) {
     for s in sessions::get_sessions() {
         if !s.is_default() {
+            continue;
+        }
+        #[cfg(target_os = "android")]
+        if s.ui_handler
+            .peer_info
+            .read()
+            .unwrap()
+            .features
+            .as_ref()
+            .map(|features| features.manual_clipboard)
+            .unwrap_or(false)
+        {
             continue;
         }
         if let Some(except_session_id) = except_session_id {
@@ -2060,14 +2339,26 @@ mod dashboard_rgba_tests {
     fn retiring_dashboard_video_keeps_published_pixels_until_flutter_acknowledges() {
         let handler = FlutterHandler::default();
         let channel = 0x40000007;
-        handler.display_rgbas.write().unwrap().insert(channel, RgbaData {
-            data: vec![1, 2, 3, 4], valid: true, ..Default::default()
-        });
+        handler.display_rgbas.write().unwrap().insert(
+            channel,
+            RgbaData {
+                data: vec![1, 2, 3, 4],
+                valid: true,
+                ..Default::default()
+            },
+        );
         let pointer = handler.get_rgba(channel);
         let mut response = EmulatorResponse::new();
-        response.set_previews(EmulatorPreviewState { enabled: true, ..Default::default() });
+        response.set_previews(EmulatorPreviewState {
+            enabled: true,
+            ..Default::default()
+        });
         handler.handle_emulator_response(response);
-        assert_eq!(handler.get_rgba(channel), pointer, "The decoder still owns a published FFI buffer until next_rgba");
+        assert_eq!(
+            handler.get_rgba(channel),
+            pointer,
+            "The decoder still owns a published FFI buffer until next_rgba"
+        );
         handler.next_rgba(channel);
         assert!(handler.get_rgba(channel).is_null());
     }

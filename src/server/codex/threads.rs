@@ -26,6 +26,7 @@ pub struct CodexThreadSummary {
     pub originator: Option<String>,
     pub updated_at: i64,
     pub status: CodexThreadStatus,
+    pub(crate) workspace_path: Option<String>,
 }
 
 pub(crate) fn list_threads<W: Write>(
@@ -93,6 +94,7 @@ fn parse_thread(value: &Value) -> Result<CodexThreadSummary, RpcCallError> {
             .get("status")
             .map(parse_status)
             .unwrap_or(CodexThreadStatus::Unknown),
+        workspace_path: optional_string(value, "cwd"),
     })
 }
 
@@ -211,8 +213,10 @@ mod tests {
 
         assert_eq!(threads.len(), 2);
         assert_eq!(threads[0].id, "thr_main");
+        assert_eq!(threads[0].workspace_path.as_deref(), Some("C:\\work"));
         assert_eq!(threads[0].status, CodexThreadStatus::WaitingForApproval);
         assert_eq!(threads[1].id, "thr_idle");
+        assert_eq!(threads[1].workspace_path.as_deref(), Some("D:\\repo"));
         assert_eq!(threads[1].status, CodexThreadStatus::Idle);
     }
 
@@ -272,6 +276,7 @@ mod tests {
 
         assert_eq!(summary.id, "thr_public");
         assert_eq!(summary.name.as_deref(), Some("Public thread"));
+        assert_eq!(summary.workspace_path, None);
         assert_eq!(summary.status, CodexThreadStatus::Idle);
     }
 

@@ -19,6 +19,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:xterm/xterm.dart';
 import '../../desktop/pages/terminal_connection_manager.dart';
 import '../../consts.dart';
+import '../widgets/mirpg_remote_theme.dart';
+import '../widgets/shell_paste_sheet.dart';
 
 const _terminalBackgroundOpacity = 0.7;
 
@@ -119,6 +121,19 @@ class _TerminalPageState extends State<TerminalPage>
   ScaffoldFeatureController<MaterialBanner, MaterialBannerClosedReason>?
       _terminalClipboardNoticeController;
   final _terminalClipboardNotice = TerminalClipboardNoticeCoordinator<int>();
+  final _shellDraftController = TextEditingController();
+  final _shellDraftFocus = FocusNode();
+  bool _shellDraftVisible = false;
+  bool _shellDraftSending = false;
+  bool _shellDraftRetryBlocked = false;
+  String _shellDraftPeerId = '';
+  int _shellDraftPeerInfoGeneration = -1;
+  int _shellDraftReconnectGeneration = -1;
+  int _shellReviewRequest = 0;
+  bool _shellReviewOpen = false;
+  late int _observedPeerInfoGeneration;
+  late int _observedReconnectGeneration;
+  late bool _observedAuthenticated;
 
   // For web only.
   // 'monospace' does not work on web, use Google Fonts, `??` is only for null safety.
@@ -190,6 +205,13 @@ class _TerminalPageState extends State<TerminalPage>
     _terminalModel.clearAltLock = () {
       if (_altLocked) setState(() => _altLocked = false);
     };
+    _terminalModel.onUnsafeMobileMultilineInput = (text) {
+      unawaited(_reviewShellPasteText(text));
+    };
+    _observedPeerInfoGeneration = _ffi.ffiModel.peerInfoGeneration;
+    _observedReconnectGeneration = _ffi.ffiModel.reconnectGeneration;
+    _observedAuthenticated = _ffi.ffiModel.authenticatedPeer;
+    _ffi.ffiModel.addListener(_onShellConnectionChanged);
     // Load Row3 expand/collapse state from persistent storage. The raw option
     // read keeps Row3 collapsed when no value has been saved yet.
     _row3Expanded =
@@ -340,15 +362,56 @@ class _TerminalPageState extends State<TerminalPage>
 
   @override
   void dispose() {
+    _ffi.ffiModel.removeListener(_onShellConnectionChanged);
+    _shellReviewRequest++;
     // Unregister terminal model from FFI
     _ffi.unregisterTerminalModel(widget.terminalId);
     _terminalModel.dispose();
     _keyboardDebounce?.cancel();
     _terminalClipboardNotice.clear();
     _terminalClipboardNoticeController?.close();
+    _shellDraftFocus.dispose();
+    _shellDraftController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
     TerminalConnectionManager.releaseConnection(widget.id);
+  }
+
+  @override
+  void didUpdateWidget(covariant TerminalPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.id != widget.id) {
+      _shellReviewRequest++;
+      if (_shellDraftVisible) _clearShellDraft();
+    }
+  }
+
+  bool _shellScopeIsCurrent({
+    required String peerId,
+    required int peerInfoGeneration,
+    required int reconnectGeneration,
+  }) =>
+      mounted &&
+      !_ffi.closed &&
+      _ffi.ffiModel.authenticatedPeer &&
+      widget.id == peerId &&
+      _ffi.ffiModel.peerInfoGeneration == peerInfoGeneration &&
+      _ffi.ffiModel.reconnectGeneration == reconnectGeneration;
+
+  void _onShellConnectionChanged() {
+    if (!mounted) return;
+    final peerInfoGeneration = _ffi.ffiModel.peerInfoGeneration;
+    final reconnectGeneration = _ffi.ffiModel.reconnectGeneration;
+    final authenticated = _ffi.ffiModel.authenticatedPeer;
+    final scopeChanged = peerInfoGeneration != _observedPeerInfoGeneration ||
+        reconnectGeneration != _observedReconnectGeneration ||
+        authenticated != _observedAuthenticated;
+    _observedPeerInfoGeneration = peerInfoGeneration;
+    _observedReconnectGeneration = reconnectGeneration;
+    _observedAuthenticated = authenticated;
+    if (!scopeChanged) return;
+    _shellReviewRequest++;
+    if (_shellDraftVisible) _clearShellDraft();
   }
 
   @override
@@ -364,9 +427,18 @@ class _TerminalPageState extends State<TerminalPage>
     });
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) return;
+    _shellReviewRequest++;
+    if (_shellDraftVisible) _clearShellDraft();
+  }
+
   void _updateKeyboardHeight() {
     if (_keyboardKey.currentContext != null) {
-      final renderBox = _keyboardKey.currentContext!.findRenderObject() as RenderBox;
+      final renderBox =
+          _keyboardKey.currentContext!.findRenderObject() as RenderBox;
       _keyboardHeight = renderBox.size.height;
     }
   }
@@ -379,25 +451,196 @@ class _TerminalPageState extends State<TerminalPage>
     final rows = (realHeight / _cellHeight!).floor();
     final extraSpace = realHeight - rows * _cellHeight!;
     final topBottom = max(0.0, extraSpace / 2.0);
-    return EdgeInsets.only(left: 5.0, right: 5.0, top: topBottom, bottom: topBottom + _sysKeyboardHeight + _keyboardHeight);
+    return EdgeInsets.only(
+        left: 5.0,
+        right: 5.0,
+        top: topBottom,
+        bottom: topBottom + _sysKeyboardHeight + _keyboardHeight);
   }
 
-  /// Pastes clipboard text through TerminalModel so keyboard-only modifiers and
-  /// mobile Enter normalization never alter clipboard data.
-  Future<void> _pasteClipboardText() async {
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = data?.text;
-    if (text == null || !mounted) return;
-
-    await _terminalModel.pasteText(text);
-    if (mounted) {
-      _terminalModel.terminalController.clearSelection();
+  Future<void> _reviewClipboardForShell() async {
+    if (_shellReviewOpen ||
+        !_terminalModel.terminalOpened ||
+        !_ffi.ffiModel.authenticatedPeer ||
+        _ffi.closed) {
+      return;
     }
+    final request = ++_shellReviewRequest;
+    final peerId = widget.id;
+    final peerInfoGeneration = _ffi.ffiModel.peerInfoGeneration;
+    final reconnectGeneration = _ffi.ffiModel.reconnectGeneration;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (request != _shellReviewRequest ||
+        !_shellScopeIsCurrent(
+          peerId: peerId,
+          peerInfoGeneration: peerInfoGeneration,
+          reconnectGeneration: reconnectGeneration,
+        )) {
+      return;
+    }
+    final text = data?.text;
+    if (text == null) return;
+    await _reviewShellPasteText(
+      text,
+      expectedPeerId: peerId,
+      expectedPeerInfoGeneration: peerInfoGeneration,
+      expectedReconnectGeneration: reconnectGeneration,
+    );
+  }
+
+  Future<void> _reviewShellPasteText(
+    String text, {
+    String? expectedPeerId,
+    int? expectedPeerInfoGeneration,
+    int? expectedReconnectGeneration,
+  }) async {
+    if (!mounted || text.isEmpty || _shellReviewOpen) return;
+    final peerId = expectedPeerId ?? widget.id;
+    final peerInfoGeneration =
+        expectedPeerInfoGeneration ?? _ffi.ffiModel.peerInfoGeneration;
+    final reconnectGeneration =
+        expectedReconnectGeneration ?? _ffi.ffiModel.reconnectGeneration;
+    if (!_terminalModel.terminalOpened ||
+        !_shellScopeIsCurrent(
+          peerId: peerId,
+          peerInfoGeneration: peerInfoGeneration,
+          reconnectGeneration: reconnectGeneration,
+        )) {
+      return;
+    }
+    final request = ++_shellReviewRequest;
+    _shellReviewOpen = true;
+    bool? insert;
+    try {
+      insert = await showModalBottomSheet<bool>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (_) => ShellPasteSheet(targetLabel: peerId, text: text),
+      );
+    } finally {
+      _shellReviewOpen = false;
+    }
+    if (request != _shellReviewRequest ||
+        insert != true ||
+        !_shellScopeIsCurrent(
+          peerId: peerId,
+          peerInfoGeneration: peerInfoGeneration,
+          reconnectGeneration: reconnectGeneration,
+        )) {
+      return;
+    }
+    setState(() {
+      _shellDraftController.value = TextEditingValue(
+        text: text,
+        selection: TextSelection.collapsed(offset: text.length),
+      );
+      _shellDraftVisible = true;
+      _shellDraftRetryBlocked = false;
+      _shellDraftPeerId = peerId;
+      _shellDraftPeerInfoGeneration = peerInfoGeneration;
+      _shellDraftReconnectGeneration = reconnectGeneration;
+    });
+    _terminalModel.terminalController.clearSelection();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _shellDraftVisible) _shellDraftFocus.requestFocus();
+    });
+  }
+
+  void _clearShellDraft() {
+    _shellDraftController.clear();
+    _shellDraftFocus.unfocus();
+    if (mounted) {
+      setState(() {
+        _shellDraftVisible = false;
+        _shellDraftSending = false;
+        _shellDraftRetryBlocked = false;
+        _shellDraftPeerId = '';
+        _shellDraftPeerInfoGeneration = -1;
+        _shellDraftReconnectGeneration = -1;
+      });
+    }
+  }
+
+  Future<void> _runShellDraft() async {
+    if (_shellDraftSending || _shellDraftRetryBlocked) return;
+    final text = _shellDraftController.text;
+    if (text.isEmpty) return;
+    if (!_shellScopeIsCurrent(
+      peerId: _shellDraftPeerId,
+      peerInfoGeneration: _shellDraftPeerInfoGeneration,
+      reconnectGeneration: _shellDraftReconnectGeneration,
+    )) {
+      _clearShellDraft();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Shell connection changed. The local draft was discarded.'),
+          ),
+        );
+      }
+      return;
+    }
+    setState(() => _shellDraftSending = true);
+    final result = await _terminalModel.runReviewedText(
+      text,
+      expectedPeerId: _shellDraftPeerId,
+      expectedPeerInfoGeneration: _shellDraftPeerInfoGeneration,
+      expectedReconnectGeneration: _shellDraftReconnectGeneration,
+    );
+    if (!mounted) return;
+    switch (result) {
+      case ReviewedShellSendResult.submitted:
+        _clearShellDraft();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Sent once to Shell. Check Shell output for the result.',
+            ),
+          ),
+        );
+        return;
+      case ReviewedShellSendResult.uncertain:
+        setState(() {
+          _shellDraftSending = false;
+          _shellDraftRetryBlocked = true;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Send result is uncertain. Draft kept; check Shell output before retrying.',
+            ),
+          ),
+        );
+        return;
+      case ReviewedShellSendResult.notSent:
+        setState(() => _shellDraftSending = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Shell is not ready. Draft kept for review.'),
+          ),
+        );
+        return;
+    }
+  }
+
+  void _allowShellDraftRetry() {
+    if (!_shellDraftRetryBlocked || _shellDraftSending) return;
+    if (!_shellScopeIsCurrent(
+      peerId: _shellDraftPeerId,
+      peerInfoGeneration: _shellDraftPeerInfoGeneration,
+      reconnectGeneration: _shellDraftReconnectGeneration,
+    )) {
+      _clearShellDraft();
+      return;
+    }
+    setState(() => _shellDraftRetryBlocked = false);
   }
 
   KeyEventResult _handleTerminalKeyEvent(FocusNode _, KeyEvent event) {
     final hardwareKeyboard = HardwareKeyboard.instance;
-    final shouldPaste = shouldHandleTerminalPasteShortcut(
+    final shouldPaste = shouldInterceptMobileTerminalPasteShortcut(
       platform: defaultTargetPlatform,
       logicalKey: event.logicalKey,
       isKeyDown: event is KeyDownEvent,
@@ -406,13 +649,10 @@ class _TerminalPageState extends State<TerminalPage>
       metaPressed: hardwareKeyboard.isMetaPressed,
       altPressed: hardwareKeyboard.isAltPressed,
       shiftPressed: hardwareKeyboard.isShiftPressed,
-      modifierLockActive: _ctrlLocked || _altLocked,
     );
     if (!shouldPaste) return KeyEventResult.ignored;
 
-    // Only locked virtual modifiers need interception. Without a lock, keep
-    // xterm's default hardware paste behavior, including bracketed paste mode.
-    unawaited(_pasteClipboardText());
+    unawaited(_reviewClipboardForShell());
     return KeyEventResult.handled;
   }
 
@@ -431,7 +671,8 @@ class _TerminalPageState extends State<TerminalPage>
 
   Widget buildBody() {
     final scaffold = Scaffold(
-      resizeToAvoidBottomInset: false, // Disable automatic layout adjustment; manually control UI updates to prevent flickering when the keyboard shows/hides
+      resizeToAvoidBottomInset:
+          false, // Disable automatic layout adjustment; manually control UI updates to prevent flickering when the keyboard shows/hides
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: Stack(
         children: [
@@ -454,7 +695,7 @@ class _TerminalPageState extends State<TerminalPage>
                     //
                     // Android works fine without this workaround.
                     deleteDetection: isIOS,
-                    shortcuts: platformTerminalShortcuts(),
+                    shortcuts: platformTerminalShortcuts(allowPaste: false),
                     onKeyEvent: terminalCopyHandler(
                       _terminalModel.terminal,
                       _terminalModel.terminalController,
@@ -462,13 +703,15 @@ class _TerminalPageState extends State<TerminalPage>
                     ),
                     padding: _calculatePadding(heightPx),
                     onSecondaryTapDown: (details, offset) async {
-                      final selection = _terminalModel.terminalController.selection;
+                      final selection =
+                          _terminalModel.terminalController.selection;
                       if (selection != null) {
-                        final text = _terminalModel.terminal.buffer.getText(selection);
+                        final text =
+                            _terminalModel.terminal.buffer.getText(selection);
                         _terminalModel.terminalController.clearSelection();
                         await Clipboard.setData(ClipboardData(text: text));
                       } else {
-                        await _pasteClipboardText();
+                        await _reviewClipboardForShell();
                       }
                     },
                   );
@@ -477,6 +720,18 @@ class _TerminalPageState extends State<TerminalPage>
             ),
           ),
           if (_showTerminalExtraKeys) _buildFloatingKeyboard(),
+          Positioned(
+            left: 8,
+            top: 8,
+            child: SafeArea(
+              child: IconButton.filledTonal(
+                tooltip: 'Review clipboard paste',
+                onPressed: _reviewClipboardForShell,
+                icon: const Icon(Icons.content_paste_search_outlined),
+              ),
+            ),
+          ),
+          if (_shellDraftVisible) _buildShellDraftComposer(),
           // iOS-style circular close button in top-right corner
           if (isIOS && !widget.embedded) _buildCloseButton(),
         ],
@@ -497,7 +752,9 @@ class _TerminalPageState extends State<TerminalPage>
           return RawGestureDetector(
             behavior: HitTestBehavior.translucent,
             gestures: <Type, GestureRecognizerFactory>{
-              HorizontalDragGestureRecognizer: GestureRecognizerFactoryWithHandlers<HorizontalDragGestureRecognizer>(
+              HorizontalDragGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<
+                      HorizontalDragGestureRecognizer>(
                 () => HorizontalDragGestureRecognizer(
                   debugOwner: this,
                   // Only respond to touch input, exclude mouse/trackpad
@@ -515,7 +772,8 @@ class _TerminalPageState extends State<TerminalPage>
                     }
                     ..onEnd = (details) {
                       // Check if swipe started from left edge and moved right
-                      if (_swipeStartX < edgeThreshold && (_swipeCurrentX - _swipeStartX) > swipeThreshold) {
+                      if (_swipeStartX < edgeThreshold &&
+                          (_swipeCurrentX - _swipeStartX) > swipeThreshold) {
                         clientClose(sessionId, _ffi);
                       }
                       _swipeStartX = 0;
@@ -535,6 +793,88 @@ class _TerminalPageState extends State<TerminalPage>
     }
 
     return scaffold;
+  }
+
+  Widget _buildShellDraftComposer() {
+    final bottom = _sysKeyboardHeight + _keyboardHeight + 8;
+    return Positioned(
+      left: 8,
+      right: 8,
+      bottom: bottom,
+      child: SafeArea(
+        top: false,
+        child: Material(
+          color: MirpgRemoteTheme.surface,
+          elevation: 8,
+          borderRadius: BorderRadius.circular(14),
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.terminal, size: 18),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Shell draft · local until Run / Enter',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Discard Shell draft',
+                      onPressed: _shellDraftSending ? null : _clearShellDraft,
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 150),
+                  child: TextField(
+                    key: const ValueKey('shell-paste-draft'),
+                    controller: _shellDraftController,
+                    focusNode: _shellDraftFocus,
+                    enabled: !_shellDraftSending,
+                    minLines: 1,
+                    maxLines: 6,
+                    decoration: const InputDecoration(
+                      hintText: 'Review or edit before running',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (_shellDraftRetryBlocked) ...[
+                  const Text(
+                    'Previous send is uncertain. Check Shell output before allowing another send.',
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    key: const ValueKey('shell-paste-allow-retry'),
+                    onPressed: _allowShellDraftRetry,
+                    icon: const Icon(Icons.fact_check_outlined),
+                    label: const Text('I checked Shell output — allow retry'),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                FilledButton.icon(
+                  key: const ValueKey('shell-paste-run'),
+                  onPressed: _shellDraftSending || _shellDraftRetryBlocked
+                      ? null
+                      : () => unawaited(_runShellDraft()),
+                  icon: const Icon(Icons.play_arrow_rounded),
+                  label: Text(
+                    _shellDraftSending ? 'Sending…' : 'Run / Enter',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildCloseButton() {
@@ -589,7 +929,10 @@ class _TerminalPageState extends State<TerminalPage>
       bottom: _sysKeyboardHeight,
       child: Container(
         key: _keyboardKey,
-        color: Theme.of(context).scaffoldBackgroundColor,
+        decoration: const BoxDecoration(
+          color: MirpgRemoteTheme.surface,
+          border: Border(top: BorderSide(color: MirpgRemoteTheme.divider)),
+        ),
         padding: EdgeInsets.zero,
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -688,9 +1031,9 @@ class _TerminalPageState extends State<TerminalPage>
           minimumSize: const Size(terminalKeyboardKeyWidth, 32),
           padding: EdgeInsets.zero,
           textStyle: const TextStyle(fontSize: 12),
-          backgroundColor:
-              Theme.of(context).colorScheme.surfaceContainerHighest,
-          foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+          backgroundColor: MirpgRemoteTheme.raised,
+          foregroundColor: MirpgRemoteTheme.textPrimary,
+          side: const BorderSide(color: MirpgRemoteTheme.outline),
         ),
       ),
     );
@@ -727,12 +1070,15 @@ class _TerminalPageState extends State<TerminalPage>
           minimumSize: const Size(terminalKeyboardKeyWidth, 32),
           padding: EdgeInsets.zero,
           textStyle: const TextStyle(fontSize: 12),
-          backgroundColor: isLocked
-              ? Colors.blue
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
+          backgroundColor:
+              isLocked ? MirpgRemoteTheme.accent : MirpgRemoteTheme.raised,
           foregroundColor: isLocked
-              ? Colors.white
-              : Theme.of(context).colorScheme.onSurfaceVariant,
+              ? MirpgRemoteTheme.background
+              : MirpgRemoteTheme.textPrimary,
+          side: BorderSide(
+            color:
+                isLocked ? MirpgRemoteTheme.accent : MirpgRemoteTheme.outline,
+          ),
         ),
       ),
     );
@@ -751,9 +1097,9 @@ class _TerminalPageState extends State<TerminalPage>
         minimumSize: const Size(terminalKeyboardKeyWidth, 32),
         padding: EdgeInsets.zero,
         textStyle: const TextStyle(fontSize: 12),
-        backgroundColor:
-            Theme.of(context).colorScheme.surfaceContainerHighest,
-        foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+        backgroundColor: MirpgRemoteTheme.raised,
+        foregroundColor: MirpgRemoteTheme.textPrimary,
+        side: const BorderSide(color: MirpgRemoteTheme.outline),
       ),
     );
   }

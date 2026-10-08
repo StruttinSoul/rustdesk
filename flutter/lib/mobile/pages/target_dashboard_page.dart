@@ -8,9 +8,12 @@ import '../../consts.dart'
     show kKeyFlutterKey, kPeerPlatformLinux, kPeerPlatformWindows;
 import '../../common/widgets/dialog.dart' show clientClose;
 import '../../models/platform_model.dart' show bind;
+import '../../models/codex_model.dart';
 import '../../models/emulator_model.dart';
+import '../../models/host_management_model.dart';
 import '../../models/input_model.dart';
 import '../../models/model.dart';
+import '../../models/remote_operation_state.dart';
 import 'codex_page.dart';
 import 'emulator_page.dart';
 import 'file_manager_page.dart';
@@ -18,15 +21,23 @@ import 'host_management_page.dart';
 import 'settings_page.dart';
 import 'terminal_page.dart';
 import '../widgets/mirpg_remote_theme.dart';
+import '../widgets/clipboard_transfer_sheet.dart';
 import '../widgets/monitor_control_view.dart';
 import '../widgets/monitor_session_continuity.dart';
+import '../widgets/privacy_controls_sheet.dart';
 import '../widgets/session_quality_panel.dart';
+import '../widgets/window_picker_sheet.dart';
 
 enum _ConnectedPcSection { devices, system, files, powershell, codex }
 
 class TargetDashboardPage extends StatefulWidget {
-  const TargetDashboardPage({super.key, required this.ffi});
+  const TargetDashboardPage({
+    super.key,
+    required this.ffi,
+    this.initialCodexThreadId,
+  });
   final FFI ffi;
+  final String? initialCodexThreadId;
 
   @override
   State<TargetDashboardPage> createState() => _TargetDashboardPageState();
@@ -42,15 +53,24 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   _Target? _fullscreen;
   bool _chooser = false;
   bool _background = false;
+  bool _viewFocused = true;
   bool _monitorDown = false;
   bool _monitorRightDown = false;
   bool _monitorLocalViewOnly = false;
   final MonitorInputEpoch _monitorInputEpoch = MonitorInputEpoch();
+  final MonitorSessionLiveness _monitorLiveness = MonitorSessionLiveness();
+  int _monitorLivenessGeneration = 0;
+  int? _monitorLivenessDisplay;
+  DateTime _monitorLivenessStartedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _monitorRequiresStreamHeartbeat = false;
+  bool _monitorInputWasLive = false;
   final Set<int> _monitorHeldKeys = <int>{};
   final Map<int, String> _monitorDrafts = <int, String>{};
   final Map<int, MonitorControlPreferences> _monitorPreferences =
       <int, MonitorControlPreferences>{};
   Future<void> _monitorEvents = Future.value();
+  HostWindowInfo? _focusedWindow;
+  int _windowFocusRevision = 0;
   bool? _landscape;
   String _subscription = '';
   double _viewport = 1;
@@ -69,6 +89,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   bool _hasStoredQualityPreference = false;
   int _peerInfoGeneration = 0;
   int _reconnectGeneration = 0;
+  int _codexOverviewRequestGeneration = -1;
   EmulatorModel get model => widget.ffi.emulatorModel;
 
   String get _qualityPreferenceKey => 'mirpg-quality-profile:${widget.ffi.id}';
@@ -103,25 +124,31 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     if (mounted) setState(() {});
     if (previous.orientation != preferences.orientation &&
         _fullscreen?.display == display) {
+      unawaited(_releaseMonitorInput());
       _landscape = null;
       _presentation();
     }
   }
 
   List<_Target> get targets => [
-        for (final instance in model.instances)
-          if (instance.provider == 'bluestacks') _Target.guest(instance),
         for (var i = 0; i < widget.ffi.ffiModel.pi.displays.length; i++)
           _Target.monitor(i),
+        for (final instance in model.instances)
+          if (instance.provider == 'bluestacks') _Target.guest(instance),
       ];
 
   @override
   void initState() {
     super.initState();
+    if (widget.initialCodexThreadId?.trim().isNotEmpty ?? false) {
+      _section = _ConnectedPcSection.codex;
+      _codexOpened = true;
+    }
     WidgetsBinding.instance.addObserver(this);
     model.addListener(_changed);
     widget.ffi.ffiModel.addListener(_changed);
     widget.ffi.qualityMonitorModel.addListener(_qualityChanged);
+    widget.ffi.codexModel.addListener(_codexChanged);
     _peerInfoGeneration = widget.ffi.ffiModel.peerInfoGeneration;
     _reconnectGeneration = widget.ffi.ffiModel.reconnectGeneration;
     _scroll.addListener(_scrolled);
@@ -131,23 +158,120 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         unawaited(model.refresh());
       }
     });
-    _healthTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      if (mounted &&
-          !_background &&
-          widget.ffi.qualityMonitorModel.data.latestUpdatedAt != null) {
-        setState(() {});
-      }
+    _healthTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _background || _fullscreen?.display == null) return;
+      _refreshMonitorInputLiveness();
+      setState(() {});
     });
     unawaited(SystemChrome.setPreferredOrientations(const []));
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _subscribe();
       unawaited(_loadQualityProfile());
+      _maybeLoadCodexOverview();
     });
   }
 
-  void _qualityChanged() {
+  void _codexChanged() {
     if (mounted) setState(() {});
+  }
+
+  void _maybeLoadCodexOverview({bool force = false}) {
+    if (!mounted || !widget.ffi.ffiModel.pi.features.codex) return;
+    final codex = widget.ffi.codexModel;
+    if (codex.loadingThreads) return;
+    final generation = widget.ffi.ffiModel.peerInfoGeneration;
+    if (!force && _codexOverviewRequestGeneration == generation) return;
+    _codexOverviewRequestGeneration = generation;
+    unawaited(codex.listThreads());
+  }
+
+  void _qualityChanged() {
+    if (!mounted) return;
+    _refreshMonitorInputLiveness();
+    setState(() {});
+  }
+
+  void _resetMonitorLivenessForCurrentTarget() {
+    final display = _fullscreen?.display;
+    _monitorLivenessGeneration++;
+    _monitorLivenessDisplay = display;
+    _monitorLivenessStartedAt = DateTime.now();
+    _monitorInputWasLive = false;
+    _monitorInputEpoch.invalidate();
+    if (display == null) return;
+    _monitorRequiresStreamHeartbeat =
+        model.desktopStreamLivenessCapability == CapabilityStatus.supported;
+    _monitorLiveness.begin(
+      generation: _monitorLivenessGeneration,
+      targetIdentity: 'monitor:$display',
+      requireStreamHeartbeat: _monitorRequiresStreamHeartbeat,
+    );
+  }
+
+  void _syncMonitorLiveness(int index) {
+    final requireStreamHeartbeat =
+        model.desktopStreamLivenessCapability == CapabilityStatus.supported;
+    if (_monitorLivenessDisplay != index ||
+        _monitorRequiresStreamHeartbeat != requireStreamHeartbeat) {
+      _resetMonitorLivenessForCurrentTarget();
+    }
+    if (_monitorLivenessDisplay != index) return;
+
+    final generation = _monitorLivenessGeneration;
+    final target = 'monitor:$index';
+    final quality = widget.ffi.qualityMonitorModel.data;
+    final transportAt = quality.transportHeartbeatUpdatedAt;
+    if (transportAt != null &&
+        !transportAt.isBefore(_monitorLivenessStartedAt)) {
+      _monitorLiveness.noteTransportHeartbeat(
+        generation: generation,
+        at: transportAt,
+      );
+    }
+    final streamAt = quality.streamHeartbeatUpdatedAt[index];
+    if (streamAt != null && !streamAt.isBefore(_monitorLivenessStartedAt)) {
+      _monitorLiveness.noteStreamHeartbeat(
+        generation: generation,
+        targetIdentity: target,
+        at: streamAt,
+      );
+    }
+    final decoderAt = quality.decoderUpdatedAt[index];
+    final decoderHealthy = quality.decoderHealthy[index];
+    if (decoderAt != null &&
+        decoderHealthy != null &&
+        !decoderAt.isBefore(_monitorLivenessStartedAt)) {
+      _monitorLiveness.noteDecoderHealth(
+        generation: generation,
+        targetIdentity: target,
+        healthy: decoderHealthy,
+        at: decoderAt,
+      );
+    }
+    final frameAt = widget.ffi.imageModel.dashboardImageUpdatedAt(index);
+    if (_monitorPreviewFrameIsCurrent(index) &&
+        frameAt != null &&
+        !frameAt.isBefore(_monitorLivenessStartedAt)) {
+      _monitorLiveness.noteFrame(
+        generation: generation,
+        targetIdentity: target,
+        at: frameAt,
+      );
+    }
+  }
+
+  void _refreshMonitorInputLiveness() {
+    final display = _fullscreen?.display;
+    if (display == null) {
+      _monitorInputWasLive = false;
+      return;
+    }
+    final live = _canControlMonitor(display);
+    if (_monitorInputWasLive && !live) {
+      unawaited(_releaseMonitorInput());
+    }
+    _monitorInputWasLive = live;
   }
 
   Future<void> _loadQualityProfile() async {
@@ -245,18 +369,21 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       model.invalidatePreviewAcknowledgement();
       if (_fullscreen?.display != null) {
         unawaited(_releaseMonitorInput());
+        _resetMonitorLivenessForCurrentTarget();
         _subscription = '';
       }
     }
     final peerInfoGeneration = widget.ffi.ffiModel.peerInfoGeneration;
     if (peerInfoGeneration != _peerInfoGeneration) {
       _peerInfoGeneration = peerInfoGeneration;
+      _codexOverviewRequestGeneration = -1;
       model.invalidatePreviewAcknowledgement();
       if (_hasStoredQualityPreference) {
         unawaited(_applyQualityProfile(_qualityProfile, persist: false));
       }
       if (_fullscreen?.display != null) {
         unawaited(_releaseMonitorInput());
+        _resetMonitorLivenessForCurrentTarget();
         _subscription = '';
       }
     }
@@ -267,6 +394,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     }
     _presentation();
     setState(() {});
+    _maybeLoadCodexOverview();
     WidgetsBinding.instance.addPostFrameCallback((_) => _subscribe());
   }
 
@@ -281,6 +409,16 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     if (_background) unawaited(_releaseMonitorInput());
     _subscription = '';
     _subscribe();
+  }
+
+  @override
+  void didChangeViewFocus(ui.ViewFocusEvent event) {
+    if (!mounted || View.of(context).viewId != event.viewId) return;
+    final focused = event.state == ui.ViewFocusState.focused;
+    if (_viewFocused == focused) return;
+    _viewFocused = focused;
+    if (!focused) unawaited(_releaseMonitorInput());
+    setState(() {});
   }
 
   void _subscribe() {
@@ -323,17 +461,25 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     });
   }
 
-  Future<void> _open(_Target target) async {
+  Future<void> _open(
+    _Target target, {
+    bool launchDefaultApp = false,
+    HostWindowInfo? focusedWindow,
+  }) async {
     if (model.connecting) return;
     await _releaseMonitorInput();
-    setState(() => _fullscreen = target);
+    setState(() {
+      _fullscreen = target;
+      _focusedWindow = focusedWindow;
+      if (focusedWindow != null) _windowFocusRevision++;
+    });
+    _resetMonitorLivenessForCurrentTarget();
     _subscription = '';
     _subscribe();
     if (target.display != null) {
       await model.desktop();
     } else {
-      await model.connect(target.id,
-          launchDefaultApp: target.instance!.defaultPackage.isNotEmpty);
+      await model.connect(target.id, launchDefaultApp: launchDefaultApp);
     }
     _presentation();
   }
@@ -343,6 +489,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     await model.desktop();
     if (!mounted) return;
     setState(() => _fullscreen = null);
+    _resetMonitorLivenessForCurrentTarget();
     _landscape = null;
     await SystemChrome.setPreferredOrientations(const []);
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -452,6 +599,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     model.removeListener(_changed);
     widget.ffi.ffiModel.removeListener(_changed);
     widget.ffi.qualityMonitorModel.removeListener(_qualityChanged);
+    widget.ffi.codexModel.removeListener(_codexChanged);
     _scrollDebounce?.cancel();
     _refreshTimer?.cancel();
     _healthTimer?.cancel();
@@ -468,13 +616,21 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   Widget build(BuildContext context) {
     final active = _fullscreen;
     if (active?.instance != null) {
-      return EmulatorPage(
-          ffi: widget.ffi,
-          dashboardMode: true,
-          onSwitch: _choose,
-          onReturn: _dashboard);
+      return Theme(
+        data: MirpgRemoteTheme.build(Theme.of(context)),
+        child: EmulatorPage(
+            ffi: widget.ffi,
+            dashboardMode: true,
+            onSwitch: _choose,
+            onReturn: _dashboard),
+      );
     }
-    if (active?.display != null) return _monitor(active!);
+    if (active?.display != null) {
+      return Theme(
+        data: MirpgRemoteTheme.build(Theme.of(context)),
+        child: _monitor(active!),
+      );
+    }
     final pi = widget.ffi.ffiModel.pi;
     final filesAvailable = widget.ffi.ffiModel.permissions['file'] != false;
     final powershellAvailable =
@@ -528,6 +684,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             ? CodexPage(
                 model: widget.ffi.codexModel,
                 embedded: true,
+                initialThreadId: widget.initialCodexThreadId,
                 onWindowsAppOpened: () {
                   if (mounted) {
                     setState(() => _section = _ConnectedPcSection.devices);
@@ -552,10 +709,33 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         child: Scaffold(
           appBar: AppBar(
             automaticallyImplyLeading: false,
-            leading: const Icon(Icons.computer_outlined),
-            title: Text(widget.ffi.ffiModel.pi.hostname.isEmpty
-                ? 'Your PC'
-                : widget.ffi.ffiModel.pi.hostname),
+            leadingWidth: 64,
+            leading: Padding(
+              padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: MirpgRemoteTheme.raised,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: MirpgRemoteTheme.divider),
+                ),
+                child: const Icon(Icons.computer_outlined,
+                    color: MirpgRemoteTheme.accent),
+              ),
+            ),
+            titleSpacing: 10,
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(widget.ffi.ffiModel.pi.hostname.isEmpty
+                    ? 'Your PC'
+                    : widget.ffi.ffiModel.pi.hostname),
+                Text(
+                  'Connected workspace',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ],
+            ),
             actions: [
               SessionStatusButton(
                 direct: widget.ffi.ffiModel.direct,
@@ -582,6 +762,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         : () => unawaited(model.refreshHost())),
               ConnectedPcSessionMenu(
                 onQualityConnection: () => unawaited(_showQualityConnection()),
+                onPrivacyControls: () => unawaited(showPrivacyControlsSheet(
+                  context,
+                  ffi: widget.ffi,
+                )),
                 onSettings: _openSettings,
                 onEndSession: () =>
                     clientClose(widget.ffi.sessionId, widget.ffi),
@@ -639,49 +823,185 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       ));
   }
 
-  Widget _devicesBody() => Column(children: [
-        if (model.error.isNotEmpty)
-          Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-              child: Text(model.error,
-                  style:
-                      TextStyle(color: Theme.of(context).colorScheme.error))),
-        if (model.loading) const LinearProgressIndicator(),
-        Expanded(child: LayoutBuilder(builder: (context, box) {
-          final columns = box.maxWidth >= 700 ? 2 : 1;
-          final width = (box.maxWidth - 32 - (columns - 1) * 16) / columns;
-          final extent = math.max(
-              width * 9 / 16 + 64, box.maxHeight / (columns == 1 ? 3 : 1));
-          if (_viewport != box.maxHeight ||
-              _extent != extent ||
-              _columns != columns) {
-            _viewport = box.maxHeight;
-            _extent = extent;
-            _columns = columns;
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _subscription = '';
-              _subscribe();
-            });
-          }
-          if (targets.isEmpty) {
-            return const Center(
-                child: Text(
-                    'No views are available. Refresh after opening BlueStacks on the PC.'));
-          }
-          return GridView.builder(
-            controller: _scroll,
-            padding: const EdgeInsets.all(16),
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+  Widget _devicesBody() {
+    final codexAvailable = widget.ffi.ffiModel.pi.features.codex;
+    final codexEntries = codexOverviewEntries(widget.ffi.codexModel);
+    final desktopTargets = targets
+        .where((target) => target.display != null)
+        .toList(growable: false);
+    final androidTargets = targets
+        .where((target) => target.instance != null)
+        .toList(growable: false);
+    return Column(children: [
+      Expanded(child: LayoutBuilder(builder: (context, box) {
+        final columns = box.maxWidth >= 700 ? 2 : 1;
+        final width = (box.maxWidth - 32 - (columns - 1) * 16) / columns;
+        final cardExtent = math.max(width * 9 / 16 + 84, 236.0);
+        final extent = cardExtent + 48;
+        if (_viewport != box.maxHeight ||
+            _extent != extent ||
+            _columns != columns) {
+          _viewport = box.maxHeight;
+          _extent = extent;
+          _columns = columns;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _subscription = '';
+            _subscribe();
+          });
+        }
+        final slivers = <Widget>[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: MirpgSectionHeader(
+                title: 'Overview',
+                subtitle: 'Your PC, Android instances and ongoing work',
+                trailing: model.loading
+                    ? const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : null,
+              ),
+            ),
+          ),
+          if (model.error.isNotEmpty)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: MirpgSurface(
+                  color: MirpgRemoteTheme.error.withOpacity(0.08),
+                  borderColor: MirpgRemoteTheme.error.withOpacity(0.45),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.error_outline,
+                          color: MirpgRemoteTheme.error),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Needs your attention',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleSmall
+                                    ?.copyWith(color: MirpgRemoteTheme.error)),
+                            const SizedBox(height: 4),
+                            Text(model.error,
+                                style: Theme.of(context).textTheme.bodySmall),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ];
+
+        void addTargetGroup(
+            String title, String subtitle, List<_Target> group) {
+          if (group.isEmpty) return;
+          slivers.add(SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+              child: MirpgSectionHeader(title: title, subtitle: subtitle),
+            ),
+          ));
+          slivers.add(SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            sliver: SliverGrid(
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: columns,
-                mainAxisExtent: extent,
+                mainAxisExtent: cardExtent,
                 crossAxisSpacing: 16,
-                mainAxisSpacing: 16),
-            itemCount: targets.length,
-            itemBuilder: (_, index) =>
-                _card(targets[index], () => unawaited(_open(targets[index]))),
-          );
-        })),
-      ]);
+                mainAxisSpacing: 16,
+              ),
+              delegate: SliverChildBuilderDelegate(
+                (_, index) {
+                  final target = group[index];
+                  return _card(target, () => unawaited(_open(target)));
+                },
+                childCount: group.length,
+              ),
+            ),
+          ));
+        }
+
+        addTargetGroup(
+          'Desktop',
+          desktopTargets.length == 1
+              ? 'Live view of this PC'
+              : '${desktopTargets.length} live PC displays',
+          desktopTargets,
+        );
+        addTargetGroup(
+          'Android instances',
+          androidTargets.length == 1
+              ? 'BlueStacks guest'
+              : '${androidTargets.length} BlueStacks guests',
+          androidTargets,
+        );
+
+        if (codexAvailable) {
+          slivers.add(SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+            sliver: SliverToBoxAdapter(
+              child: SizedBox(
+                height: math.max(236, math.min(cardExtent, 320)),
+                child: CodexOverviewCard(
+                  entries: codexEntries,
+                  loading: widget.ffi.codexModel.loadingThreads,
+                  error: widget.ffi.codexModel.error,
+                  onOpen: () => setState(() {
+                    _codexOpened = true;
+                    _section = _ConnectedPcSection.codex;
+                  }),
+                  onRefresh: () => _maybeLoadCodexOverview(force: true),
+                ),
+              ),
+            ),
+          ));
+        }
+
+        if (targets.isEmpty && !codexAvailable) {
+          slivers.add(SliverFillRemaining(
+            hasScrollBody: false,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: MirpgSurface(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.devices_outlined,
+                          size: 36, color: MirpgRemoteTheme.textSecondary),
+                      const SizedBox(height: 12),
+                      Text('No views available',
+                          style: Theme.of(context).textTheme.titleMedium),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Refresh after a Windows display or BlueStacks instance becomes available.',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ));
+        }
+
+        return CustomScrollView(
+          controller: _scroll,
+          slivers: slivers,
+        );
+      })),
+    ]);
+  }
 
   Widget _card(_Target target, VoidCallback onOpen) => AnimatedBuilder(
         animation: Listenable.merge([widget.ffi.imageModel, model]),
@@ -715,6 +1035,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                             widget.ffi.ffiModel.viewOnly))
                 ? null
                 : onOpen,
+            onLaunchGame: target.instance?.defaultPackage.isNotEmpty == true &&
+                    !model.connecting &&
+                    widget.ffi.ffiModel.keyboard &&
+                    !widget.ffi.ffiModel.viewOnly
+                ? () => unawaited(_open(target, launchDefaultApp: true))
+                : null,
             onRetry: () {
               _subscription = '';
               _subscribe();
@@ -752,6 +1078,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                           _preferencesForMonitor(target.display!);
                       final frameStatus =
                           _monitorFrameStatus(target.display!, image);
+                      final focused = _focusedWindow;
                       return MonitorControlView(
                         key: ValueKey(
                             '${target.id}:${display.width}x${display.height}'),
@@ -761,6 +1088,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         canControl: image != null &&
                             _hostCanControlMonitor(target.display!),
                         frameStatus: frameStatus,
+                        focusRect: focused?.monitor == target.display
+                            ? Rect.fromLTWH(
+                                focused!.x.toDouble(),
+                                focused.y.toDouble(),
+                                focused.width.toDouble(),
+                                focused.height.toDouble(),
+                              )
+                            : null,
+                        focusRevision: _windowFocusRevision,
                         preferences: preferences,
                         onPreferencesChanged: (next) =>
                             _saveMonitorPreferences(target.display!, next),
@@ -776,6 +1112,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         }),
                         onKeyboard: () =>
                             unawaited(_monitorKeyboard(target.display!)),
+                        onClipboard: () => unawaited(_monitorClipboard()),
+                        onWindows: () =>
+                            unawaited(_monitorWindows(target.display!)),
                         onSwitchView: () => unawaited(_choose()),
                         onDashboard: () => unawaited(_dashboard()),
                         onSessionStatus: () =>
@@ -796,9 +1135,41 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             ]))),
       );
 
+  Future<void> _monitorWindows(int display) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => WindowPickerSheet(
+        model: model,
+        canControl: widget.ffi.ffiModel.keyboard &&
+            !widget.ffi.ffiModel.viewOnly &&
+            !_background &&
+            _viewFocused,
+        onFocused: _applyFocusedWindow,
+      ),
+    );
+    if (mounted) _monitorFocus.requestFocus();
+  }
+
+  Future<void> _applyFocusedWindow(HostWindowInfo window) async {
+    if (!mounted ||
+        window.monitor < 0 ||
+        window.monitor >= widget.ffi.ffiModel.pi.displays.length) {
+      return;
+    }
+    if (_chooser) setState(() => _chooser = false);
+    await _open(
+      _Target.monitor(window.monitor),
+      focusedWindow: window,
+    );
+  }
+
   bool _hostCanControlMonitor(int index) =>
       mounted &&
       !_background &&
+      _viewFocused &&
       _fullscreen?.display == index &&
       !model.selected &&
       !model.connecting &&
@@ -808,14 +1179,50 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       index < widget.ffi.ffiModel.pi.displays.length &&
       _monitorFrameIsCurrent(index);
 
-  bool _monitorFrameIsCurrent(int index) => monitorFrameIsCurrent(
+  bool _monitorPreviewFrameIsCurrent(int index) => monitorFrameIsCurrent(
         previewRequest: model.previewRequest,
         acknowledgedRequest: model.previewAcknowledgedRequest,
         frameRequest: widget.ffi.imageModel.dashboardImagePreviewRequest(index),
       );
 
+  bool _monitorFrameIsCurrent(int index) {
+    if (!_monitorPreviewFrameIsCurrent(index)) return false;
+    _syncMonitorLiveness(index);
+    return _monitorLiveness.canSendInput(
+      DateTime.now(),
+      hostPermission: true,
+      background: _background || !_viewFocused,
+    );
+  }
+
   String? _monitorFrameStatus(int index, ui.Image? image) {
-    if (_monitorFrameIsCurrent(index)) return null;
+    if (_monitorPreviewFrameIsCurrent(index)) {
+      _syncMonitorLiveness(index);
+      final reason = _monitorLiveness.blockReason(
+        DateTime.now(),
+        hostPermission: true,
+        background: _background || !_viewFocused,
+      );
+      switch (reason) {
+        case MonitorInputBlockReason.none:
+          return null;
+        case MonitorInputBlockReason.transportStale:
+          return 'Connection heartbeat lost · input paused';
+        case MonitorInputBlockReason.streamStale:
+          return 'Video stream paused · input paused';
+        case MonitorInputBlockReason.decoderNotReady:
+          return 'Waiting for video decoder · input paused';
+        case MonitorInputBlockReason.decoderFailed:
+          return 'Video decoder recovering · input paused';
+        case MonitorInputBlockReason.frameNotReady:
+          return 'Waiting for current-session video';
+        case MonitorInputBlockReason.background:
+          return 'Input paused while app is inactive';
+        case MonitorInputBlockReason.viewOnly:
+        case MonitorInputBlockReason.hostPermission:
+          break;
+      }
+    }
     if (image == null) return 'Waiting for live video';
     if (!model.previewsAcknowledged) return 'Last frame · reconnecting';
     final updatedAt = widget.ffi.imageModel.dashboardImageUpdatedAt(index);
@@ -944,6 +1351,24 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     }
   }
 
+  Future<void> _monitorClipboard() async {
+    await _releaseMonitorInput();
+    if (!mounted) return;
+    widget.ffi.clipboardTransferModel.onContextChanged();
+    final hostname = widget.ffi.ffiModel.pi.hostname.trim();
+    final targetLabel = hostname.isNotEmpty ? hostname : widget.ffi.id;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => ClipboardTransferSheet(
+        model: widget.ffi.clipboardTransferModel,
+        targetLabel: targetLabel,
+      ),
+    );
+    if (mounted) _monitorFocus.requestFocus();
+  }
+
   Future<void> _releaseMonitor() async {
     await _monitorEvents;
     if (_monitorDown) {
@@ -1043,17 +1468,24 @@ class ConnectedPcTabBar extends StatelessWidget {
   }
 }
 
-enum _ConnectedPcSessionAction { qualityConnection, settings, endSession }
+enum _ConnectedPcSessionAction {
+  qualityConnection,
+  privacyControls,
+  settings,
+  endSession,
+}
 
 class ConnectedPcSessionMenu extends StatelessWidget {
   const ConnectedPcSessionMenu({
     super.key,
     this.onQualityConnection,
+    this.onPrivacyControls,
     required this.onSettings,
     required this.onEndSession,
   });
 
   final VoidCallback? onQualityConnection;
+  final VoidCallback? onPrivacyControls;
   final VoidCallback onSettings;
   final VoidCallback onEndSession;
 
@@ -1066,14 +1498,16 @@ class ConnectedPcSessionMenu extends StatelessWidget {
           switch (action) {
             case _ConnectedPcSessionAction.qualityConnection:
               onQualityConnection?.call();
+            case _ConnectedPcSessionAction.privacyControls:
+              onPrivacyControls?.call();
             case _ConnectedPcSessionAction.settings:
               onSettings();
             case _ConnectedPcSessionAction.endSession:
               onEndSession();
           }
         },
-        itemBuilder: (context) => const [
-          PopupMenuItem(
+        itemBuilder: (context) => [
+          const PopupMenuItem(
             value: _ConnectedPcSessionAction.qualityConnection,
             child: ListTile(
               contentPadding: EdgeInsets.zero,
@@ -1081,7 +1515,16 @@ class ConnectedPcSessionMenu extends StatelessWidget {
               title: Text('Quality & connection'),
             ),
           ),
-          PopupMenuItem(
+          if (onPrivacyControls != null)
+            const PopupMenuItem(
+              value: _ConnectedPcSessionAction.privacyControls,
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.privacy_tip_outlined),
+                title: Text('Privacy & host controls'),
+              ),
+            ),
+          const PopupMenuItem(
             value: _ConnectedPcSessionAction.settings,
             child: ListTile(
               contentPadding: EdgeInsets.zero,
@@ -1089,8 +1532,8 @@ class ConnectedPcSessionMenu extends StatelessWidget {
               title: Text('App settings'),
             ),
           ),
-          PopupMenuDivider(),
-          PopupMenuItem(
+          const PopupMenuDivider(),
+          const PopupMenuItem(
             value: _ConnectedPcSessionAction.endSession,
             child: ListTile(
               contentPadding: EdgeInsets.zero,
@@ -1099,6 +1542,309 @@ class ConnectedPcSessionMenu extends StatelessWidget {
             ),
           ),
         ],
+      );
+}
+
+class CodexOverviewEntry {
+  const CodexOverviewEntry({
+    required this.thread,
+    required this.label,
+    required this.icon,
+    required this.tone,
+    required this.priority,
+  });
+
+  final CodexThread thread;
+  final String label;
+  final IconData icon;
+  final MirpgStatusTone tone;
+  final int priority;
+}
+
+List<CodexOverviewEntry> codexOverviewEntries(CodexModel model, {int? limit}) {
+  final entries = <CodexOverviewEntry>[];
+  for (final thread in model.threads) {
+    final state = thread.state.toLowerCase();
+    final originator = thread.originator.toLowerCase().replaceAll('_', ' ');
+    if (state == 'resumable' && originator.contains('codex desktop')) {
+      continue;
+    }
+
+    if (state == 'waiting_for_approval' || state == 'waiting_for_input') {
+      entries.add(CodexOverviewEntry(
+        thread: thread,
+        label: 'Needs you',
+        icon: Icons.notification_important_outlined,
+        tone: MirpgStatusTone.warning,
+        priority: 0,
+      ));
+    } else if (model.activeTurnIdFor(thread.id).isNotEmpty ||
+        state == 'working' ||
+        state == 'starting' ||
+        state == 'interrupting') {
+      entries.add(CodexOverviewEntry(
+        thread: thread,
+        label: 'Running',
+        icon: Icons.pending_outlined,
+        tone: MirpgStatusTone.good,
+        priority: 1,
+      ));
+    } else {
+      entries.add(CodexOverviewEntry(
+        thread: thread,
+        label: 'Review',
+        icon: state == 'failed'
+            ? Icons.error_outline_rounded
+            : Icons.rate_review_outlined,
+        tone:
+            state == 'failed' ? MirpgStatusTone.error : MirpgStatusTone.neutral,
+        priority: 2,
+      ));
+    }
+  }
+  entries.sort((a, b) {
+    final byPriority = a.priority.compareTo(b.priority);
+    if (byPriority != 0) return byPriority;
+    final byUpdated = b.thread.updatedAt.compareTo(a.thread.updatedAt);
+    return byUpdated != 0 ? byUpdated : a.thread.id.compareTo(b.thread.id);
+  });
+  if (limit == null) return List.unmodifiable(entries);
+  return entries.take(math.max(0, limit)).toList(growable: false);
+}
+
+class CodexOverviewCard extends StatelessWidget {
+  const CodexOverviewCard({
+    super.key,
+    required this.entries,
+    required this.loading,
+    required this.error,
+    required this.onOpen,
+    required this.onRefresh,
+  });
+
+  final List<CodexOverviewEntry> entries;
+  final bool loading;
+  final String error;
+  final VoidCallback onOpen;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final largeText = MediaQuery.textScalerOf(context).scale(16) >= 24;
+    if (largeText) {
+      final entry = entries.isEmpty ? null : entries.first;
+      return MirpgSurface(
+        key: const ValueKey('codex-overview-card'),
+        color: MirpgRemoteTheme.raised,
+        borderColor: MirpgRemoteTheme.outline,
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text('Ongoing work',
+                      style: Theme.of(context).textTheme.titleMedium),
+                ),
+                if (loading)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: entry != null
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _CodexOverviewRow(entry: entry, showProject: false),
+                        if (entries.length > 1)
+                          Text(
+                            '+${entries.length - 1} more in Codex',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelMedium,
+                          ),
+                      ],
+                    )
+                  : Center(
+                      child: Text(
+                        error.isNotEmpty
+                            ? error
+                            : loading
+                                ? 'Checking for active tasks…'
+                                : 'No ongoing Codex work',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: error.isNotEmpty
+                                ? MirpgRemoteTheme.error
+                                : null),
+                      ),
+                    ),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                  onPressed: onOpen, child: const Text('Open Codex')),
+            ),
+          ],
+        ),
+      );
+    }
+    final visibleEntries = entries.take(largeText ? 1 : 2).toList();
+    final hiddenCount = entries.length - visibleEntries.length;
+    final title = Row(
+      children: [
+        const Icon(Icons.code_rounded, color: MirpgRemoteTheme.accent),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text('Ongoing work',
+              style: Theme.of(context).textTheme.titleMedium),
+        ),
+        if (loading)
+          const SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+      ],
+    );
+    final actions = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          tooltip: 'Refresh Codex work',
+          onPressed: loading ? null : onRefresh,
+          icon: const Icon(Icons.refresh),
+        ),
+        TextButton(onPressed: onOpen, child: const Text('Open Codex')),
+      ],
+    );
+
+    return MirpgSurface(
+      key: const ValueKey('codex-overview-card'),
+      color: MirpgRemoteTheme.raised,
+      borderColor: MirpgRemoteTheme.outline,
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (largeText) ...[
+            title,
+            Align(alignment: Alignment.centerRight, child: actions),
+          ] else
+            Row(children: [Expanded(child: title), actions]),
+          const SizedBox(height: 4),
+          Text(
+            'Codex tasks on this PC',
+            style: Theme.of(context)
+                .textTheme
+                .bodySmall
+                ?.copyWith(color: MirpgRemoteTheme.textSecondary),
+          ),
+          const SizedBox(height: 8),
+          if (error.isNotEmpty && entries.isEmpty)
+            Expanded(
+              child: Center(
+                child: Text(
+                  error,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: MirpgRemoteTheme.error),
+                ),
+              ),
+            )
+          else if (entries.isEmpty)
+            Expanded(
+              child: Center(
+                child: Text(
+                  loading
+                      ? 'Checking for active tasks…'
+                      : 'No ongoing Codex work',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+            )
+          else ...[
+            for (var i = 0; i < visibleEntries.length; i++) ...[
+              if (i > 0) const Divider(),
+              _CodexOverviewRow(entry: visibleEntries[i]),
+            ],
+            if (hiddenCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '+$hiddenCount more in Codex',
+                  style: Theme.of(context).textTheme.labelMedium,
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _CodexOverviewRow extends StatelessWidget {
+  const _CodexOverviewRow({
+    required this.entry,
+    this.showProject = true,
+  });
+
+  final CodexOverviewEntry entry;
+  final bool showProject;
+
+  @override
+  Widget build(BuildContext context) => ConstrainedBox(
+        constraints:
+            const BoxConstraints(minHeight: MirpgRemoteTheme.minTouchTarget),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      entry.thread.title.isEmpty
+                          ? 'Codex task'
+                          : entry.thread.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    if (showProject && entry.thread.project.isNotEmpty)
+                      Text(
+                        entry.thread.project,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              MirpgStatusChip(
+                label: entry.label,
+                icon: entry.icon,
+                tone: entry.tone,
+              ),
+            ],
+          ),
+        ),
       );
 }
 
@@ -1124,6 +1870,7 @@ class TargetPreviewCard extends StatelessWidget {
       this.image,
       this.error = '',
       this.onOpen,
+      this.onLaunchGame,
       this.onRetry});
   final String name;
   final String type;
@@ -1132,80 +1879,161 @@ class TargetPreviewCard extends StatelessWidget {
   final ui.Image? image;
   final String error;
   final VoidCallback? onOpen;
+  final VoidCallback? onLaunchGame;
   final VoidCallback? onRetry;
 
   @override
-  Widget build(BuildContext context) => Card(
-        margin: EdgeInsets.zero,
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-            onTap: onOpen,
-            child: Column(children: [
-              Expanded(
-                  child: ColoredBox(
-                      color: Colors.black,
-                      child: Stack(fit: StackFit.expand, children: [
-                        if (image != null)
-                          RawImage(
-                              image: image,
-                              fit: BoxFit.contain,
-                              filterQuality: FilterQuality.low),
-                        if (stopped)
-                          Center(
-                              child: FilledButton.icon(
-                                  onPressed: onOpen,
-                                  icon: const Icon(Icons.power_settings_new),
-                                  label: const Text('Boot')))
-                        else if (error.isNotEmpty)
-                          Center(
-                              child: Padding(
-                                  padding: const EdgeInsets.all(12),
-                                  child: SingleChildScrollView(
-                                      child: Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                        Text(error,
-                                            maxLines: 3,
-                                            overflow: TextOverflow.ellipsis,
-                                            textAlign: TextAlign.center,
-                                            style: const TextStyle(
-                                                color: Colors.white)),
-                                        TextButton(
-                                            onPressed: onRetry,
-                                            child: const Text('Retry preview')),
-                                      ]))))
-                        else if (image == null)
-                          const Center(
-                              child: Icon(Icons.live_tv_outlined,
-                                  color: Colors.white54, size: 40)),
-                        Positioned(
-                            right: 8,
-                            top: 8,
-                            child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                    color: Colors.black87,
-                                    borderRadius: BorderRadius.circular(8)),
-                                child: Padding(
-                                    padding: const EdgeInsets.all(8),
-                                    child: Text(live ? '$type · Live' : type,
-                                        style: const TextStyle(
-                                            color: Colors.white))))),
-                      ]))),
-              Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  child: Row(children: [
-                    Expanded(
-                        child: Text(name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleMedium)),
-                    if (!stopped)
-                      IconButton(
-                          tooltip: 'Open $name',
+  Widget build(BuildContext context) {
+    final stateLabel = stopped
+        ? 'Stopped'
+        : live
+            ? 'Live'
+            : error.isNotEmpty
+                ? 'Attention'
+                : 'Connecting';
+    final stateTone = stopped
+        ? MirpgStatusTone.neutral
+        : live
+            ? MirpgStatusTone.good
+            : error.isNotEmpty
+                ? MirpgStatusTone.error
+                : MirpgStatusTone.warning;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onOpen,
+        child: Column(
+          children: [
+            Expanded(
+              child: ColoredBox(
+                color: Colors.black,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (image != null)
+                      RawImage(
+                        image: image,
+                        fit: BoxFit.contain,
+                        filterQuality: FilterQuality.low,
+                      ),
+                    if (image == null && !stopped && error.isEmpty)
+                      const Center(
+                        child: Icon(Icons.live_tv_outlined,
+                            color: Color(0xFF69757A), size: 38),
+                      ),
+                    if (stopped)
+                      Center(
+                        child: FilledButton.icon(
                           onPressed: onOpen,
-                          icon: const Icon(Icons.open_in_full)),
-                  ])),
-            ])),
-      );
+                          icon: const Icon(Icons.power_settings_new_rounded),
+                          label: const Text('Boot'),
+                        ),
+                      )
+                    else if (error.isNotEmpty)
+                      Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: SingleChildScrollView(
+                            child: MirpgSurface(
+                              padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+                              color:
+                                  MirpgRemoteTheme.background.withOpacity(0.90),
+                              borderColor:
+                                  MirpgRemoteTheme.error.withOpacity(0.45),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    error,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center,
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                  TextButton(
+                                    onPressed: onRetry,
+                                    child: const Text('Retry preview'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    Positioned(
+                      left: 10,
+                      top: 10,
+                      child: MirpgStatusChip(
+                        label: type,
+                        icon: type == 'Windows'
+                            ? Icons.desktop_windows_outlined
+                            : Icons.android_outlined,
+                      ),
+                    ),
+                    Positioned(
+                      right: 10,
+                      top: 10,
+                      child: MirpgStatusChip(
+                        label: stateLabel,
+                        icon: live ? Icons.circle : null,
+                        tone: stateTone,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          stopped
+                              ? 'Ready to boot'
+                              : live
+                                  ? 'Tap to control'
+                                  : 'Waiting for a usable preview',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (onLaunchGame != null)
+                    TextButton.icon(
+                      onPressed: onLaunchGame,
+                      icon: const Icon(Icons.sports_esports_outlined, size: 18),
+                      label: const Text('Launch game'),
+                    ),
+                  if (!stopped)
+                    TextButton.icon(
+                      onPressed: onOpen,
+                      icon: Icon(type == 'Windows'
+                          ? Icons.open_in_full_rounded
+                          : Icons.play_arrow_rounded),
+                      label: Text(type == 'Windows' ? 'Open' : 'Resume'),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

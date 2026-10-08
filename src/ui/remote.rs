@@ -273,10 +273,18 @@ impl InvokeUiSession for SciterHandler {
         to: String,
         is_upload: bool,
         is_identical: bool,
+        conflict_token: String,
     ) {
         self.call(
             "overrideFileConfirm",
-            &make_args!(id, file_num, to, is_upload, is_identical),
+            &make_args!(
+                id,
+                file_num,
+                to,
+                is_upload,
+                is_identical,
+                conflict_token
+            ),
         );
     }
 
@@ -423,6 +431,10 @@ impl InvokeUiSession for SciterHandler {
 
     fn handle_codex_control_response(&self, _response: CodexControlResponse) {
         // Codex control UI is implemented only in Flutter/mobile.
+    }
+
+    fn handle_manual_clipboard_response(&self, _response: ManualClipboardResponse) {
+        // Manual directional clipboard UI is implemented only in Flutter/mobile.
     }
 }
 

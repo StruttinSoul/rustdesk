@@ -2906,6 +2906,11 @@ pub struct LoginConfigHandler {
     pub enable_trusted_devices: bool,
     pub record_state: bool,
     pub record_permission: bool,
+    // Sensitive host-control state belongs to the current authenticated
+    // session. Persisted peer preferences must never be treated as observed
+    // state or silently replayed after reconnect.
+    session_lock_after_session_end: bool,
+    session_privacy_mode: bool,
 }
 
 impl Deref for LoginConfigHandler {
@@ -2979,6 +2984,7 @@ impl LoginConfigHandler {
         let config = self.load_config();
         self.remember = !config.password.is_empty();
         self.config = config;
+        self.reset_sensitive_session_state();
 
         let conn_token = conn_token
             .map(|x| serde_json::from_str::<ConnToken>(&x).ok())
@@ -3263,8 +3269,8 @@ impl LoginConfigHandler {
             })
             .into();
         } else if name == "lock-after-session-end" {
-            config.lock_after_session_end.v = !config.lock_after_session_end.v;
-            option.lock_after_session_end = (if config.lock_after_session_end.v {
+            self.session_lock_after_session_end = !self.session_lock_after_session_end;
+            option.lock_after_session_end = (if self.session_lock_after_session_end {
                 BoolOption::Yes
             } else {
                 BoolOption::No
@@ -3280,7 +3286,7 @@ impl LoginConfigHandler {
             .into();
         } else if name == "privacy-mode" {
             // try toggle privacy mode
-            option.privacy_mode = (if config.privacy_mode.v {
+            option.privacy_mode = (if self.session_privacy_mode {
                 BoolOption::No
             } else {
                 BoolOption::Yes
@@ -3316,13 +3322,14 @@ impl LoginConfigHandler {
                 option.disable_clipboard = f(true);
                 option.show_remote_cursor = f(true);
                 option.enable_file_transfer = f(false);
+                self.session_lock_after_session_end = false;
                 option.lock_after_session_end = f(false);
             } else {
                 option.disable_keyboard = f(false);
                 option.disable_clipboard = f(self.get_toggle_option("disable-clipboard"));
                 option.show_remote_cursor = f(self.get_toggle_option("show-remote-cursor"));
                 option.enable_file_transfer = f(self.config.enable_file_copy_paste.v);
-                option.lock_after_session_end = f(self.config.lock_after_session_end.v);
+                option.lock_after_session_end = f(false);
                 if config.show_my_cursor.v {
                     config.show_my_cursor.v = false;
                     option.show_my_cursor = BoolOption::No.into();
@@ -3356,7 +3363,7 @@ impl LoginConfigHandler {
             crate::clipboard::try_empty_clipboard_files(crate::clipboard::ClipboardSide::Client, 0);
         }
 
-        if !name.contains("block-input") {
+        if !name.contains("block-input") && name != "lock-after-session-end" {
             self.save_config(config);
         }
         let mut misc = Misc::new();
@@ -3437,9 +3444,9 @@ impl LoginConfigHandler {
         if self.get_toggle_option("follow-remote-window") {
             msg.follow_remote_window = BoolOption::Yes.into();
         }
-        if !view_only && self.get_toggle_option("lock-after-session-end") {
-            msg.lock_after_session_end = BoolOption::Yes.into();
-        }
+        // Host lock-on-disconnect is session-scoped. Do not replay a saved
+        // preference into a newly authenticated session; the user must
+        // explicitly enable it for the current connection.
         if self.get_toggle_option("disable-audio") {
             msg.disable_audio = BoolOption::Yes.into();
         }
@@ -3498,11 +3505,11 @@ impl LoginConfigHandler {
         if name == "show-remote-cursor" {
             self.config.show_remote_cursor.v
         } else if name == "lock-after-session-end" {
-            self.config.lock_after_session_end.v
+            self.session_lock_after_session_end
         } else if name == keys::OPTION_TERMINAL_PERSISTENT {
             self.config.terminal_persistent.v
         } else if name == "privacy-mode" {
-            self.config.privacy_mode.v
+            self.session_privacy_mode
         } else if name == keys::OPTION_ENABLE_FILE_COPY_PASTE {
             self.config.enable_file_copy_paste.v
         } else if name == "disable-audio" {
@@ -3524,6 +3531,15 @@ impl LoginConfigHandler {
         } else {
             !self.get_option(name).is_empty()
         }
+    }
+
+    pub(crate) fn set_session_privacy_mode(&mut self, on: bool) {
+        self.session_privacy_mode = on;
+    }
+
+    pub(crate) fn reset_sensitive_session_state(&mut self) {
+        self.session_lock_after_session_end = false;
+        self.session_privacy_mode = false;
     }
 
     pub fn is_privacy_mode_supported(&self) -> bool {
@@ -4070,6 +4086,7 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    session.ui_handler.update_decoder_health(display, true);
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
@@ -4094,6 +4111,7 @@ pub fn start_video_thread<F, T>(
                                     );
                                 }
                                 Err(e) => {
+                                    session.ui_handler.update_decoder_health(display, false);
                                     // This is a simple workaround.
                                     //
                                     // I only see the following error:
@@ -4988,13 +5006,24 @@ pub enum Data {
     RemoveFile((i32, String, i32, bool)),
     CreateDir((i32, String, bool)),
     CancelJob(i32),
+    PauseJob(i32),
     RemovePortForward(i32),
     AddPortForward((i32, String, i32)),
     #[cfg(all(target_os = "windows", not(feature = "flutter")))]
     ToggleClipboardFile,
     NewRDP,
-    SetConfirmOverrideFile((i32, i32, bool, bool, bool)),
-    AddJob((i32, JobType, String, String, i32, bool, bool)),
+    SetConfirmOverrideFile((i32, i32, bool, bool, bool, String)),
+    SetConfirmKeepBothFile((i32, i32, bool, String)),
+    AddJob((
+        i32,
+        JobType,
+        String,
+        String,
+        i32,
+        bool,
+        bool,
+        Option<String>,
+    )),
     ResumeJob((i32, bool)),
     RecordScreen(bool),
     ElevateDirect,
@@ -5220,6 +5249,52 @@ mod port_forward_mux_tests {
         assert!(!asks(&lc));
         lc.port_forward_multiplex = true;
         assert!(asks(&lc));
+    }
+}
+
+#[cfg(test)]
+mod sensitive_session_option_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_sensitive_preferences_are_not_runtime_state() {
+        let mut lc = LoginConfigHandler::default();
+        lc.config.lock_after_session_end.v = true;
+        lc.config.privacy_mode.v = true;
+
+        assert!(!lc.get_toggle_option("lock-after-session-end"));
+        assert!(!lc.get_toggle_option("privacy-mode"));
+    }
+
+    #[test]
+    fn lock_after_session_end_is_explicit_and_session_local() {
+        let mut lc = LoginConfigHandler::default();
+        lc.id = "wp11-sensitive-session-options-test".to_owned();
+        lc.config.lock_after_session_end.v = true;
+
+        assert!(lc.toggle_option("lock-after-session-end".to_owned()).is_some());
+        assert!(lc.get_toggle_option("lock-after-session-end"));
+        assert!(lc.config.lock_after_session_end.v);
+
+        assert!(lc.toggle_option("lock-after-session-end".to_owned()).is_some());
+        assert!(!lc.get_toggle_option("lock-after-session-end"));
+        assert!(lc.config.lock_after_session_end.v);
+    }
+
+    #[test]
+    fn sensitive_runtime_state_is_cleared_for_a_new_connection_round() {
+        let mut lc = LoginConfigHandler::default();
+        lc.id = "wp11-sensitive-session-reset-test".to_owned();
+
+        assert!(lc.toggle_option("lock-after-session-end".to_owned()).is_some());
+        lc.set_session_privacy_mode(true);
+        assert!(lc.get_toggle_option("lock-after-session-end"));
+        assert!(lc.get_toggle_option("privacy-mode"));
+
+        lc.reset_sensitive_session_state();
+
+        assert!(!lc.get_toggle_option("lock-after-session-end"));
+        assert!(!lc.get_toggle_option("privacy-mode"));
     }
 }
 

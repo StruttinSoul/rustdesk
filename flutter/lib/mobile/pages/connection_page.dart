@@ -16,6 +16,7 @@ import '../../common/widgets/autocomplete.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
+import '../widgets/mirpg_remote_theme.dart';
 import 'home_page.dart';
 
 /// Connection page for connecting to a remote peer.
@@ -86,14 +87,42 @@ class _ConnectionPageState extends State<ConnectionPage> {
             delegate: SliverChildListDelegate([
           if (!bind.isCustomClient() && !isIOS)
             Obx(() => _buildUpdateUI(stateGlobal.updateUrl.value)),
-          _buildRemoteIDTextField(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                MirpgRemoteTheme.pageMargin, 8, MirpgRemoteTheme.pageMargin, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const MirpgSectionHeader(
+                  title: 'Connect to a computer',
+                  subtitle:
+                      'Enter an ID or search a computer you have used before.',
+                ),
+                const SizedBox(height: 10),
+                _buildRemoteIDTextField(),
+                const SizedBox(height: 20),
+                const MirpgSectionHeader(
+                  title: 'Your computers',
+                  subtitle: 'Saved and recent connections',
+                ),
+                const SizedBox(height: 10),
+              ],
+            ),
+          ),
         ])),
-        SliverFillRemaining(
-          hasScrollBody: true,
-          child: PeerTabPage(),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(MirpgRemoteTheme.pageMargin, 0,
+              MirpgRemoteTheme.pageMargin, MirpgRemoteTheme.pageMargin),
+          sliver: SliverFillRemaining(
+            hasScrollBody: true,
+            child: MirpgSurface(
+              padding: const EdgeInsets.fromLTRB(10, 12, 10, 8),
+              child: PeerTabPage(),
+            ),
+          ),
         )
       ],
-    ).marginOnly(top: 2, left: 10, right: 10);
+    );
   }
 
   /// Callback for the connect button.
@@ -138,213 +167,208 @@ class _ConnectionPageState extends State<ConnectionPage> {
             child: Container(
                 alignment: AlignmentDirectional.center,
                 width: double.infinity,
-                color: Colors.pinkAccent,
-                padding: const EdgeInsets.symmetric(vertical: 12),
+                color: MirpgRemoteTheme.warning.withOpacity(0.12),
+                padding:
+                    const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
                 child: Text(translate('Download new version'),
-                    style: const TextStyle(
-                        color: Colors.white, fontWeight: FontWeight.bold))));
+                    style: Theme.of(context)
+                        .textTheme
+                        .labelLarge
+                        ?.copyWith(color: MirpgRemoteTheme.warning))));
   }
 
   /// UI for the remote ID TextField.
   /// Search for a peer and connect to it if the id exists.
   Widget _buildRemoteIDTextField() {
     final w = SizedBox(
-      height: 84,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
-        child: Ink(
-          decoration: BoxDecoration(
-            color: Theme.of(context).cardColor,
-            borderRadius: BorderRadius.all(Radius.circular(13)),
-          ),
-          child: Row(
-            children: <Widget>[
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.only(left: 16, right: 16),
-                  child: RawAutocomplete<Peer>(
-                    optionsBuilder: (TextEditingValue textEditingValue) {
-                      if (textEditingValue.text == '') {
-                        _autocompleteOpts = const Iterable<Peer>.empty();
-                      } else if (_allPeersLoader.peers.isEmpty &&
-                          !_allPeersLoader.isPeersLoaded) {
-                        Peer emptyPeer = Peer(
-                          id: '',
-                          username: '',
-                          hostname: '',
-                          alias: '',
-                          platform: '',
-                          tags: [],
-                          hash: '',
-                          password: '',
-                          forceAlwaysRelay: false,
-                          rdpPort: '',
-                          rdpUsername: '',
-                          loginName: '',
-                          device_group_name: '',
-                          note: '',
-                        );
-                        _autocompleteOpts = [emptyPeer];
-                      } else {
-                        String textWithoutSpaces =
-                            textEditingValue.text.replaceAll(" ", "");
-                        if (int.tryParse(textWithoutSpaces) != null) {
-                          textEditingValue = TextEditingValue(
-                            text: textWithoutSpaces,
-                            selection: textEditingValue.selection,
-                          );
-                        }
-                        String textToFind = textEditingValue.text.toLowerCase();
-
-                        _autocompleteOpts = _allPeersLoader.peers
-                            .where((peer) =>
-                                peer.id.toLowerCase().contains(textToFind) ||
-                                peer.username
-                                    .toLowerCase()
-                                    .contains(textToFind) ||
-                                peer.hostname
-                                    .toLowerCase()
-                                    .contains(textToFind) ||
-                                peer.alias.toLowerCase().contains(textToFind))
-                            .toList();
-                        _allPeersLoader.queryOnlines(_autocompleteOpts);
-                      }
-                      return _autocompleteOpts;
-                    },
-                    focusNode: _idFocusNode,
-                    textEditingController: _idEditingController,
-                    fieldViewBuilder: (BuildContext context,
-                        TextEditingController fieldTextEditingController,
-                        FocusNode fieldFocusNode,
-                        VoidCallback onFieldSubmitted) {
-                      updateTextAndPreserveSelection(
-                          fieldTextEditingController, _idController.text);
-                      return AutoSizeTextField(
-                        controller: fieldTextEditingController,
-                        focusNode: fieldFocusNode,
-                        minFontSize: 18,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        keyboardType: TextInputType.visiblePassword,
-                        // keyboardType: TextInputType.number,
-                        onChanged: (String text) {
-                          _idController.id = text;
-                        },
-                        style: const TextStyle(
-                          fontFamily: 'WorkSans',
-                          fontWeight: FontWeight.bold,
-                          fontSize: 30,
-                          color: MyTheme.idColor,
-                        ),
-                        decoration: InputDecoration(
-                          labelText: translate('Remote ID'),
-                          // hintText: 'Enter your remote ID',
-                          border: InputBorder.none,
-                          helperStyle: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                            color: MyTheme.darkGray,
-                          ),
-                          labelStyle: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 16,
-                            letterSpacing: 0.2,
-                            color: MyTheme.darkGray,
-                          ),
-                        ),
-                        inputFormatters: [IDTextInputFormatter()],
-                        onSubmitted: (_) {
-                          onConnect();
-                        },
+      height: 72,
+      child: MirpgSurface(
+        padding: const EdgeInsets.fromLTRB(4, 4, 6, 4),
+        radius: MirpgRemoteTheme.controlRadius,
+        child: Row(
+          children: <Widget>[
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.only(left: 12, right: 8),
+                child: RawAutocomplete<Peer>(
+                  optionsBuilder: (TextEditingValue textEditingValue) {
+                    if (textEditingValue.text == '') {
+                      _autocompleteOpts = const Iterable<Peer>.empty();
+                    } else if (_allPeersLoader.peers.isEmpty &&
+                        !_allPeersLoader.isPeersLoaded) {
+                      Peer emptyPeer = Peer(
+                        id: '',
+                        username: '',
+                        hostname: '',
+                        alias: '',
+                        platform: '',
+                        tags: [],
+                        hash: '',
+                        password: '',
+                        forceAlwaysRelay: false,
+                        rdpPort: '',
+                        rdpUsername: '',
+                        loginName: '',
+                        device_group_name: '',
+                        note: '',
                       );
-                    },
-                    onSelected: (option) {
-                      setState(() {
-                        _idController.id = option.id;
-                        FocusScope.of(context).unfocus();
-                      });
-                    },
-                    optionsViewBuilder: (BuildContext context,
-                        AutocompleteOnSelected<Peer> onSelected,
-                        Iterable<Peer> options) {
-                      options = _autocompleteOpts;
-                      double maxHeight = options.length * 50;
-                      if (options.length == 1) {
-                        maxHeight = 52;
-                      } else if (options.length == 3) {
-                        maxHeight = 146;
-                      } else if (options.length == 4) {
-                        maxHeight = 193;
+                      _autocompleteOpts = [emptyPeer];
+                    } else {
+                      String textWithoutSpaces =
+                          textEditingValue.text.replaceAll(" ", "");
+                      if (int.tryParse(textWithoutSpaces) != null) {
+                        textEditingValue = TextEditingValue(
+                          text: textWithoutSpaces,
+                          selection: textEditingValue.selection,
+                        );
                       }
-                      maxHeight = maxHeight.clamp(0, 200);
-                      return Align(
-                          alignment: Alignment.topLeft,
-                          child: Container(
-                              decoration: BoxDecoration(
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withOpacity(0.3),
-                                    blurRadius: 5,
-                                    spreadRadius: 1,
-                                  ),
-                                ],
-                              ),
-                              child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(5),
-                                  child: Material(
-                                      elevation: 4,
-                                      child: ConstrainedBox(
-                                          constraints: BoxConstraints(
-                                            maxHeight: maxHeight,
-                                            maxWidth: 320,
-                                          ),
-                                          child: _allPeersLoader
-                                                      .peers.isEmpty &&
-                                                  !_allPeersLoader.isPeersLoaded
-                                              ? Container(
-                                                  height: 80,
-                                                  child: Center(
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                    strokeWidth: 2,
-                                                  )))
-                                              : ListView(
-                                                  padding:
-                                                      EdgeInsets.only(top: 5),
-                                                  children: options
-                                                      .map((peer) =>
-                                                          AutocompletePeerTile(
-                                                              onSelect: () =>
-                                                                  onSelected(
-                                                                      peer),
-                                                              peer: peer))
-                                                      .toList(),
-                                                ))))));
-                    },
+                      String textToFind = textEditingValue.text.toLowerCase();
+
+                      _autocompleteOpts = _allPeersLoader.peers
+                          .where((peer) =>
+                              peer.id.toLowerCase().contains(textToFind) ||
+                              peer.username
+                                  .toLowerCase()
+                                  .contains(textToFind) ||
+                              peer.hostname
+                                  .toLowerCase()
+                                  .contains(textToFind) ||
+                              peer.alias.toLowerCase().contains(textToFind))
+                          .toList();
+                      _allPeersLoader.queryOnlines(_autocompleteOpts);
+                    }
+                    return _autocompleteOpts;
+                  },
+                  focusNode: _idFocusNode,
+                  textEditingController: _idEditingController,
+                  fieldViewBuilder: (BuildContext context,
+                      TextEditingController fieldTextEditingController,
+                      FocusNode fieldFocusNode,
+                      VoidCallback onFieldSubmitted) {
+                    updateTextAndPreserveSelection(
+                        fieldTextEditingController, _idController.text);
+                    return AutoSizeTextField(
+                      controller: fieldTextEditingController,
+                      focusNode: fieldFocusNode,
+                      minFontSize: 15,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      keyboardType: TextInputType.visiblePassword,
+                      onChanged: (String text) {
+                        _idController.id = text;
+                      },
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w500,
+                          ),
+                      decoration: const InputDecoration(
+                        labelText: 'Computer ID',
+                        hintText: 'Enter ID',
+                        filled: false,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        contentPadding: EdgeInsets.symmetric(vertical: 8),
+                      ),
+                      inputFormatters: [IDTextInputFormatter()],
+                      onSubmitted: (_) {
+                        onConnect();
+                      },
+                    );
+                  },
+                  onSelected: (option) {
+                    setState(() {
+                      _idController.id = option.id;
+                      FocusScope.of(context).unfocus();
+                    });
+                  },
+                  optionsViewBuilder: (BuildContext context,
+                      AutocompleteOnSelected<Peer> onSelected,
+                      Iterable<Peer> options) {
+                    options = _autocompleteOpts;
+                    double maxHeight = options.length * 50;
+                    if (options.length == 1) {
+                      maxHeight = 52;
+                    } else if (options.length == 3) {
+                      maxHeight = 146;
+                    } else if (options.length == 4) {
+                      maxHeight = 193;
+                    }
+                    maxHeight = maxHeight.clamp(0, 200);
+                    return Align(
+                        alignment: Alignment.topLeft,
+                        child: Container(
+                            decoration: BoxDecoration(
+                              color: MirpgRemoteTheme.raised,
+                              borderRadius: BorderRadius.circular(
+                                  MirpgRemoteTheme.controlRadius),
+                              border:
+                                  Border.all(color: MirpgRemoteTheme.outline),
+                            ),
+                            child: ClipRRect(
+                                borderRadius: BorderRadius.circular(
+                                    MirpgRemoteTheme.controlRadius),
+                                child: Material(
+                                    color: MirpgRemoteTheme.raised,
+                                    elevation: 0,
+                                    child: ConstrainedBox(
+                                        constraints: BoxConstraints(
+                                          maxHeight: maxHeight,
+                                          maxWidth: 320,
+                                        ),
+                                        child: _allPeersLoader.peers.isEmpty &&
+                                                !_allPeersLoader.isPeersLoaded
+                                            ? const SizedBox(
+                                                height: 80,
+                                                child: Center(
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                )))
+                                            : ListView(
+                                                padding: const EdgeInsets.only(
+                                                    top: 5),
+                                                children: options
+                                                    .map((peer) =>
+                                                        AutocompletePeerTile(
+                                                            onSelect: () =>
+                                                                onSelected(
+                                                                    peer),
+                                                            peer: peer))
+                                                    .toList(),
+                                              ))))));
+                  },
+                ),
+              ),
+            ),
+            Obx(() => Offstage(
+                  offstage: _idEmpty.value,
+                  child: IconButton(
+                      tooltip: 'Clear',
+                      onPressed: () {
+                        setState(() {
+                          _idController.clear();
+                        });
+                      },
+                      icon: const Icon(Icons.close,
+                          color: MirpgRemoteTheme.textSecondary)),
+                )),
+            SizedBox(
+              width: 52,
+              height: 52,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(
+                        MirpgRemoteTheme.controlRadius - 2),
                   ),
                 ),
+                onPressed: onConnect,
+                child: const Icon(Icons.arrow_forward_rounded),
               ),
-              Obx(() => Offstage(
-                    offstage: _idEmpty.value,
-                    child: IconButton(
-                        onPressed: () {
-                          setState(() {
-                            _idController.clear();
-                          });
-                        },
-                        icon: Icon(Icons.clear, color: MyTheme.darkGray)),
-                  )),
-              SizedBox(
-                width: 60,
-                height: 60,
-                child: IconButton(
-                  icon: const Icon(Icons.arrow_forward,
-                      color: MyTheme.darkGray, size: 45),
-                  onPressed: onConnect,
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

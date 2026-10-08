@@ -56,7 +56,7 @@ use scrap::camera;
 use serde_derive::Serialize;
 use serde_json::{json, value::Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv6Addr},
     num::NonZeroI64,
     path::PathBuf,
@@ -88,6 +88,10 @@ const ID_WHITELIST_FAILURE_DECAY_MINUTES: i32 = 10;
 /// credential prompt still unanswered. The controller reconnects on its own and the prompt
 /// comes back. A connection that says nothing at all goes at the 30 s idle timeout already.
 const LOGIN_GRACE: Duration = Duration::from_secs(180);
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+// WP2 empirical safety default, aligned with the client transport liveness
+// window. Healthy sessions normally exchange liveness traffic every second.
+const HELD_INPUT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(6);
 /// Connections between accept and authorization, across every transport: the resource bound.
 /// At this many a further arrival is refused and the oldest is told to go, one at a time.
 const MAX_UNAUTHORIZED_CONNS: usize = 64;
@@ -267,6 +271,50 @@ enum MessageInput {
     BlockOff,
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct HeldKeyIdentity {
+    mode: i32,
+    kind: u8,
+    value: u32,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn held_key_identity(evt: &KeyEvent) -> Option<HeldKeyIdentity> {
+    let (kind, value) = match evt.union.as_ref()? {
+        key_event::Union::ControlKey(key) => (0, key.value() as u32),
+        key_event::Union::Chr(value) => (1, *value),
+        key_event::Union::Win2winHotkey(value) => (2, *value),
+        key_event::Union::Unicode(_) | key_event::Union::Seq(_) => return None,
+        _ => return None,
+    };
+    Some(HeldKeyIdentity {
+        mode: evt.mode.value(),
+        kind,
+        value,
+    })
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn held_mouse_button(mask: i32) -> Option<(i32, bool)> {
+    let event_type = mask & crate::input::MOUSE_TYPE_MASK;
+    if event_type != crate::input::MOUSE_TYPE_DOWN && event_type != crate::input::MOUSE_TYPE_UP {
+        return None;
+    }
+    let button = mask >> 3;
+    if !matches!(
+        button,
+        crate::input::MOUSE_BUTTON_LEFT
+            | crate::input::MOUSE_BUTTON_RIGHT
+            | crate::input::MOUSE_BUTTON_WHEEL
+            | crate::input::MOUSE_BUTTON_BACK
+            | crate::input::MOUSE_BUTTON_FORWARD
+    ) {
+        return None;
+    }
+    Some((button, event_type == crate::input::MOUSE_TYPE_DOWN))
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct SessionKey {
     peer_id: String,
@@ -381,13 +429,26 @@ pub struct Connection {
     #[cfg(windows)]
     emulator_session: Option<super::emulator::remote_windows::GuestSession>,
     #[cfg(windows)]
+    emulator_input_watchdog_released: bool,
+    #[cfg(windows)]
     emulator_tx: mpsc::Sender<super::emulator::remote::GuestEvent>,
     #[cfg(windows)]
     emulator_desktop_services: Vec<String>,
     #[cfg(windows)]
-    emulator_previews: std::collections::BTreeMap<String, super::emulator::remote_windows::GuestSession>,
+    emulator_previews:
+        std::collections::BTreeMap<String, super::emulator::remote_windows::GuestSession>,
     #[cfg(windows)]
     emulator_dashboard: bool,
+    #[cfg(windows)]
+    emulator_operation_identity: String,
+    #[cfg(windows)]
+    emulator_operation_generation: u64,
+    #[cfg(windows)]
+    emulator_operation_replay: super::emulator::remote::HostOperationReplay,
+    #[cfg(windows)]
+    codex_operation_identity: String,
+    #[cfg(windows)]
+    codex_operation_generation: u64,
     clipboard: bool,
     audio: bool,
     file: bool,
@@ -439,6 +500,12 @@ pub struct Connection {
     options_in_login: Option<OptionMessage>,
     #[cfg(not(any(target_os = "ios")))]
     pressed_modifiers: HashSet<rdev::Key>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    held_keys: HashMap<HeldKeyIdentity, KeyEvent>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pressed_mouse_buttons: HashSet<i32>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pointer_scale_active: bool,
     closed: bool,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_cm_ipc_para: Option<StartCmIpcPara>,
@@ -465,6 +532,12 @@ pub struct Connection {
     // Used to filter stale responses (FileBlockFromCM, FileReadDone, etc.) for
     // cancelled or unknown jobs.
     cm_read_job_ids: HashSet<i32>,
+    // Tracks CM-owned destination writers so cancel can wait for the writer to
+    // be detached before acknowledging the network request.
+    cm_write_job_ids: HashSet<i32>,
+    // Once cancel is requested, late/in-flight blocks for that job are not
+    // forwarded to CM while the detach barrier is pending.
+    pending_file_cancel_ids: HashMap<i32, u64>,
     terminal_service_id: String,
     terminal_persistent: bool,
     // Used to avoid too many repeated scope violation warnings.
@@ -564,7 +637,8 @@ impl Connection {
         let (tx_to_cm, rx_to_cm) = mpsc::unbounded_channel::<ipc::Data>();
         let (tx, mut rx) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
         let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
-        let (_emulator_tx, mut emulator_rx) = mpsc::channel::<super::emulator::remote::GuestEvent>(2);
+        let (_emulator_tx, mut emulator_rx) =
+            mpsc::channel::<super::emulator::remote::GuestEvent>(2);
         let (tx_input, _rx_input) = std_mpsc::channel();
         let (tx_from_authed, mut rx_from_authed) = mpsc::unbounded_channel::<ipc::Data>();
         let mut hbbs_rx = crate::hbbs_http::sync::signal_receiver();
@@ -605,6 +679,8 @@ impl Connection {
             #[cfg(windows)]
             emulator_session: None,
             #[cfg(windows)]
+            emulator_input_watchdog_released: false,
+            #[cfg(windows)]
             emulator_tx: _emulator_tx,
             #[cfg(windows)]
             emulator_desktop_services: Vec::new(),
@@ -612,6 +688,16 @@ impl Connection {
             emulator_previews: Default::default(),
             #[cfg(windows)]
             emulator_dashboard: false,
+            #[cfg(windows)]
+            emulator_operation_identity: uuid::Uuid::new_v4().to_string(),
+            #[cfg(windows)]
+            emulator_operation_generation: 1,
+            #[cfg(windows)]
+            emulator_operation_replay: Default::default(),
+            #[cfg(windows)]
+            codex_operation_identity: uuid::Uuid::new_v4().to_string(),
+            #[cfg(windows)]
+            codex_operation_generation: 1,
             clipboard: Self::permission(keys::OPTION_ENABLE_CLIPBOARD, &control_permissions),
             audio: Self::permission(keys::OPTION_ENABLE_AUDIO, &control_permissions),
             // to-do: make sure is the option correct here
@@ -656,6 +742,12 @@ impl Connection {
             options_in_login: None,
             #[cfg(not(any(target_os = "ios")))]
             pressed_modifiers: Default::default(),
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            held_keys: Default::default(),
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            pressed_mouse_buttons: Default::default(),
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            pointer_scale_active: false,
             closed: false,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             start_cm_ipc_para: Some(StartCmIpcPara {
@@ -674,6 +766,8 @@ impl Connection {
             printer_data: Vec::new(),
             tx_post_seq,
             cm_read_job_ids: HashSet::new(),
+            cm_write_job_ids: HashSet::new(),
+            pending_file_cancel_ids: HashMap::new(),
             terminal_service_id: "".to_owned(),
             terminal_persistent: false,
             scope_violation_messages: HashSet::new(),
@@ -822,6 +916,10 @@ impl Connection {
                         ipc::Data::SwitchPermission{name, enabled} => {
                             log::info!("Change permission {} -> {}", name, enabled);
                             if &name == "keyboard" {
+                                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                                if !enabled {
+                                    conn.release_held_input();
+                                }
                                 conn.keyboard = enabled;
                                 conn.send_permission(Permission::Keyboard, enabled).await;
                                 #[cfg(windows)]
@@ -1030,14 +1128,61 @@ impl Connection {
                                 conn.handle_file_read_error(id, file_num, err).await;
                             }
                         }
-                        ipc::Data::FileDigestFromCM { id, file_num, last_modified, file_size, is_resume, conn_id } => {
+                        ipc::Data::FileDigestFromCM { id, file_num, last_modified, file_size, content_sha256, is_resume, conn_id } => {
                             if conn_id == conn.inner.id() {
-                                conn.handle_file_digest_from_cm(id, file_num, last_modified, file_size, is_resume).await;
+                                conn.handle_file_digest_from_cm(
+                                    id,
+                                    file_num,
+                                    last_modified,
+                                    file_size,
+                                    content_sha256,
+                                    is_resume,
+                                ).await;
                             }
                         }
                         ipc::Data::AllFilesResult { id, conn_id, path, result } => {
                             if conn_id == conn.inner.id() {
                                 conn.handle_all_files_result(id, path, result).await;
+                            }
+                        }
+                        ipc::Data::FilePauseResult { id, conn_id, request_id, accepted, error } => {
+                            if conn_id == conn.inner.id() {
+                                if accepted {
+                                    conn.cm_read_job_ids.remove(&id);
+                                }
+                                conn.send_file_pause_response(id, request_id, accepted, error).await;
+                            }
+                        }
+                        ipc::Data::FileCancelResult { id, conn_id, request_id, accepted, error } => {
+                            if conn_id == conn.inner.id() {
+                                let matches_request = conn
+                                    .pending_file_cancel_ids
+                                    .get(&id)
+                                    .copied()
+                                    == Some(request_id);
+                                if matches_request {
+                                    conn.pending_file_cancel_ids.remove(&id);
+                                    conn.cm_read_job_ids.remove(&id);
+                                    conn.cm_write_job_ids.remove(&id);
+                                    conn.send_file_cancel_response(
+                                        id,
+                                        request_id,
+                                        accepted,
+                                        error,
+                                    )
+                                    .await;
+                                } else {
+                                    log::warn!(
+                                        "Ignoring stale file-cancel result for job {}, request {}",
+                                        id,
+                                        request_id
+                                    );
+                                }
+                            }
+                        }
+                        ipc::Data::FileWriteTerminal { id, conn_id } => {
+                            if conn_id == conn.inner.id() {
+                                conn.cm_write_job_ids.remove(&id);
                             }
                         }
                         _ => {}
@@ -1052,6 +1197,10 @@ impl Connection {
                             },
                             Ok(bytes) => {
                                 last_recv_time = Instant::now();
+                                #[cfg(windows)]
+                                {
+                                    conn.emulator_input_watchdog_released = false;
+                                }
                                 conn.session_last_recv_time.as_mut().map(|t| *t.lock().unwrap() = Instant::now());
                                 if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
                                     if !conn.on_message(msg_in).await {
@@ -1195,6 +1344,25 @@ impl Connection {
                 _ = second_timer.tick() => {
                     #[cfg(windows)]
                     conn.portable_check();
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    if conn.has_held_input()
+                        && last_recv_time.elapsed() >= HELD_INPUT_LIVENESS_TIMEOUT
+                    {
+                        conn.release_held_input();
+                    }
+                    #[cfg(windows)]
+                    if !conn.emulator_input_watchdog_released
+                        && last_recv_time.elapsed() >= HELD_INPUT_LIVENESS_TIMEOUT
+                    {
+                        if let Some(session) = conn.emulator_session.as_ref() {
+                            match session.release_input() {
+                                Ok(()) => conn.emulator_input_watchdog_released = true,
+                                Err(error) => log::trace!(
+                                    "Guest input liveness release deferred: {error}"
+                                ),
+                            }
+                        }
+                    }
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
                     if let Some((instant, minute)) = conn.auto_disconnect_timer.as_ref() {
                         if instant.elapsed().as_secs() > minute * 60 {
@@ -1315,8 +1483,13 @@ impl Connection {
                         let (ok, msg) = crate::platform::block_input(true);
                         if ok {
                             block_input_mode = true;
+                            Self::send_block_input_state(
+                                &tx,
+                                back_notification::BlockInputState::BlkOnSucceeded,
+                                String::new(),
+                            );
                         } else {
-                            Self::send_block_input_error(
+                            Self::send_block_input_state(
                                 &tx,
                                 back_notification::BlockInputState::BlkOnFailed,
                                 msg,
@@ -1327,8 +1500,13 @@ impl Connection {
                         let (ok, msg) = crate::platform::block_input(false);
                         if ok {
                             block_input_mode = false;
+                            Self::send_block_input_state(
+                                &tx,
+                                back_notification::BlockInputState::BlkOffSucceeded,
+                                String::new(),
+                            );
                         } else {
-                            Self::send_block_input_error(
+                            Self::send_block_input_state(
                                 &tx,
                                 back_notification::BlockInputState::BlkOffFailed,
                                 msg,
@@ -1336,13 +1514,16 @@ impl Connection {
                         }
                     }
                 },
-                Err(err) => {
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {
                     if block_input_mode {
                         let _ = crate::platform::block_input(true);
                     }
-                    if std_mpsc::RecvTimeoutError::Disconnected == err {
-                        break;
+                }
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                    if block_input_mode {
+                        let _ = crate::platform::block_input(false);
                     }
+                    break;
                 }
             }
         }
@@ -2123,6 +2304,11 @@ impl Connection {
             target_dashboard: self.is_remote(),
             #[cfg(windows)]
             host_management: self.is_remote(),
+            #[cfg(windows)]
+            manual_clipboard: self.is_remote(),
+            file_pause: self.is_remote() || self.file_transfer.is_some(),
+            file_keep_both: self.is_remote() || self.file_transfer.is_some(),
+            file_cancel_ack: self.is_remote() || self.file_transfer.is_some(),
             ..Default::default()
         })
         .into();
@@ -2431,6 +2617,46 @@ impl Connection {
         self.send_to_cm(ipc::Data::FS(data));
     }
 
+    async fn send_file_pause_response(
+        &mut self,
+        id: i32,
+        request_id: u64,
+        accepted: bool,
+        error: String,
+    ) {
+        let mut response = FileResponse::new();
+        response.set_pause(FileTransferPauseResponse {
+            id,
+            accepted,
+            error,
+            request_id,
+            ..Default::default()
+        });
+        let mut message = Message::new();
+        message.set_file_response(response);
+        self.send(message).await;
+    }
+
+    async fn send_file_cancel_response(
+        &mut self,
+        id: i32,
+        request_id: u64,
+        accepted: bool,
+        error: String,
+    ) {
+        let mut response = FileResponse::new();
+        response.set_cancel(FileTransferCancelResponse {
+            id,
+            accepted,
+            error,
+            request_id,
+            ..Default::default()
+        });
+        let mut message = Message::new();
+        message.set_file_response(response);
+        self.send(message).await;
+    }
+
     async fn send_login_error<T: std::string::ToString>(&mut self, err: T) {
         let mut msg_out = Message::new();
         let mut res = LoginResponse::new();
@@ -2443,7 +2669,7 @@ impl Connection {
     }
 
     #[inline]
-    pub fn send_block_input_error(
+    pub fn send_block_input_state(
         s: &Sender,
         state: back_notification::BlockInputState,
         details: String,
@@ -2750,6 +2976,16 @@ impl Connection {
         self.terminal = false;
         self.port_forward_address.clear();
         self.terminal_persistent = false;
+        #[cfg(windows)]
+        {
+            self.emulator_operation_identity = uuid::Uuid::new_v4().to_string();
+            self.emulator_operation_generation =
+                self.emulator_operation_generation.wrapping_add(1).max(1);
+            self.emulator_operation_replay = Default::default();
+            self.codex_operation_identity = uuid::Uuid::new_v4().to_string();
+            self.codex_operation_generation =
+                self.codex_operation_generation.wrapping_add(1).max(1);
+        }
     }
 
     // Approval and whitelist decisions must stay bound to the same controller identity and
@@ -2890,9 +3126,14 @@ impl Connection {
 
     async fn on_emulator_event(&mut self, event: super::emulator::remote::GuestEvent) -> bool {
         #[cfg(windows)]
-        { self.handle_emulator_event(event).await }
+        {
+            self.handle_emulator_event(event).await
+        }
         #[cfg(not(windows))]
-        { let _ = event; true }
+        {
+            let _ = event;
+            true
+        }
     }
 
     async fn on_message(&mut self, msg: Message) -> bool {
@@ -2918,7 +3159,69 @@ impl Connection {
             return self.on_emulator_request(request.clone()).await;
         }
         #[cfg(windows)]
-        if self.emulator_session.is_some() && super::emulator::remote::blocks_desktop_message(&msg) {
+        if let Some(message::Union::ManualClipboardRequest(request)) = msg.union.as_ref() {
+            if !self.is_authed_remote_conn() {
+                return true;
+            }
+            let request = request.clone();
+            let direction = request.direction.enum_value_or_default();
+            let one_way_host_input_only =
+                crate::get_builtin_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION) == "Y";
+            if one_way_host_input_only
+                && direction
+                    == base::message_proto::ManualClipboardDirection::ManualClipboardHostToPhone
+            {
+                let response = base::message_proto::ManualClipboardResponse {
+                    request_id: request.request_id.clone(),
+                    direction: request.direction,
+                    accepted: false,
+                    applied: false,
+                    error_code: "clipboard_direction_denied".to_owned(),
+                    error: "PC clipboard export is disabled by one-way clipboard policy".to_owned(),
+                    target_identity: request.target_identity.clone(),
+                    ..Default::default()
+                };
+                let mut message = Message::new();
+                message.set_manual_clipboard_response(response);
+                self.send(message).await;
+                return true;
+            }
+            let clipboard_allowed = super::manual_clipboard::manual_clipboard_allowed(
+                self.clipboard_enabled(),
+                self.disable_keyboard,
+            );
+            let request_for_failure = request.clone();
+            let response = match hbb_common::tokio::task::spawn_blocking(move || {
+                super::manual_clipboard::handle_manual_clipboard_request_with(
+                    request,
+                    clipboard_allowed,
+                    super::manual_clipboard::read_host_text,
+                    super::manual_clipboard::write_host_text,
+                )
+            })
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    let mut response = base::message_proto::ManualClipboardResponse {
+                        request_id: request_for_failure.request_id,
+                        direction: request_for_failure.direction,
+                        target_identity: request_for_failure.target_identity,
+                        ..Default::default()
+                    };
+                    response.error_code = "clipboard_worker_failed".to_owned();
+                    response.error = format!("Clipboard worker failed: {error}");
+                    response
+                }
+            };
+            let mut message = Message::new();
+            message.set_manual_clipboard_response(response);
+            self.send(message).await;
+            return true;
+        }
+        #[cfg(windows)]
+        if self.emulator_session.is_some() && super::emulator::remote::blocks_desktop_message(&msg)
+        {
             return true;
         }
         // After handling CloseReason messages, proceed to process other message types
@@ -3220,6 +3523,7 @@ impl Connection {
                     }
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     if self.peer_keyboard_enabled() {
+                        self.track_held_mouse_button(&me);
                         if is_left_up(&me) {
                             CLICK_TIME.store(get_time(), Ordering::SeqCst);
                         } else {
@@ -3283,6 +3587,7 @@ impl Connection {
                     }
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     if self.peer_keyboard_enabled() {
+                        self.track_pointer_contact(&pde);
                         MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
                         self.input_pointer(pde, self.inner.id());
                     }
@@ -3351,6 +3656,7 @@ impl Connection {
                         return true;
                     }
                     if self.peer_keyboard_enabled() {
+                        self.track_held_key(&me);
                         if is_enter(&me) {
                             CLICK_TIME.store(get_time(), Ordering::SeqCst);
                         }
@@ -3681,6 +3987,8 @@ impl Connection {
                             Some(file_action::Union::Send(s)) => {
                                 // server to client
                                 let id = s.id;
+                                self.pending_file_cancel_ids.remove(&id);
+                                self.cm_write_job_ids.remove(&id);
                                 let path = s.path.clone();
                                 let job_type = JobType::from_proto(s.file_type);
                                 match job_type {
@@ -3753,6 +4061,9 @@ impl Connection {
                                 let od = can_enable_overwrite_detection(get_version_number(
                                     &self.lr.version,
                                 ));
+                                self.pending_file_cancel_ids.remove(&r.id);
+                                self.cm_read_job_ids.remove(&r.id);
+                                self.cm_write_job_ids.insert(r.id);
                                 self.send_fs(ipc::FS::NewWrite {
                                     path: r.path.clone(),
                                     id: r.id,
@@ -3765,6 +4076,7 @@ impl Connection {
                                         .collect(),
                                     overwrite_detection: od,
                                     total_size: r.total_size,
+                                    ownership_token: r.ownership_token.clone(),
                                     conn_id: self.inner.id(),
                                 });
                                 self.post_file_audit(
@@ -3808,22 +4120,105 @@ impl Connection {
                                 )));
                             }
                             Some(file_action::Union::Cancel(c)) => {
-                                self.send_fs(ipc::FS::CancelWrite { id: c.id });
-                                let _ = self.cm_read_job_ids.remove(&c.id);
-                                self.send_fs(ipc::FS::CancelRead {
-                                    id: c.id,
-                                    conn_id: self.inner.id(),
-                                });
-                                if let Some(job) = fs::remove_job(c.id, &mut self.read_jobs) {
-                                    self.send_to_cm(ipc::Data::FileTransferLog((
-                                        "transfer".to_string(),
-                                        fs::serialize_transfer_job(&job, false, true, ""),
-                                    )));
+                                if let Some(pending_request_id) =
+                                    self.pending_file_cancel_ids.get(&c.id).copied()
+                                {
+                                    if pending_request_id != c.request_id {
+                                        self.send_file_cancel_response(
+                                            c.id,
+                                            c.request_id,
+                                            false,
+                                            format!(
+                                                "Cancel request {} is already pending for this transfer",
+                                                pending_request_id
+                                            ),
+                                        )
+                                        .await;
+                                    }
+                                } else {
+                                    self.pending_file_cancel_ids.insert(c.id, c.request_id);
+                                    if self.cm_write_job_ids.contains(&c.id) {
+                                        self.send_fs(ipc::FS::CancelWrite {
+                                            id: c.id,
+                                            conn_id: self.inner.id(),
+                                            request_id: c.request_id,
+                                        });
+                                    } else if self.cm_read_job_ids.remove(&c.id) {
+                                        self.send_fs(ipc::FS::CancelRead {
+                                            id: c.id,
+                                            conn_id: self.inner.id(),
+                                            request_id: c.request_id,
+                                        });
+                                    } else if let Some(job) = fs::remove_job(c.id, &mut self.read_jobs) {
+                                        self.send_to_cm(ipc::Data::FileTransferLog((
+                                            "transfer".to_string(),
+                                            fs::serialize_transfer_job(&job, false, true, ""),
+                                        )));
+                                        self.pending_file_cancel_ids.remove(&c.id);
+                                        self.send_file_cancel_response(
+                                            c.id,
+                                            c.request_id,
+                                            true,
+                                            String::new(),
+                                        )
+                                        .await;
+                                    } else {
+                                        self.pending_file_cancel_ids.remove(&c.id);
+                                        self.send_file_cancel_response(
+                                            c.id,
+                                            c.request_id,
+                                            false,
+                                            "Transfer job is no longer active".to_owned(),
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                            Some(file_action::Union::Pause(p)) => {
+                                if self.cm_read_job_ids.contains(&p.id) {
+                                    self.send_fs(ipc::FS::PauseRead {
+                                        id: p.id,
+                                        conn_id: self.inner.id(),
+                                        request_id: p.request_id,
+                                    });
+                                } else if fs::remove_job(p.id, &mut self.read_jobs).is_some() {
+                                    // Connection-owned readers are detached synchronously here,
+                                    // so this is an actual pause acknowledgment rather than an
+                                    // optimistic queue acknowledgment.
+                                    self.send_file_pause_response(
+                                        p.id,
+                                        p.request_id,
+                                        true,
+                                        String::new(),
+                                    )
+                                        .await;
+                                } else {
+                                    // Writes are owned by the Connection Manager. It returns a
+                                    // FilePauseResult only after the matching writer is detached.
+                                    self.send_fs(ipc::FS::PauseWrite {
+                                        id: p.id,
+                                        conn_id: self.inner.id(),
+                                        request_id: p.request_id,
+                                    });
                                 }
                             }
                             Some(file_action::Union::SendConfirm(r)) => {
-                                if let Some(job) = fs::get_job(r.id, &mut self.read_jobs) {
-                                    job.confirm(&r).await;
+                                let direct_confirmation = if let Some(job) =
+                                    fs::get_job(r.id, &mut self.read_jobs)
+                                {
+                                    Some(job.confirm(&r).await)
+                                } else {
+                                    None
+                                };
+                                if let Some(result) = direct_confirmation {
+                                    if let Err(err) = result {
+                                        self.send(fs::new_error(
+                                            r.id,
+                                            format!("Transfer confirmation failed: {err}"),
+                                            r.file_num,
+                                        ))
+                                        .await;
+                                    }
                                 } else if self.cm_read_job_ids.contains(&r.id) {
                                     // Forward to CM for CM-read jobs
                                     self.send_fs(ipc::FS::SendConfirmForRead {
@@ -3861,6 +4256,13 @@ impl Connection {
                 }
                 Some(message::Union::FileResponse(fr)) => match fr.union {
                     Some(file_response::Union::Block(block)) => {
+                        if self.pending_file_cancel_ids.contains_key(&block.id) {
+                            log::debug!(
+                                "Dropping file block for pending-cancel job {}",
+                                block.id
+                            );
+                            return true;
+                        }
                         self.send_fs(ipc::FS::WriteBlock {
                             id: block.id,
                             file_num: block.file_num,
@@ -3869,20 +4271,35 @@ impl Connection {
                         });
                     }
                     Some(file_response::Union::Done(d)) => {
+                        if self.pending_file_cancel_ids.contains_key(&d.id) {
+                            log::debug!("Dropping file done for pending-cancel job {}", d.id);
+                            return true;
+                        }
                         self.send_fs(ipc::FS::WriteDone {
                             id: d.id,
                             file_num: d.file_num,
                         });
                     }
-                    Some(file_response::Union::Digest(d)) => self.send_fs(ipc::FS::CheckDigest {
-                        id: d.id,
-                        file_num: d.file_num,
-                        file_size: d.file_size,
-                        last_modified: d.last_modified,
-                        is_upload: true,
-                        is_resume: d.is_resume,
-                    }),
+                    Some(file_response::Union::Digest(d)) => {
+                        if self.pending_file_cancel_ids.contains_key(&d.id) {
+                            log::debug!("Dropping file digest for pending-cancel job {}", d.id);
+                            return true;
+                        }
+                        self.send_fs(ipc::FS::CheckDigest {
+                            id: d.id,
+                            file_num: d.file_num,
+                            file_size: d.file_size,
+                            last_modified: d.last_modified,
+                            content_sha256: d.content_sha256.to_vec(),
+                            is_upload: true,
+                            is_resume: d.is_resume,
+                        });
+                    }
                     Some(file_response::Union::Error(e)) => {
+                        if self.pending_file_cancel_ids.contains_key(&e.id) {
+                            log::debug!("Dropping file error for pending-cancel job {}", e.id);
+                            return true;
+                        }
                         self.send_fs(ipc::FS::WriteError {
                             id: e.id,
                             file_num: e.file_num,
@@ -4131,6 +4548,8 @@ impl Connection {
                                 self.inner.id,
                                 request,
                                 reply,
+                                self.codex_operation_identity.clone(),
+                                self.codex_operation_generation,
                             );
                         }
                     }
@@ -4145,6 +4564,9 @@ impl Connection {
                                 self.inner.id,
                                 request,
                                 reply,
+                                self.peer_keyboard_enabled(),
+                                self.codex_operation_identity.clone(),
+                                self.codex_operation_generation,
                             );
                         }
                     }
@@ -5075,6 +5497,10 @@ impl Connection {
         if let Ok(q) = o.disable_keyboard.enum_value() {
             if q != BoolOption::NotSet {
                 self.disable_keyboard = q == BoolOption::Yes;
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if self.disable_keyboard {
+                    self.release_held_input();
+                }
                 if let Some(s) = self.server.upgrade() {
                     s.write().unwrap().subscribe(
                         super::clipboard_service::NAME,
@@ -5132,7 +5558,7 @@ impl Connection {
                         back_notification::BlockInputState::BlkOffFailed
                     };
                     if let Some(tx) = &self.inner.tx {
-                        Self::send_block_input_error(tx, state, "No permission".to_string());
+                        Self::send_block_input_state(tx, state, "No permission".to_string());
                     }
                 }
             }
@@ -5507,6 +5933,7 @@ impl Connection {
         file_num: i32,
         last_modified: u64,
         file_size: u64,
+        content_sha256: Vec<u8>,
         is_resume: bool,
     ) {
         // Check if the job is still valid (not cancelled)
@@ -5525,6 +5952,7 @@ impl Connection {
         digest.file_num = file_num;
         digest.last_modified = last_modified;
         digest.file_size = file_size;
+        digest.content_sha256 = content_sha256.into();
         digest.is_upload = false; // Server sending to client
         digest.is_resume = is_resume;
 
@@ -5720,6 +6148,95 @@ impl Connection {
             rdev::simulate(&rdev::EventType::KeyRelease(*modifier)).ok();
         }
         self.pressed_modifiers.clear();
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn track_held_key(&mut self, event: &KeyEvent) {
+        if event.press {
+            return;
+        }
+        let Some(identity) = held_key_identity(event) else {
+            return;
+        };
+        if event.down {
+            let mut release = event.clone();
+            release.down = false;
+            release.press = false;
+            release.modifiers.clear();
+            self.held_keys.insert(identity, release);
+        } else {
+            self.held_keys.remove(&identity);
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn track_held_mouse_button(&mut self, event: &MouseEvent) {
+        let Some((button, down)) = held_mouse_button(event.mask) else {
+            return;
+        };
+        if down {
+            self.pressed_mouse_buttons.insert(button);
+        } else {
+            self.pressed_mouse_buttons.remove(&button);
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn track_pointer_contact(&mut self, event: &PointerDeviceEvent) {
+        if let Some(pointer_device_event::Union::TouchEvent(touch)) = event.union.as_ref() {
+            if let Some(touch_event::Union::ScaleUpdate(scale)) = touch.union.as_ref() {
+                self.pointer_scale_active = scale.scale != 0;
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn has_held_input(&self) -> bool {
+        !self.pressed_modifiers.is_empty()
+            || !self.held_keys.is_empty()
+            || !self.pressed_mouse_buttons.is_empty()
+            || self.pointer_scale_active
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn release_held_input(&mut self) {
+        let key_releases = self
+            .held_keys
+            .drain()
+            .map(|(_, event)| event)
+            .collect::<Vec<_>>();
+        for event in key_releases {
+            self.input_key(event, false);
+        }
+
+        let mouse_releases = self.pressed_mouse_buttons.drain().collect::<Vec<_>>();
+        for button in mouse_releases {
+            self.input_mouse(
+                MouseEvent {
+                    mask: button << 3 | crate::input::MOUSE_TYPE_UP,
+                    ..Default::default()
+                },
+                self.inner.id(),
+                self.lr.my_name.clone(),
+                self.peer_argb,
+                true,
+                false,
+            );
+        }
+
+        if self.pointer_scale_active {
+            self.pointer_scale_active = false;
+            let mut touch = TouchEvent::new();
+            touch.set_scale_update(TouchScaleUpdate {
+                scale: 0,
+                ..Default::default()
+            });
+            let mut pointer = PointerDeviceEvent::new();
+            pointer.set_touch_event(touch);
+            self.input_pointer(pointer, self.inner.id());
+        }
+
+        self.release_pressed_modifiers();
     }
 
     fn get_auto_disconenct_timer() -> Option<(Instant, u64)> {
@@ -6200,6 +6717,8 @@ impl Connection {
             Some(message::Union::EmulatorRequest(_)) => "emulator_request",
             Some(message::Union::EmulatorResponse(_)) => "emulator_response",
             Some(message::Union::EmulatorVideoFrame(_)) => "emulator_video_frame",
+            Some(message::Union::ManualClipboardRequest(_)) => "manual_clipboard_request",
+            Some(message::Union::ManualClipboardResponse(_)) => "manual_clipboard_response",
             Some(message::Union::PortForwardChannel(_)) => "port_forward_channel",
             Some(message::Union::Misc(misc)) => Self::misc_message_family(misc),
             Some(_) => "message.other",
@@ -6770,7 +7289,7 @@ impl Drop for Connection {
         crate::server::codex::disconnect_client(self.inner.id);
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        self.release_pressed_modifiers();
+        self.release_held_input();
 
         if let Some(s) = self.terminal_generic_service.as_ref() {
             s.join();
@@ -7228,6 +7747,34 @@ mod test {
 
     fn unauthorized_count() -> usize {
         UNAUTHORIZED_CONNS.lock().unwrap().len()
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn held_input_key_identity_is_stable_across_release() {
+        let mut down = KeyEvent::new();
+        down.mode = KeyboardMode::Map.into();
+        down.set_chr(29);
+        down.down = true;
+        let mut up = down.clone();
+        up.down = false;
+        assert_eq!(held_key_identity(&down), held_key_identity(&up));
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn held_input_mouse_drag_has_balanced_transition() {
+        let down = crate::input::MOUSE_BUTTON_LEFT << 3 | crate::input::MOUSE_TYPE_DOWN;
+        let up = crate::input::MOUSE_BUTTON_LEFT << 3 | crate::input::MOUSE_TYPE_UP;
+        assert_eq!(
+            held_mouse_button(down),
+            Some((crate::input::MOUSE_BUTTON_LEFT, true))
+        );
+        assert_eq!(
+            held_mouse_button(up),
+            Some((crate::input::MOUSE_BUTTON_LEFT, false))
+        );
+        assert_eq!(held_mouse_button(crate::input::MOUSE_TYPE_MOVE), None);
     }
 
     #[test]

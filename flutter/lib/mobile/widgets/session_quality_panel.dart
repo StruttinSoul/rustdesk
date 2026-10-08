@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../consts.dart';
 import '../../models/model.dart';
+import 'mirpg_remote_theme.dart';
 
 enum MirpgQualityProfile { auto, sharpText, smoothMotion }
 
@@ -143,13 +144,14 @@ class SessionStatusButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final slow = qualityConnectionIsSlow(data, now);
-    final foreground = Theme.of(context).appBarTheme.foregroundColor ??
-        Theme.of(context).colorScheme.onSurface;
-    return TextButton.icon(
-      onPressed: onPressed,
-      style: TextButton.styleFrom(foregroundColor: foreground),
-      icon: Icon(slow ? Icons.network_check : Icons.lan_outlined, size: 18),
-      label: Text(_label),
+    return InkWell(
+      onTap: onPressed,
+      borderRadius: BorderRadius.circular(999),
+      child: MirpgStatusChip(
+        label: _label,
+        icon: slow ? Icons.network_check : Icons.lan_outlined,
+        tone: slow ? MirpgStatusTone.warning : MirpgStatusTone.good,
+      ),
     );
   }
 }

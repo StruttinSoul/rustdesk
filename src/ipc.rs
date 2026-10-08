@@ -169,10 +169,18 @@ pub enum FS {
         files: Vec<(String, u64)>,
         overwrite_detection: bool,
         total_size: u64,
+        ownership_token: String,
         conn_id: i32,
     },
     CancelWrite {
         id: i32,
+        conn_id: i32,
+        request_id: u64,
+    },
+    PauseWrite {
+        id: i32,
+        conn_id: i32,
+        request_id: u64,
     },
     WriteBlock {
         id: i32,
@@ -199,6 +207,7 @@ pub enum FS {
         file_num: i32,
         file_size: u64,
         last_modified: u64,
+        content_sha256: Vec<u8>,
         is_upload: bool,
         is_resume: bool,
     },
@@ -221,6 +230,12 @@ pub enum FS {
     CancelRead {
         id: i32,
         conn_id: i32,
+        request_id: u64,
+    },
+    PauseRead {
+        id: i32,
+        conn_id: i32,
+        request_id: u64,
     },
     SendConfirmForRead {
         id: i32,
@@ -373,6 +388,14 @@ pub enum Data {
     ClipboardFileEnabled(bool),
     #[cfg(target_os = "windows")]
     ClipboardNonFile(Option<(String, Vec<ClipboardNonFile>)>),
+    #[cfg(target_os = "windows")]
+    ManualClipboardRead,
+    #[cfg(target_os = "windows")]
+    ManualClipboardReadResult(Result<String, String>),
+    #[cfg(target_os = "windows")]
+    ManualClipboardWrite(String),
+    #[cfg(target_os = "windows")]
+    ManualClipboardWriteResult(Result<(), String>),
     PrivacyModeState((i32, PrivacyModeState, String)),
     TestRendezvousServer,
     Deployed,
@@ -463,6 +486,7 @@ pub enum Data {
         file_num: i32,
         last_modified: u64,
         file_size: u64,
+        content_sha256: Vec<u8>,
         is_resume: bool,
         conn_id: i32,
     },
@@ -473,6 +497,36 @@ pub enum Data {
         path: String,
         /// Serialized protobuf bytes of FileDirectory, or error string
         result: Result<Vec<u8>, String>,
+    },
+    /// Acknowledges that the Connection Manager has actually detached the
+    /// transfer job for a pause request. `accepted` is false when no matching
+    /// active job was present, so the network peer never treats a merely
+    /// queued IPC command as a completed pause.
+    FilePauseResult {
+        id: i32,
+        conn_id: i32,
+        request_id: u64,
+        accepted: bool,
+        error: String,
+    },
+    /// Acknowledges that a transfer cancel reached the owning Connection
+    /// Manager job and that the job has been detached before this result is
+    /// emitted. The network peer may treat an accepted result as a terminal
+    /// cancel barrier for this request id.
+    FileCancelResult {
+        id: i32,
+        conn_id: i32,
+        request_id: u64,
+        accepted: bool,
+        error: String,
+    },
+    /// Connection Manager notification that a destination writer reached a
+    /// terminal success/error state and has been removed from its active job
+    /// registry. This keeps the server-side ownership registry from treating
+    /// a completed job id as an active CM writer.
+    FileWriteTerminal {
+        id: i32,
+        conn_id: i32,
     },
     CheckHwcodec,
     #[cfg(feature = "flutter")]

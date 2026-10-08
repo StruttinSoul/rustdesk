@@ -1,21 +1,29 @@
 use hbb_common::{bail, ResultType};
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+pub const MAX_TEXT_BYTES: usize = 4096;
+
 #[cfg(windows)]
 pub mod bluestacks;
 #[cfg(windows)]
 pub mod boot_windows;
 #[cfg(windows)]
-pub mod ldplayer;
+pub mod gateway_management;
 #[cfg(windows)]
 pub mod guest_protocol;
 #[cfg(windows)]
 pub mod guest_runtime;
 #[cfg(windows)]
 pub mod host_management;
+#[cfg(windows)]
+pub mod ldplayer;
+#[cfg(windows)]
+pub mod phone_workspace;
 pub mod remote;
 #[cfg(windows)]
 pub mod remote_windows;
+#[cfg(windows)]
+pub mod window_picker;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProviderId(String);

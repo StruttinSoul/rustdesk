@@ -25,6 +25,12 @@ const WEBRTC_SUSPECT_GRACE: Duration = Duration::from_secs(3);
 // KCP gets no such hint, only how long since a packet arrived; its endpoint pings an idle peer
 // about every 2s, so this is several missed pings, and matches the 8s WebRTC arrives at.
 const KCP_PEER_SILENCE_LIMIT: Duration = Duration::from_secs(8);
+// Proposed engineering deadline for a peer pause acknowledgment. A timeout is
+// treated as an unknown outcome; the transfer stays locally quiesced until the
+// user explicitly resumes/reconciles it.
+const FILE_PAUSE_ACK_TIMEOUT: Duration = Duration::from_secs(8);
+const FILE_CANCEL_ACK_TIMEOUT: Duration = Duration::from_secs(8);
+const FILE_CANCEL_TOMBSTONE_LIMIT: usize = 256;
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::{clipboard::try_empty_clipboard_files, clipboard_file::unix_file_clip};
 use base::{
@@ -61,7 +67,7 @@ use hbb_common::{
 use hbb_common::{tokio::sync::Mutex as TokioMutex, ResultType};
 use scrap::CodecFormat;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
     num::NonZeroI64,
     path::PathBuf,
@@ -84,6 +90,12 @@ pub struct Remote<T: InvokeUiSession> {
     voice_call_request_timestamp: Option<NonZeroI64>,
     read_jobs: Vec<fs::TransferJob>,
     write_jobs: Vec<fs::TransferJob>,
+    pending_pause_jobs: HashMap<i32, PendingFilePause>,
+    next_pause_request_id: u64,
+    pending_cancel_jobs: HashMap<i32, PendingFileCancel>,
+    cancel_quiesced_jobs: HashSet<i32>,
+    cancel_quiesced_order: VecDeque<i32>,
+    next_cancel_request_id: u64,
     remove_jobs: HashMap<i32, RemoveJob>,
     timer: crate::RustDeskInterval,
     last_update_jobs_status: (Instant, HashMap<i32, u64>),
@@ -108,7 +120,20 @@ pub struct Remote<T: InvokeUiSession> {
     emulator_session_id: u64,
     guest_video: Option<emulator_client::GuestVideoDecoder>,
     guest_previews: HashMap<u64, Option<emulator_client::GuestVideoDecoder>>,
+    guest_video_refresh_supported: bool,
     dashboard_enabled: bool,
+}
+
+struct PendingFilePause {
+    started: Instant,
+    request_id: u64,
+    unknown_reported: bool,
+}
+
+struct PendingFileCancel {
+    started: Instant,
+    request_id: u64,
+    unknown_reported: bool,
 }
 
 #[derive(Default)]
@@ -118,6 +143,10 @@ struct ParsedPeerInfo {
     idd_impl: String,
     support_view_camera: bool,
     support_terminal: bool,
+    support_manual_clipboard: bool,
+    support_file_pause: bool,
+    support_file_keep_both: bool,
+    support_file_cancel_ack: bool,
 }
 
 impl ParsedPeerInfo {
@@ -129,6 +158,34 @@ impl ParsedPeerInfo {
 }
 
 impl<T: InvokeUiSession> Remote<T> {
+    fn mark_cancel_quiesced(&mut self, id: i32) {
+        if self.cancel_quiesced_jobs.insert(id) {
+            self.cancel_quiesced_order.push_back(id);
+        }
+        let mut protected_pending = 0usize;
+        while self.cancel_quiesced_order.len() > FILE_CANCEL_TOMBSTONE_LIMIT {
+            let Some(expired) = self.cancel_quiesced_order.pop_front() else {
+                break;
+            };
+            if self.pending_cancel_jobs.contains_key(&expired) {
+                self.cancel_quiesced_order.push_back(expired);
+                protected_pending += 1;
+                if protected_pending >= self.cancel_quiesced_order.len() {
+                    break;
+                }
+                continue;
+            }
+            self.cancel_quiesced_jobs.remove(&expired);
+            protected_pending = 0;
+        }
+    }
+
+    fn release_cancel_quiesced(&mut self, id: i32) {
+        if self.cancel_quiesced_jobs.remove(&id) {
+            self.cancel_quiesced_order.retain(|queued| *queued != id);
+        }
+    }
+
     pub fn new(
         handler: Session<T>,
         receiver: mpsc::UnboundedReceiver<Data>,
@@ -141,6 +198,12 @@ impl<T: InvokeUiSession> Remote<T> {
             sender,
             read_jobs: Vec::new(),
             write_jobs: Vec::new(),
+            pending_pause_jobs: HashMap::new(),
+            next_pause_request_id: 0,
+            pending_cancel_jobs: HashMap::new(),
+            cancel_quiesced_jobs: HashSet::new(),
+            cancel_quiesced_order: VecDeque::new(),
+            next_cancel_request_id: 0,
             remove_jobs: Default::default(),
             timer: crate::rustdesk_interval(time::interval(SEC30)),
             last_update_jobs_status: (Instant::now(), Default::default()),
@@ -164,6 +227,7 @@ impl<T: InvokeUiSession> Remote<T> {
             emulator_session_id: 0,
             guest_video: None,
             guest_previews: Default::default(),
+            guest_video_refresh_supported: false,
             dashboard_enabled: false,
         }
     }
@@ -340,6 +404,47 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         _ = status_timer.tick() => {
+                            let expired_pause_ids = self
+                                .pending_pause_jobs
+                                .iter()
+                                .filter_map(|(id, pending)| {
+                                    (!pending.unknown_reported
+                                        && pending.started.elapsed() >= FILE_PAUSE_ACK_TIMEOUT)
+                                        .then_some(*id)
+                                })
+                                .collect::<Vec<_>>();
+                            for id in expired_pause_ids {
+                                if let Some(pending) = self.pending_pause_jobs.get_mut(&id) {
+                                    pending.unknown_reported = true;
+                                    self.handler.job_paused(
+                                        id,
+                                        false,
+                                        "pause_outcome_unknown: no pause acknowledgment received"
+                                            .to_owned(),
+                                    );
+                                }
+                            }
+                            let expired_cancel_ids = self
+                                .pending_cancel_jobs
+                                .iter()
+                                .filter_map(|(id, pending)| {
+                                    (!pending.unknown_reported
+                                        && pending.started.elapsed() >= FILE_CANCEL_ACK_TIMEOUT)
+                                        .then_some(*id)
+                                })
+                                .collect::<Vec<_>>();
+                            for id in expired_cancel_ids {
+                                if let Some(pending) = self.pending_cancel_jobs.get_mut(&id) {
+                                    pending.unknown_reported = true;
+                                    self.handler.job_cancelled(
+                                        id,
+                                        false,
+                                        false,
+                                        "cancel_outcome_unknown: no cancel acknowledgment received"
+                                            .to_owned(),
+                                    );
+                                }
+                            }
                             if self.handler.is_restarting_remote_device()
                                 && last_recv_time.elapsed() >= RESTART_REMOTE_DEVICE_NO_DATA_TIMEOUT
                             {
@@ -528,6 +633,7 @@ impl<T: InvokeUiSession> Remote<T> {
     }
 
     fn handle_job_status(&mut self, id: i32, file_num: i32, err: Option<String>) {
+        self.pending_pause_jobs.remove(&id);
         if let Some(job) = self.remove_jobs.get_mut(&id) {
             if job.no_confirm {
                 let file_num = (file_num + 1) as usize;
@@ -819,6 +925,8 @@ impl<T: InvokeUiSession> Remote<T> {
                 allow_err!(peer.send(&msg).await);
             }
             Data::SendFiles((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
+                self.pending_cancel_jobs.remove(&id);
+                self.release_cancel_quiesced(id);
                 log::info!("send files, is remote {}", is_remote);
                 let od = can_enable_overwrite_detection(self.handler.lc.read().unwrap().version);
                 if is_remote {
@@ -882,17 +990,36 @@ impl<T: InvokeUiSession> Remote<T> {
                                 fs::transform_windows_path(&mut files);
                             }
                             let total_size = job.total_size();
+                            let ownership_token = job.ownership_token().to_owned();
                             self.read_jobs.push(job);
                             self.timer = crate::rustdesk_interval(time::interval(MILLI1));
                             allow_err!(
-                                peer.send(&fs::new_receive(id, to, file_num, files, total_size))
-                                    .await
+                                peer.send(&fs::new_receive(
+                                    id,
+                                    to,
+                                    file_num,
+                                    files,
+                                    total_size,
+                                    ownership_token,
+                                ))
+                                .await
                             );
                         }
                     }
                 }
             }
-            Data::AddJob((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
+            Data::AddJob((
+                id,
+                r#type,
+                path,
+                to,
+                file_num,
+                include_hidden,
+                is_remote,
+                ownership_token,
+            )) => {
+                self.pending_cancel_jobs.remove(&id);
+                self.release_cancel_quiesced(id);
                 let od = can_enable_overwrite_detection(self.handler.lc.read().unwrap().version);
                 if is_remote {
                     log::debug!(
@@ -911,6 +1038,12 @@ impl<T: InvokeUiSession> Remote<T> {
                         is_remote,
                         od,
                     );
+                    if let Some(token) = ownership_token.as_deref() {
+                        if let Err(err) = job.restore_ownership_token(token) {
+                            self.handle_job_status(id, file_num, Some(err.to_string()));
+                            return true;
+                        }
+                    }
                     job.is_last_job = true;
                     self.write_jobs.push(job);
                 } else {
@@ -928,6 +1061,12 @@ impl<T: InvokeUiSession> Remote<T> {
                             self.handle_job_status(id, -1, Some(err.to_string()));
                         }
                         Ok(mut job) => {
+                            if let Some(token) = ownership_token.as_deref() {
+                                if let Err(err) = job.restore_ownership_token(token) {
+                                    self.handle_job_status(id, file_num, Some(err.to_string()));
+                                    return true;
+                                }
+                            }
                             log::debug!(
                                 "new read waiting job {}, read {} to remote {}, {} files",
                                 id,
@@ -949,8 +1088,100 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
             }
+            Data::PauseJob(id) => {
+                if !self.peer_info.support_file_pause {
+                    self.handler.job_paused(
+                        id,
+                        false,
+                        "Pause is not supported by this peer".to_owned(),
+                    );
+                } else if self.pending_pause_jobs.contains_key(&id) {
+                    // Keep one in-flight pause request per transfer. The UI state remains
+                    // pause-requested until the matching peer response arrives.
+                } else {
+                    self.next_pause_request_id = self.next_pause_request_id.wrapping_add(1);
+                    if self.next_pause_request_id == 0 {
+                        self.next_pause_request_id = 1;
+                    }
+                    let request_id = self.next_pause_request_id;
+                    if let Some(job) = get_job(id, &mut self.read_jobs) {
+                        // Stop local source reads immediately while the peer tears down its
+                        // destination writer. Resume will clear this flag and reuse the same job.
+                        job.is_last_job = true;
+                        self.pending_pause_jobs.insert(
+                            id,
+                            PendingFilePause {
+                                started: Instant::now(),
+                                request_id,
+                                unknown_reported: false,
+                            },
+                        );
+                        let mut message = Message::new();
+                        let mut action = FileAction::new();
+                        action.set_pause(FileTransferPause {
+                            id,
+                            request_id,
+                            ..Default::default()
+                        });
+                        message.set_file_action(action);
+                        if let Err(error) = peer.send(&message).await {
+                            self.pending_pause_jobs.remove(&id);
+                            job.is_last_job = false;
+                            self.handler.job_paused(id, false, error.to_string());
+                        }
+                    } else if get_job(id, &mut self.write_jobs).is_some() {
+                        self.pending_pause_jobs.insert(
+                            id,
+                            PendingFilePause {
+                                started: Instant::now(),
+                                request_id,
+                                unknown_reported: false,
+                            },
+                        );
+                        let mut message = Message::new();
+                        let mut action = FileAction::new();
+                        action.set_pause(FileTransferPause {
+                            id,
+                            request_id,
+                            ..Default::default()
+                        });
+                        message.set_file_action(action);
+                        if let Err(error) = peer.send(&message).await {
+                            self.pending_pause_jobs.remove(&id);
+                            self.handler.job_paused(id, false, error.to_string());
+                        }
+                    } else {
+                        self.handler.job_paused(
+                            id,
+                            false,
+                            "Transfer job is no longer active".to_owned(),
+                        );
+                    }
+                }
+            }
             Data::ResumeJob((id, is_remote)) => {
+                if self.pending_pause_jobs.contains_key(&id) {
+                    self.handler.job_paused(
+                        id,
+                        false,
+                        "pause_outcome_unknown: pause acknowledgment is still pending".to_owned(),
+                    );
+                    return true;
+                }
+                if self.pending_cancel_jobs.contains_key(&id) {
+                    self.handler.job_cancelled(
+                        id,
+                        false,
+                        false,
+                        "cancel_outcome_unknown: cancel acknowledgment is still pending"
+                            .to_owned(),
+                    );
+                    return true;
+                }
                 if is_remote {
+                    if self.write_jobs.iter().any(|job| job.id() == id) {
+                        self.release_cancel_quiesced(id);
+                    }
                     if let Some(job) = get_job(id, &mut self.write_jobs) {
                         job.is_last_job = false;
                         job.is_resume = true;
@@ -966,6 +1197,9 @@ impl<T: InvokeUiSession> Remote<T> {
                         );
                     }
                 } else {
+                    if self.read_jobs.iter().any(|job| job.id() == id) {
+                        self.release_cancel_quiesced(id);
+                    }
                     if let Some(job) = get_job(id, &mut self.read_jobs) {
                         match &job.data_source {
                             fs::DataSource::FilePath(_p) => {
@@ -988,6 +1222,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                         job.file_num,
                                         files,
                                         job.total_size(),
+                                        job.ownership_token().to_owned(),
                                     ))
                                     .await
                                 );
@@ -1017,26 +1252,55 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
             }
-            Data::SetConfirmOverrideFile((id, file_num, need_override, remember, is_upload)) => {
+            Data::SetConfirmOverrideFile((
+                id,
+                file_num,
+                need_override,
+                remember,
+                is_upload,
+                conflict_token,
+            )) => {
                 if is_upload {
                     if let Some(job) = fs::get_job(id, &mut self.read_jobs) {
                         if remember {
                             job.set_overwrite_strategy(Some(need_override));
                         }
-                        job.confirm(&FileTransferSendConfirmRequest {
+                        let req = FileTransferSendConfirmRequest {
                             id,
                             file_num,
+                            conflict_token,
                             union: if need_override {
                                 Some(file_transfer_send_confirm_request::Union::OffsetBlk(0))
                             } else {
                                 Some(file_transfer_send_confirm_request::Union::Skip(true))
                             },
                             ..Default::default()
-                        })
-                        .await;
+                        };
+                        if let Err(err) = job.confirm(&req).await {
+                            let error = format!("Transfer confirmation failed: {err}");
+                            self.handler.job_error(id, error.clone(), file_num);
+                            allow_err!(peer.send(&fs::new_error(id, error, file_num)).await);
+                            return true;
+                        }
+                        let msg = new_send_confirm(req);
+                        allow_err!(peer.send(&msg).await);
                     }
                 } else {
                     if let Some(job) = fs::get_job(id, &mut self.write_jobs) {
+                        if need_override {
+                            if let Err(err) = job
+                                .validate_pending_conflict_token(file_num, &conflict_token)
+                            {
+                                self.handler.job_error(
+                                    id,
+                                    format!(
+                                        "Destination changed before replace; review the conflict again: {err}"
+                                    ),
+                                    file_num,
+                                );
+                                return true;
+                            }
+                        }
                         if remember {
                             job.set_overwrite_strategy(Some(need_override));
                         }
@@ -1045,6 +1309,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         let req = FileTransferSendConfirmRequest {
                             id,
                             file_num,
+                            conflict_token,
                             union: if need_override {
                                 Some(file_transfer_send_confirm_request::Union::OffsetBlk(0))
                             } else {
@@ -1052,10 +1317,91 @@ impl<T: InvokeUiSession> Remote<T> {
                             },
                             ..Default::default()
                         };
-                        job.confirm(&req).await;
+                        if let Err(err) = job.confirm(&req).await {
+                            let error = format!("Transfer confirmation failed: {err}");
+                            self.handler.job_error(id, error.clone(), file_num);
+                            allow_err!(peer.send(&fs::new_error(id, error, file_num)).await);
+                            return true;
+                        }
                         file_action.set_send_confirm(req);
                         msg.set_file_action(file_action);
                         allow_err!(peer.send(&msg).await);
+                    }
+                }
+            }
+            Data::SetConfirmKeepBothFile((id, file_num, is_upload, conflict_token)) => {
+                if is_upload {
+                    if !self.peer_info.support_file_keep_both {
+                        self.handler.job_error(
+                            id,
+                            "Keep both is not supported by this peer".to_owned(),
+                            file_num,
+                        );
+                    } else if let Some(job) = fs::get_job(id, &mut self.read_jobs) {
+                        let req = FileTransferSendConfirmRequest {
+                            id,
+                            file_num,
+                            conflict_token,
+                            union: Some(file_transfer_send_confirm_request::Union::KeepBoth(true)),
+                            ..Default::default()
+                        };
+                        if let Err(err) = job.confirm(&req).await {
+                            let error = format!("Transfer confirmation failed: {err}");
+                            self.handler.job_error(id, error.clone(), file_num);
+                            allow_err!(peer.send(&fs::new_error(id, error, file_num)).await);
+                            return true;
+                        }
+                        let msg = new_send_confirm(req);
+                        allow_err!(peer.send(&msg).await);
+                    }
+                } else if let Some(job) = fs::get_job(id, &mut self.write_jobs) {
+                    if let Err(err) = job
+                        .validate_pending_conflict_token(file_num, &conflict_token)
+                    {
+                        self.handler.job_error(
+                            id,
+                            format!(
+                                "Destination changed before keep-both; review the conflict again: {err}"
+                            ),
+                            file_num,
+                        );
+                        return true;
+                    }
+                    match job.keep_both_existing_destination(file_num) {
+                        Ok(_) => {
+                            // The destination is local, so the peer only needs the
+                            // ordinary offset-zero confirmation after we have safely
+                            // moved the existing file aside. This remains compatible
+                            // with older peers.
+                            let req = FileTransferSendConfirmRequest {
+                                id,
+                                file_num,
+                                union: Some(
+                                    file_transfer_send_confirm_request::Union::OffsetBlk(0),
+                                ),
+                                ..Default::default()
+                            };
+                            // The keep-both decision has already moved the prior
+                            // destination to its unique sibling. The old conflict
+                            // snapshot must no longer participate in finalization.
+                            job.clear_pending_conflict(file_num);
+                            if let Err(err) = job.confirm(&req).await {
+                                let error = format!("Transfer confirmation failed: {err}");
+                                self.handler.job_error(id, error.clone(), file_num);
+                                allow_err!(peer.send(&fs::new_error(id, error, file_num)).await);
+                                return true;
+                            }
+                            let msg = new_send_confirm(req);
+                            allow_err!(peer.send(&msg).await);
+                        }
+                        Err(err) => {
+                            self.cancel_transfer_job(id, peer).await;
+                            self.handle_job_status(
+                                id,
+                                file_num,
+                                Some(format!("Keep both failed: {err}")),
+                            );
+                        }
                     }
                 }
             }
@@ -1094,7 +1440,58 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
             }
             Data::CancelJob(id) => {
-                self.cancel_transfer_job(id, peer).await;
+                self.pending_pause_jobs.remove(&id);
+                if self.peer_info.support_file_cancel_ack {
+                    if self.pending_cancel_jobs.contains_key(&id) {
+                        return true;
+                    }
+                    self.next_cancel_request_id = self.next_cancel_request_id.wrapping_add(1);
+                    if self.next_cancel_request_id == 0 {
+                        self.next_cancel_request_id = 1;
+                    }
+                    let request_id = self.next_cancel_request_id;
+                    if let Some(job) = get_job(id, &mut self.read_jobs) {
+                        job.is_last_job = true;
+                    }
+                    self.mark_cancel_quiesced(id);
+                    self.pending_cancel_jobs.insert(
+                        id,
+                        PendingFileCancel {
+                            started: Instant::now(),
+                            request_id,
+                            unknown_reported: false,
+                        },
+                    );
+                    let mut msg_out = Message::new();
+                    let mut file_action = FileAction::new();
+                    file_action.set_cancel(FileTransferCancel {
+                        id,
+                        request_id,
+                        ..Default::default()
+                    });
+                    msg_out.set_file_action(file_action);
+                    if let Err(error) = peer.send(&msg_out).await {
+                        self.pending_cancel_jobs.remove(&id);
+                        self.release_cancel_quiesced(id);
+                        if let Some(job) = get_job(id, &mut self.read_jobs) {
+                            job.is_last_job = false;
+                        }
+                        self.handler.job_cancelled(
+                            id,
+                            false,
+                            false,
+                            format!("cancel_request_failed: could not send cancel request: {error}"),
+                        );
+                    }
+                } else {
+                    self.cancel_transfer_job(id, peer).await;
+                    self.handler.job_cancelled(
+                        id,
+                        true,
+                        false,
+                        "Remote cancel acknowledgment is unavailable on this peer".to_owned(),
+                    );
+                }
             }
             Data::RemoveDir((id, path)) => {
                 let mut msg_out = Message::new();
@@ -1291,6 +1688,8 @@ impl<T: InvokeUiSession> Remote<T> {
     }
 
     async fn cancel_transfer_job(&mut self, id: i32, peer: &mut Stream) {
+        self.pending_cancel_jobs.remove(&id);
+        self.mark_cancel_quiesced(id);
         let mut msg_out = Message::new();
         let mut file_action = FileAction::new();
         file_action.set_cancel(FileTransferCancel {
@@ -1349,32 +1748,6 @@ impl<T: InvokeUiSession> Remote<T> {
                 msg_out.set_misc(misc);
                 allow_err!(peer.send(&msg_out).await);
             }
-        }
-    }
-
-    async fn send_toggle_privacy_mode_msg(&self, peer: &mut Stream) {
-        if self.handler.is_view_camera() {
-            return;
-        }
-        let lc = self.handler.lc.read().unwrap();
-        if lc.version >= hbb_common::get_version_number("1.2.4")
-            && lc.get_toggle_option("privacy-mode")
-        {
-            let impl_key = lc.get_option("privacy-mode-impl-key");
-            if impl_key == crate::privacy_mode::PRIVACY_MODE_IMPL_WIN_VIRTUAL_DISPLAY
-                && !self.peer_info.is_support_virtual_display()
-            {
-                return;
-            }
-            let mut misc = Misc::new();
-            misc.set_toggle_privacy_mode(TogglePrivacyMode {
-                impl_key,
-                on: true,
-                ..Default::default()
-            });
-            let mut msg_out = Message::new();
-            msg_out.set_misc(misc);
-            allow_err!(peer.send(&msg_out).await);
         }
     }
 
@@ -1542,14 +1915,19 @@ impl<T: InvokeUiSession> Remote<T> {
     async fn handle_msg_from_peer(&mut self, data: &[u8], peer: &mut Stream) -> bool {
         if let Ok(msg_in) = Message::parse_from_bytes(&data) {
             match msg_in.union {
+                Some(message::Union::VideoStreamHeartbeat(heartbeat)) => {
+                    self.handler
+                        .update_stream_liveness(heartbeat.display as usize, heartbeat.sequence);
+                }
                 Some(message::Union::VideoFrame(vf)) => {
-                    if self.emulator_session_id != 0 && !self.dashboard_enabled { return true; }
+                    if self.emulator_session_id != 0 && !self.dashboard_enabled {
+                        return true;
+                    }
                     if !self.first_frame {
                         self.first_frame = true;
                         self.handler.close_success();
                         self.handler.adapt_size();
                         self.send_toggle_virtual_display_msg(peer).await;
-                        self.send_toggle_privacy_mode_msg(peer).await;
                     }
                     self.video_format = CodecFormat::from(&vf);
 
@@ -1701,7 +2079,9 @@ impl<T: InvokeUiSession> Remote<T> {
                         let lc = self.handler.lc.read().unwrap();
                         !lc.disable_clipboard.v && !lc.view_only.v
                     };
-                    if clipboard_allowed {
+                    let deliberate_clipboard =
+                        cfg!(target_os = "android") && self.peer_info.support_manual_clipboard;
+                    if clipboard_allowed && !deliberate_clipboard {
                         #[cfg(all(
                             feature = "flutter",
                             not(any(target_os = "android", target_os = "ios"))
@@ -1739,7 +2119,9 @@ impl<T: InvokeUiSession> Remote<T> {
                         let lc = self.handler.lc.read().unwrap();
                         !lc.disable_clipboard.v && !lc.view_only.v
                     };
-                    if clipboard_allowed {
+                    let deliberate_clipboard =
+                        cfg!(target_os = "android") && self.peer_info.support_manual_clipboard;
+                    if clipboard_allowed && !deliberate_clipboard {
                         #[cfg(all(
                             feature = "flutter",
                             not(any(target_os = "android", target_os = "ios"))
@@ -1788,6 +2170,13 @@ impl<T: InvokeUiSession> Remote<T> {
                             self.handler.update_empty_dirs(res);
                         }
                         Some(file_response::Union::Dir(fd)) => {
+                            if self.cancel_quiesced_jobs.contains(&fd.id) {
+                                log::debug!(
+                                    "Ignoring directory response for pending-cancel job {}",
+                                    fd.id
+                                );
+                                return true;
+                            }
                             #[cfg(windows)]
                             let entries = fd.entries.to_vec();
                             #[cfg(not(windows))]
@@ -1838,6 +2227,13 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         Some(file_response::Union::Digest(digest)) => {
+                            if self.cancel_quiesced_jobs.contains(&digest.id) {
+                                log::debug!(
+                                    "Ignoring digest for pending-cancel job {}",
+                                    digest.id
+                                );
+                                return true;
+                            }
                             if digest.is_upload {
                                 if let Some(job) = fs::get_job(digest.id, &mut self.read_jobs) {
                                     if let Some(file) = job.files().get(digest.file_num as usize) {
@@ -1857,6 +2253,9 @@ impl<T: InvokeUiSession> Remote<T> {
                                                 let req = FileTransferSendConfirmRequest {
                                                     id: digest.id,
                                                     file_num: digest.file_num,
+                                                    conflict_token: digest
+                                                        .conflict_token
+                                                        .clone(),
                                                     union: Some(if overwrite {
                                                         file_transfer_send_confirm_request::Union::OffsetBlk(offset)
                                                     } else {
@@ -1866,7 +2265,24 @@ impl<T: InvokeUiSession> Remote<T> {
                                                     }),
                                                     ..Default::default()
                                                 };
-                                                job.confirm(&req).await;
+                                                if let Err(err) = job.confirm(&req).await {
+                                                    let error = format!(
+                                                        "Transfer confirmation failed: {err}"
+                                                    );
+                                                    self.handler.job_error(
+                                                        digest.id,
+                                                        error.clone(),
+                                                        digest.file_num,
+                                                    );
+                                                    allow_err!(peer
+                                                        .send(&fs::new_error(
+                                                            digest.id,
+                                                            error,
+                                                            digest.file_num,
+                                                        ))
+                                                        .await);
+                                                    return true;
+                                                }
                                                 let msg = new_send_confirm(req);
                                                 allow_err!(peer.send(&msg).await);
                                             } else {
@@ -1876,6 +2292,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                                     read_path,
                                                     true,
                                                     digest.is_identical,
+                                                    digest.conflict_token.clone(),
                                                 );
                                             }
                                         }
@@ -1887,13 +2304,19 @@ impl<T: InvokeUiSession> Remote<T> {
                                         if let fs::DataSource::FilePath(p) = &job.data_source {
                                             let write_path =
                                                 get_string(&fs::TransferJob::join(p, &file.name));
-                                            job.set_digest(digest.file_size, digest.last_modified);
+                                            job.set_digest_with_hash(
+                                                digest.file_num,
+                                                digest.file_size,
+                                                digest.last_modified,
+                                                digest.content_sha256.to_vec(),
+                                            );
                                             let peer_ver = self.handler.lc.read().unwrap().version;
                                             let is_support_resume =
                                                 crate::is_support_file_transfer_resume_num(
                                                     peer_ver,
                                                 );
                                             match fs::is_write_need_confirmation(
+                                                job,
                                                 is_support_resume && job.is_resume,
                                                 &write_path,
                                                 &digest,
@@ -1906,11 +2329,50 @@ impl<T: InvokeUiSession> Remote<T> {
                                                             union: Some(file_transfer_send_confirm_request::Union::Skip(true)),
                                                             ..Default::default()
                                                         };
-                                                        job.confirm(&req).await;
+                                                        if let Err(err) = job.confirm(&req).await {
+                                                            let error = format!(
+                                                                "Transfer confirmation failed: {err}"
+                                                            );
+                                                            self.handler.job_error(
+                                                                digest.id,
+                                                                error.clone(),
+                                                                digest.file_num,
+                                                            );
+                                                            allow_err!(peer
+                                                                .send(&fs::new_error(
+                                                                    digest.id,
+                                                                    error,
+                                                                    digest.file_num,
+                                                                ))
+                                                                .await);
+                                                            return true;
+                                                        }
                                                         let msg = new_send_confirm(req);
                                                         allow_err!(peer.send(&msg).await);
                                                     }
-                                                    DigestCheckResult::NeedConfirm(digest) => {
+                                                    DigestCheckResult::NeedConfirm(mut digest) => {
+                                                        if digest.transferred_size == 0 {
+                                                            match job.capture_pending_conflict(
+                                                                    digest.file_num,
+                                                                    std::path::Path::new(
+                                                                        &write_path,
+                                                                    ),
+                                                                ) {
+                                                                Ok(token) => {
+                                                                    digest.conflict_token = token;
+                                                                }
+                                                                Err(err) => {
+                                                                    self.handler.job_error(
+                                                                        digest.id,
+                                                                        format!(
+                                                                            "Destination changed while checking conflict: {err}"
+                                                                        ),
+                                                                        digest.file_num,
+                                                                    );
+                                                                    return true;
+                                                                }
+                                                            }
+                                                        }
                                                         let mut overwrite_strategy =
                                                             job.default_overwrite_strategy();
                                                         let mut offset = 0;
@@ -1923,10 +2385,29 @@ impl<T: InvokeUiSession> Remote<T> {
                                                         }
                                                         if let Some(overwrite) = overwrite_strategy
                                                         {
+                                                            if overwrite
+                                                                && offset == 0
+                                                                && job
+                                                                    .validate_pending_conflict(
+                                                                        digest.file_num,
+                                                                    )
+                                                                    .is_err()
+                                                            {
+                                                                self.handler.job_error(
+                                                                    digest.id,
+                                                                    "Destination changed before replace; review the conflict again"
+                                                                        .to_owned(),
+                                                                    digest.file_num,
+                                                                );
+                                                                return true;
+                                                            }
                                                             let req =
                                                                 FileTransferSendConfirmRequest {
                                                                     id: digest.id,
                                                                     file_num: digest.file_num,
+                                                                    conflict_token: digest
+                                                                        .conflict_token
+                                                                        .clone(),
                                                                     union: Some(if overwrite {
                                                                         file_transfer_send_confirm_request::Union::OffsetBlk(offset)
                                                                     } else {
@@ -1934,7 +2415,24 @@ impl<T: InvokeUiSession> Remote<T> {
                                                                     }),
                                                                     ..Default::default()
                                                                 };
-                                                            job.confirm(&req).await;
+                                                            if let Err(err) = job.confirm(&req).await {
+                                                                let error = format!(
+                                                                    "Transfer confirmation failed: {err}"
+                                                                );
+                                                                self.handler.job_error(
+                                                                    digest.id,
+                                                                    error.clone(),
+                                                                    digest.file_num,
+                                                                );
+                                                                allow_err!(peer
+                                                                    .send(&fs::new_error(
+                                                                        digest.id,
+                                                                        error,
+                                                                        digest.file_num,
+                                                                    ))
+                                                                    .await);
+                                                                return true;
+                                                            }
                                                             let msg = new_send_confirm(req);
                                                             allow_err!(peer.send(&msg).await);
                                                         } else {
@@ -1944,6 +2442,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                                                 write_path,
                                                                 false,
                                                                 digest.is_identical,
+                                                                digest.conflict_token.clone(),
                                                             );
                                                         }
                                                     }
@@ -1954,7 +2453,24 @@ impl<T: InvokeUiSession> Remote<T> {
                                                         union: Some(file_transfer_send_confirm_request::Union::OffsetBlk(0)),
                                                         ..Default::default()
                                                     };
-                                                        job.confirm(&req).await;
+                                                        if let Err(err) = job.confirm(&req).await {
+                                                            let error = format!(
+                                                                "Transfer confirmation failed: {err}"
+                                                            );
+                                                            self.handler.job_error(
+                                                                digest.id,
+                                                                error.clone(),
+                                                                digest.file_num,
+                                                            );
+                                                            allow_err!(peer
+                                                                .send(&fs::new_error(
+                                                                    digest.id,
+                                                                    error,
+                                                                    digest.file_num,
+                                                                ))
+                                                                .await);
+                                                            return true;
+                                                        }
                                                         let msg = new_send_confirm(req);
                                                         allow_err!(peer.send(&msg).await);
                                                     }
@@ -1968,22 +2484,131 @@ impl<T: InvokeUiSession> Remote<T> {
                                 }
                             }
                         }
-                        Some(file_response::Union::Block(block)) => {
-                            if let Some(job) = fs::get_job(block.id, &mut self.write_jobs) {
-                                if let Err(_err) = job.write(block).await {
-                                    // to-do: add "skip" for writing job
+                        Some(file_response::Union::Pause(pause)) => {
+                            let matches_request = self
+                                .pending_pause_jobs
+                                .get(&pause.id)
+                                .map(|pending| pending.request_id == pause.request_id)
+                                .unwrap_or(false);
+                            if matches_request {
+                                self.pending_pause_jobs.remove(&pause.id);
+                                let mut accepted = pause.accepted;
+                                let mut error = pause.error;
+                                if accepted {
+                                    if let Some(job) = get_job(pause.id, &mut self.write_jobs) {
+                                        if let Err(err) = job.sync_partial_for_pause().await {
+                                            accepted = false;
+                                            error = format!(
+                                                "pause_local_flush_failed: remote source paused but local partial flush failed: {err}"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    if let Some(job) = get_job(pause.id, &mut self.read_jobs) {
+                                        job.is_last_job = false;
+                                    }
                                 }
+                                self.handler.job_paused(
+                                    pause.id,
+                                    accepted,
+                                    error,
+                                );
+                            } else if self.pending_pause_jobs.contains_key(&pause.id) {
+                                log::warn!(
+                                    "Ignoring stale file-pause response for job {}, request {}",
+                                    pause.id,
+                                    pause.request_id
+                                );
+                            }
+                        }
+                        Some(file_response::Union::Cancel(cancel)) => {
+                            let matches_request = self
+                                .pending_cancel_jobs
+                                .get(&cancel.id)
+                                .map(|pending| pending.request_id == cancel.request_id)
+                                .unwrap_or(false);
+                            if matches_request {
+                                self.pending_cancel_jobs.remove(&cancel.id);
+                                if cancel.accepted {
+                                    if let Some(job) = fs::remove_job(cancel.id, &mut self.write_jobs)
+                                    {
+                                        job.remove_download_file();
+                                    }
+                                    let _ = fs::remove_job(cancel.id, &mut self.read_jobs);
+                                    self.remove_jobs.remove(&cancel.id);
+                                } else {
+                                    self.release_cancel_quiesced(cancel.id);
+                                    if let Some(job) = get_job(cancel.id, &mut self.read_jobs) {
+                                        job.is_last_job = false;
+                                    }
+                                }
+                                self.handler.job_cancelled(
+                                    cancel.id,
+                                    cancel.accepted,
+                                    true,
+                                    cancel.error,
+                                );
+                            } else if self.pending_cancel_jobs.contains_key(&cancel.id) {
+                                log::warn!(
+                                    "Ignoring stale file-cancel response for job {}, request {}",
+                                    cancel.id,
+                                    cancel.request_id
+                                );
+                            }
+                        }
+                        Some(file_response::Union::Block(block)) => {
+                            let id = block.id;
+                            let file_num = block.file_num;
+                            if self.cancel_quiesced_jobs.contains(&id) {
+                                log::debug!("Ignoring block for pending-cancel job {}", id);
+                                return true;
+                            }
+                            let write_error = if let Some(job) = fs::get_job(id, &mut self.write_jobs) {
+                                let result = job.write(block).await;
                                 if job.r#type == fs::JobType::Generic {
                                     self.update_jobs_status();
                                 }
+                                result.err().map(|err| err.to_string())
+                            } else {
+                                None
+                            };
+                            if let Some(error) = write_error {
+                                self.cancel_transfer_job(id, peer).await;
+                                self.handle_job_status(
+                                    id,
+                                    file_num,
+                                    Some(format!("File write failed: {error}")),
+                                );
                             }
                         }
                         Some(file_response::Union::Done(d)) => {
+                            if self.cancel_quiesced_jobs.contains(&d.id) {
+                                log::debug!("Ignoring done for pending-cancel job {}", d.id);
+                                return true;
+                            }
                             let mut err: Option<String> = None;
                             let mut job_type = fs::JobType::Generic;
                             let mut printer_data = None;
+                            let mut finalization_error = None;
+                            if let Some(job) = fs::get_job(d.id, &mut self.write_jobs) {
+                                if job.r#type == fs::JobType::Generic {
+                                    if let Err(error) = job.sync_partial_for_pause().await {
+                                        finalization_error = Some(format!(
+                                            "File finalization failed: {error}"
+                                        ));
+                                    } else if let Err(error) = job.modify_time().await {
+                                        finalization_error = Some(format!(
+                                            "File finalization failed: {error}"
+                                        ));
+                                    }
+                                }
+                            }
+                            if let Some(error) = finalization_error {
+                                let _ = fs::remove_job(d.id, &mut self.write_jobs);
+                                self.handle_job_status(d.id, d.file_num, Some(error));
+                                return true;
+                            }
                             if let Some(job) = fs::remove_job(d.id, &mut self.write_jobs) {
-                                job.modify_time();
                                 err = job.job_error();
                                 job_type = job.r#type;
                                 printer_data = match job.get_buf_data().await {
@@ -2032,6 +2657,10 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         Some(file_response::Union::Error(e)) => {
+                            if self.cancel_quiesced_jobs.contains(&e.id) {
+                                log::debug!("Ignoring error for pending-cancel job {}", e.id);
+                                return true;
+                            }
                             let job_type = fs::remove_job(e.id, &mut self.write_jobs)
                                 .or_else(|| fs::remove_job(e.id, &mut self.read_jobs))
                                 .map(|j| j.r#type)
@@ -2304,7 +2933,13 @@ impl<T: InvokeUiSession> Remote<T> {
                     },
                     Some(file_action::Union::SendConfirm(c)) => {
                         if let Some(job) = fs::get_job(c.id, &mut self.read_jobs) {
-                            job.confirm(&c).await;
+                            if let Err(err) = job.confirm(&c).await {
+                                let error = format!("Transfer confirmation failed: {err}");
+                                self.handler.job_error(c.id, error.clone(), c.file_num);
+                                allow_err!(peer
+                                    .send(&fs::new_error(c.id, error, c.file_num))
+                                    .await);
+                            }
                         }
                     }
                     _ => {}
@@ -2374,8 +3009,15 @@ impl<T: InvokeUiSession> Remote<T> {
                 Some(message::Union::CodexControlResponse(response)) => {
                     self.handler.handle_codex_control_response(response);
                 }
-                Some(message::Union::EmulatorResponse(response)) => self.handle_emulator_response(response),
-                Some(message::Union::EmulatorVideoFrame(frame)) => self.handle_emulator_video(frame),
+                Some(message::Union::EmulatorResponse(response)) => {
+                    self.handle_emulator_response(response)
+                }
+                Some(message::Union::EmulatorVideoFrame(frame)) => {
+                    self.handle_emulator_video(frame).await
+                }
+                Some(message::Union::ManualClipboardResponse(response)) => {
+                    self.handler.handle_manual_clipboard_response(response);
+                }
                 _ => {}
             }
         }
@@ -2386,12 +3028,17 @@ impl<T: InvokeUiSession> Remote<T> {
         self.emulator_session_id = 0;
         self.guest_video.take();
         self.guest_previews.clear();
+        self.guest_video_refresh_supported = false;
         self.dashboard_enabled = false;
         self.peer_info.platform = pi.platform.clone();
 
         // Check features field for terminal support
         if let Some(features) = pi.features.as_ref() {
             self.peer_info.support_terminal = features.terminal;
+            self.peer_info.support_manual_clipboard = features.manual_clipboard;
+            self.peer_info.support_file_pause = features.file_pause;
+            self.peer_info.support_file_keep_both = features.file_keep_both;
+            self.peer_info.support_file_cancel_ack = features.file_cancel_ack;
         }
 
         if let Ok(platform_additions) =
@@ -2490,6 +3137,11 @@ impl<T: InvokeUiSession> Remote<T> {
 
     #[inline(always)]
     fn update_privacy_mode(&mut self, impl_key: String, on: bool) {
+        self.handler
+            .lc
+            .write()
+            .unwrap()
+            .set_session_privacy_mode(on);
         let mut config = self.handler.load_config();
         config.privacy_mode.v = on;
         if on {
@@ -3017,6 +3669,139 @@ mod tests {
         assert!(
             arrives(&mut far).await,
             "a clipboard after the login was held back"
+        );
+    }
+
+    fn cancel_response(id: i32, request_id: u64, accepted: bool) -> Vec<u8> {
+        let mut response = FileResponse::new();
+        response.set_cancel(FileTransferCancelResponse {
+            id,
+            request_id,
+            accepted,
+            error: if accepted {
+                String::new()
+            } else {
+                "cancel rejected".to_owned()
+            },
+            ..Default::default()
+        });
+        let mut message = Message::new();
+        message.set_file_response(response);
+        message.write_to_bytes().unwrap()
+    }
+
+    #[tokio::test]
+    async fn finalization_failure_detaches_direct_write_job() {
+        let (mut remote, mut peer, _far) = remote_and_peer().await;
+        let dir = std::env::temp_dir().join("rustdesk_direct_finalize_terminal_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = FileEntry {
+            name: "missing.bin".to_owned(),
+            size: 1,
+            ..Default::default()
+        };
+        let job = fs::TransferJob::new_write(
+            901,
+            fs::JobType::Generic,
+            "/remote/missing.bin".to_owned(),
+            fs::DataSource::FilePath(dir.clone()),
+            0,
+            false,
+            true,
+            true,
+        )
+        .with_files(vec![entry])
+        .unwrap();
+        remote.write_jobs.push(job);
+
+        let done = fs::new_done(901, 0).write_to_bytes().unwrap();
+        assert!(remote.handle_msg_from_peer(&done, &mut peer).await);
+        assert!(
+            fs::get_job_immutable(901, &remote.write_jobs).is_none(),
+            "terminal finalization failure must detach the dead direct writer"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn accepted_cancel_keeps_tombstone_and_rejected_cancel_releases_it() {
+        let (mut remote, mut peer, _far) = remote_and_peer().await;
+
+        remote.mark_cancel_quiesced(902);
+        remote.pending_cancel_jobs.insert(
+            902,
+            PendingFileCancel {
+                started: Instant::now(),
+                request_id: 41,
+                unknown_reported: false,
+            },
+        );
+        assert!(remote
+            .handle_msg_from_peer(&cancel_response(902, 41, true), &mut peer)
+            .await);
+        assert!(
+            remote.cancel_quiesced_jobs.contains(&902),
+            "accepted cancel must keep suppressing delayed terminal packets"
+        );
+        let done = fs::new_done(902, 0).write_to_bytes().unwrap();
+        assert!(remote.handle_msg_from_peer(&done, &mut peer).await);
+        assert!(remote.cancel_quiesced_jobs.contains(&902));
+
+        remote.mark_cancel_quiesced(903);
+        remote.pending_cancel_jobs.insert(
+            903,
+            PendingFileCancel {
+                started: Instant::now(),
+                request_id: 42,
+                unknown_reported: false,
+            },
+        );
+        assert!(remote
+            .handle_msg_from_peer(&cancel_response(903, 42, false), &mut peer)
+            .await);
+        assert!(
+            !remote.cancel_quiesced_jobs.contains(&903),
+            "rejected cancel must resume normal packet handling"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_tombstones_are_bounded() {
+        let (mut remote, _peer, _far) = remote_and_peer().await;
+        for id in 0..(FILE_CANCEL_TOMBSTONE_LIMIT as i32 + 20) {
+            remote.mark_cancel_quiesced(id);
+        }
+        assert_eq!(remote.cancel_quiesced_jobs.len(), FILE_CANCEL_TOMBSTONE_LIMIT);
+        assert_eq!(remote.cancel_quiesced_order.len(), FILE_CANCEL_TOMBSTONE_LIMIT);
+        assert!(!remote.cancel_quiesced_jobs.contains(&0));
+        assert!(remote
+            .cancel_quiesced_jobs
+            .contains(&(FILE_CANCEL_TOMBSTONE_LIMIT as i32 + 19)));
+    }
+
+    #[tokio::test]
+    async fn pending_cancel_is_not_evicted_by_tombstone_bound() {
+        let (mut remote, _peer, _far) = remote_and_peer().await;
+        remote.mark_cancel_quiesced(0);
+        remote.pending_cancel_jobs.insert(
+            0,
+            PendingFileCancel {
+                started: Instant::now(),
+                request_id: 99,
+                unknown_reported: false,
+            },
+        );
+
+        for id in 1..(FILE_CANCEL_TOMBSTONE_LIMIT as i32 + 20) {
+            remote.mark_cancel_quiesced(id);
+        }
+
+        assert!(remote.cancel_quiesced_jobs.contains(&0));
+        assert!(remote.pending_cancel_jobs.contains_key(&0));
+        assert!(
+            remote.cancel_quiesced_jobs.len() <= FILE_CANCEL_TOMBSTONE_LIMIT + 1,
+            "only protected pending cancels may exceed the completed tombstone bound"
         );
     }
 }

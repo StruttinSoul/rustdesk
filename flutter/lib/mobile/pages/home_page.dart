@@ -47,7 +47,9 @@ class HomePageState extends State<HomePage> {
     if (isAndroid && !bind.isIncomingOnly()) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         final id = await bind.mainGetLastRemoteId();
-        if (mounted && id.isNotEmpty && ModalRoute.of(context)?.isCurrent == true) {
+        if (mounted &&
+            id.isNotEmpty &&
+            ModalRoute.of(context)?.isCurrent == true) {
           await connect(context, id);
         }
       });
@@ -85,7 +87,7 @@ class HomePageState extends State<HomePage> {
           },
           child: Scaffold(
             appBar: AppBar(
-              centerTitle: true,
+              automaticallyImplyLeading: false,
               title: appTitle(),
               actions: _pages.elementAt(_selectedIndex).appBarActions,
             ),
@@ -154,7 +156,22 @@ class HomePageState extends State<HomePage> {
         ],
       );
     }
-    return Text(bind.mainGetAppNameSync());
+    final pageTitle =
+        _pages.isEmpty ? 'Computers' : _pages[_selectedIndex].title;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(pageTitle),
+        Text(
+          'MIRPG Remote',
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: MirpgRemoteTheme.textSecondary,
+                fontWeight: FontWeight.w500,
+              ),
+        ),
+      ],
+    );
   }
 }
 
@@ -275,11 +292,11 @@ class WebHomePage extends StatelessWidget {
       }
     }
     if (id != null) {
-      connect(context, id, 
-        isFileTransfer: isFileTransfer, 
-        isViewCamera: isViewCamera, 
-        isTerminal: isTerminal,
-        password: password);
+      connect(context, id,
+          isFileTransfer: isFileTransfer,
+          isViewCamera: isViewCamera,
+          isTerminal: isTerminal,
+          password: password);
     }
   }
 }

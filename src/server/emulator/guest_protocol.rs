@@ -1,5 +1,7 @@
 use std::io::{self, Read};
 
+use super::MAX_TEXT_BYTES;
+
 pub const HELPER_VERSION: &str = "4.0";
 pub const HELPER_SHA256: &str = "84924bd564a1eb6089c872c7521f968058977f91f5ff02514a8c74aff3210f3a";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -92,6 +94,27 @@ pub fn touch_packet(
         packet[24..28].copy_from_slice(&1_u32.to_be_bytes());
         packet[28..32].copy_from_slice(&1_u32.to_be_bytes());
     }
+    Ok(packet)
+}
+
+pub fn text_packet(text: &str) -> io::Result<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_TEXT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid guest text",
+        ));
+    }
+    // scrcpy v4 TYPE_SET_CLIPBOARD with paste=true. TYPE_INJECT_TEXT (1)
+    // runs through Android's KeyCharacterMap and cannot represent arbitrary
+    // Unicode. Clipboard paste preserves the composed UTF-8 text and still
+    // performs no implicit Enter.
+    let mut packet = Vec::with_capacity(14 + bytes.len());
+    packet.push(9);
+    packet.extend_from_slice(&0_u64.to_be_bytes());
+    packet.push(1);
+    packet.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    packet.extend_from_slice(bytes);
     Ok(packet)
 }
 
@@ -328,5 +351,20 @@ mod tests {
         }
         let release = touch_packet(1, 0, 100, 200, 1080, 1920).unwrap();
         assert_eq!(&release[22..32], &[0; 10]);
+    }
+
+    #[test]
+    fn text_packet_uses_unicode_clipboard_paste_without_an_enter_key() {
+        let text = "Café 中文 👋🏽";
+        let packet = text_packet(text).unwrap();
+        assert_eq!(packet[0], 9);
+        assert_eq!(&packet[1..9], &0_u64.to_be_bytes());
+        assert_eq!(packet[9], 1);
+        assert_eq!(
+            u32::from_be_bytes(packet[10..14].try_into().unwrap()) as usize,
+            text.len()
+        );
+        assert_eq!(&packet[14..], text.as_bytes());
+        assert_eq!(packet.len(), 14 + text.len());
     }
 }

@@ -105,6 +105,10 @@ message Features {
   bool emulator = 5;
   bool target_dashboard = 6;
   bool host_management = 7;
+  bool manual_clipboard = 8;
+  bool file_pause = 9;
+  bool file_keep_both = 10;
+  bool file_cancel_ack = 11;
 }
 
 message CodecAbility {
@@ -418,10 +422,32 @@ message FileAction {
     FileTransferSendConfirmRequest send_confirm = 9;
     FileRename rename = 10;
     ReadEmptyDirs read_empty_dirs = 11;
+    FileTransferPause pause = 12;
   }
 }
 
-message FileTransferCancel { int32 id = 1; }
+message FileTransferCancel {
+  int32 id = 1;
+  uint64 request_id = 2;
+}
+message FileTransferPause {
+  int32 id = 1;
+  // Correlates the acknowledgment with one specific pause attempt. A job id
+  // can survive reconnect/resume cycles, so it is not sufficient by itself.
+  uint64 request_id = 2;
+}
+message FileTransferPauseResponse {
+  int32 id = 1;
+  bool accepted = 2;
+  string error = 3;
+  uint64 request_id = 4;
+}
+message FileTransferCancelResponse {
+  int32 id = 1;
+  bool accepted = 2;
+  string error = 3;
+  uint64 request_id = 4;
+}
 
 message FileResponse {
   oneof union {
@@ -431,6 +457,8 @@ message FileResponse {
     FileTransferDone done = 4;
     FileTransferDigest digest = 5;
     ReadEmptyDirsResponse empty_dirs = 6;
+    FileTransferPauseResponse pause = 7;
+    FileTransferCancelResponse cancel = 8;
   }
 }
 
@@ -446,6 +474,12 @@ message FileTransferDigest {
                                // `is_resume` can let the controlled side know whether to check the `.digest` file.
                                // When `is_resume` is false, `.digest` exists, the same file does not exist,
                                // the controlled side should not check `.digest`, it should confirm with a new transfer request.
+  // Optional strong source-content identity. New peers require a 32-byte
+  // SHA-256 match before reusing a partial; older peers simply omit it.
+  bytes content_sha256 = 9;
+  // Opaque identity for the exact destination conflict snapshot presented to
+  // the sender. Destructive conflict decisions must echo this value.
+  string conflict_token = 10;
 }
 
 message FileTransferBlock {
@@ -481,7 +515,13 @@ message FileTransferSendConfirmRequest {
   oneof union {
     bool skip = 3;
     uint32 offset_blk = 4;
+    // Preserve the existing destination under a unique sibling name before
+    // accepting this file at the original destination path.
+    bool keep_both = 5;
   }
+  // Echoes FileTransferDigest.conflict_token for Replace/Keep-both decisions.
+  // Empty for non-conflict confirmations and legacy peers.
+  string conflict_token = 6;
 }
 
 message FileTransferDone {
@@ -495,6 +535,9 @@ message FileTransferReceiveRequest {
   repeated FileEntry files = 3;
   int32 file_num = 4;
   uint64 total_size = 5;
+  // Stable per-transfer capability used only to reclaim partial artifacts
+  // created by the same logical transfer after a reconnect/new job id.
+  string ownership_token = 6;
 }
 
 message FileRemoveDir {
@@ -1059,6 +1102,37 @@ message CodexListApprovalsRequest {
   string thread_id = 1;
 }
 
+message CodexListWorkspacesRequest {
+  string cursor = 1;
+  uint32 limit = 2;
+}
+
+message CodexListTaskChangesRequest {
+  string thread_id = 1;
+  string cursor = 2;
+  uint32 limit = 3;
+}
+
+message CodexReadTaskDiffRequest {
+  string thread_id = 1;
+  string change_id = 2;
+  uint64 offset = 3;
+  uint32 limit = 4;
+}
+
+message CodexListArtifactsRequest {
+  string thread_id = 1;
+  string cursor = 2;
+  uint32 limit = 3;
+}
+
+message CodexReadArtifactRequest {
+  string thread_id = 1;
+  string artifact_id = 2;
+  uint64 offset = 3;
+  uint32 limit = 4;
+}
+
 message CodexReadRequest {
   string request_id = 1;
   oneof union {
@@ -1066,7 +1140,69 @@ message CodexReadRequest {
     CodexThreadHistoryRequest thread_history = 3;
     CodexEventSubscriptionRequest event_subscription = 4;
     CodexListApprovalsRequest list_approvals = 5;
+    CodexListWorkspacesRequest list_workspaces = 6;
+    CodexListTaskChangesRequest list_task_changes = 7;
+    CodexReadTaskDiffRequest read_task_diff = 8;
+    CodexListArtifactsRequest list_artifacts = 9;
+    CodexReadArtifactRequest read_artifact = 10;
   }
+}
+
+message CodexWorkspaceInfo {
+  string id = 1;
+  string name = 2;
+  string path = 3;
+  bool accessible = 4;
+  string status = 5;
+}
+
+message CodexWorkspaceListResponse {
+  repeated CodexWorkspaceInfo workspaces = 1;
+  string next_cursor = 2;
+}
+
+message CodexTaskChangeInfo {
+  string change_id = 1;
+  string artifact_id = 2;
+  string path = 3;
+  string kind = 4;
+  bool binary = 5;
+  bool large = 6;
+  uint64 size_bytes = 7;
+  bool diff_available = 8;
+  string fallback_reason = 9;
+}
+
+message CodexTaskChangeListResponse {
+  string thread_id = 1;
+  repeated CodexTaskChangeInfo changes = 2;
+  string next_cursor = 3;
+}
+
+message CodexArtifactInfo {
+  string artifact_id = 1;
+  string path = 2;
+  uint64 size_bytes = 3;
+  bool binary = 4;
+  bool large = 5;
+  bool readable = 6;
+  string fallback_reason = 7;
+}
+
+message CodexArtifactListResponse {
+  string thread_id = 1;
+  repeated CodexArtifactInfo artifacts = 2;
+  string next_cursor = 3;
+}
+
+message CodexReviewTextResponse {
+  string thread_id = 1;
+  string id = 2;
+  string text = 3;
+  uint64 offset = 4;
+  uint64 next_offset = 5;
+  bool complete = 6;
+  string fallback_reason = 7;
 }
 
 message CodexThreadInfo {
@@ -1083,6 +1219,9 @@ message CodexThreadListResponse {
   CodexState service_state = 2;
   string codex_version = 3;
   CodexControlCapabilities control = 4;
+  repeated string capabilities = 5;
+  string operation_session_identity = 6;
+  uint64 operation_generation = 7;
 }
 
 message CodexControlCapabilities {
@@ -1093,6 +1232,7 @@ message CodexControlCapabilities {
   bool interrupt_turn = 5;
   bool approvals = 6;
   bool open_windows_app = 7;
+  bool queue_turn = 8;
 }
 
 enum CodexApprovalKind {
@@ -1119,6 +1259,8 @@ message CodexApprovalRequest {
   string reason = 8;
   int64 started_at_ms = 9;
   bool actionable = 10;
+  string working_directory = 11;
+  string scope = 12;
 }
 
 message CodexApprovalListResponse {
@@ -1157,11 +1299,15 @@ message CodexEvent {
   CodexHistoryKind history_kind = 6;
   string text = 7;
   string status = 8;
+  // Present for host-generated queuedStart events so the mobile queue can
+  // reconcile the exact operation even if the queue acknowledgment is late.
+  string operation_id = 9;
 }
 
 message CodexError {
   string thread_id = 1;
   string message = 2;
+  string error_code = 3;
 }
 
 message CodexReadResponse {
@@ -1174,6 +1320,11 @@ message CodexReadResponse {
     CodexApprovalRequest approval = 6;
     CodexApprovalListResponse approval_list = 7;
     CodexApprovalResolved approval_resolved = 8;
+    CodexWorkspaceListResponse workspace_list = 9;
+    CodexTaskChangeListResponse task_change_list = 10;
+    CodexReviewTextResponse task_diff = 11;
+    CodexArtifactListResponse artifact_list = 12;
+    CodexReviewTextResponse artifact = 13;
   }
 }
 
@@ -1187,17 +1338,18 @@ enum CodexControlAction {
   CodexControlApprovalApproved = 6;
   CodexControlApprovalDenied = 7;
   CodexControlWindowsAppOpened = 8;
+  CodexControlTurnQueued = 9;
 }
 
 message CodexResumeThreadRequest {
   string thread_id = 1;
 }
 
-// Start a fresh Codex thread. When workspace_thread_id is present, the Windows
-// bridge reuses that stored thread's workspace locally without exposing its
-// filesystem path to Android.
+// Start a fresh Codex thread. New peers use the host-issued workspace_id.
+// workspace_thread_id remains only for compatibility with older peers.
 message CodexStartThreadRequest {
   string workspace_thread_id = 1;
+  string workspace_id = 2;
 }
 
 message CodexStartTurnRequest {
@@ -1206,6 +1358,12 @@ message CodexStartTurnRequest {
 }
 
 message CodexSteerTurnRequest {
+  string thread_id = 1;
+  string turn_id = 2;
+  string text = 3;
+}
+
+message CodexQueueTurnRequest {
   string thread_id = 1;
   string turn_id = 2;
   string text = 3;
@@ -1221,6 +1379,7 @@ message CodexRespondApprovalRequest {
   string thread_id = 2;
   string turn_id = 3;
   CodexApprovalDecision decision = 4;
+  string item_id = 5;
 }
 
 message CodexOpenWindowsAppRequest {
@@ -1237,7 +1396,12 @@ message CodexControlRequest {
     CodexInterruptTurnRequest interrupt_turn = 6;
     CodexRespondApprovalRequest respond_approval = 7;
     CodexOpenWindowsAppRequest open_windows_app = 8;
+    CodexQueueTurnRequest queue_turn = 13;
   }
+  string operation_id = 9;
+  string session_identity = 10;
+  string target_identity = 11;
+  uint64 session_generation = 12;
 }
 
 message CodexControlResult {
@@ -1245,6 +1409,9 @@ message CodexControlResult {
   string thread_id = 2;
   string turn_id = 3;
   CodexState state = 4;
+  // Resume returns the host's authoritative pending queue for this owned
+  // thread. Older peers simply ignore this additive field.
+  repeated string queued_operation_ids = 5;
 }
 
 message CodexControlResponse {
@@ -1253,6 +1420,13 @@ message CodexControlResponse {
     CodexControlResult result = 2;
     CodexError error = 3;
   }
+  string operation_id = 4;
+  string session_identity = 5;
+  string target_identity = 6;
+  uint64 session_generation = 7;
+  bool accepted = 8;
+  bool applied = 9;
+  string error_code = 10;
 }
 
 message EmulatorListRequest {}
@@ -1274,6 +1448,7 @@ message EmulatorPreviewRequest {
 message EmulatorPreviewState {
   bool enabled = 1;
   repeated uint64 session_ids = 2;
+  repeated uint32 displays = 3;
 }
 
 enum EmulatorNavigation {
@@ -1297,15 +1472,38 @@ message EmulatorKey {
   bool down = 2;
 }
 
+message EmulatorText {
+  string text = 1;
+}
+
 message EmulatorHostRequest {
   string action = 1;
   uint32 pid = 2;
   string component = 3;
+  string operation_id = 4;
+  string session_identity = 5;
+  string target_identity = 6;
+  uint64 session_generation = 7;
+  uint64 process_start_time_secs = 8;
+  uint64 process_creation_time_100ns = 9;
+  string window_id = 10;
+  uint64 desktop_generation = 11;
+  uint32 display_width = 12;
+  uint32 display_height = 13;
+  uint32 display_dpi = 14;
+  string display_orientation = 15;
+  string owned_display_id = 16;
+  bool gateway_enabled = 17;
+  string gateway_expected_process_identity = 18;
+  uint32 gateway_confirmed_active_sessions = 19;
+  bool gateway_active_sessions_known = 20;
 }
 
 message EmulatorHostResponse {
   string json = 1;
 }
+
+message EmulatorVideoRefreshRequest {}
 
 message EmulatorRequest {
   uint64 request_id = 1;
@@ -1320,6 +1518,8 @@ message EmulatorRequest {
     EmulatorKey key = 9;
     EmulatorPreviewRequest previews = 10;
     EmulatorHostRequest host = 11;
+    EmulatorText text = 12;
+    EmulatorVideoRefreshRequest refresh_video = 13;
   }
 }
 
@@ -1337,6 +1537,9 @@ message EmulatorInventory {
   repeated EmulatorInstance instances = 1;
   repeated string provider_errors = 2;
   bool dashboard = 3;
+  repeated string capabilities = 4;
+  string operation_session_identity = 5;
+  uint64 operation_generation = 6;
 }
 
 enum EmulatorSessionState {
@@ -1355,6 +1558,7 @@ message EmulatorSessionStatus {
   uint32 height = 5;
   string error = 6;
   bool preview = 7;
+  string phase = 8;
 }
 
 message EmulatorResponse {
@@ -1374,6 +1578,35 @@ message EmulatorVideoFrame {
   bytes data = 2;
   bool key = 3;
   int64 pts = 4;
+}
+
+message VideoStreamHeartbeat {
+  uint32 display = 1;
+  uint64 sequence = 2;
+}
+
+enum ManualClipboardDirection {
+  ManualClipboardUnknown = 0;
+  ManualClipboardPhoneToHost = 1;
+  ManualClipboardHostToPhone = 2;
+}
+
+message ManualClipboardRequest {
+  string request_id = 1;
+  ManualClipboardDirection direction = 2;
+  string text = 3;
+  string target_identity = 4;
+}
+
+message ManualClipboardResponse {
+  string request_id = 1;
+  ManualClipboardDirection direction = 2;
+  bool accepted = 3;
+  bool applied = 4;
+  string text = 5;
+  string error_code = 6;
+  string error = 7;
+  string target_identity = 8;
 }
 
 message Message {
@@ -1416,5 +1649,8 @@ message Message {
     EmulatorRequest emulator_request = 38;
     EmulatorResponse emulator_response = 39;
     EmulatorVideoFrame emulator_video_frame = 40;
+    VideoStreamHeartbeat video_stream_heartbeat = 41;
+    ManualClipboardRequest manual_clipboard_request = 42;
+    ManualClipboardResponse manual_clipboard_response = 43;
   }
 }

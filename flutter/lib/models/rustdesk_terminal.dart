@@ -14,10 +14,12 @@ class RustDeskTerminal extends Terminal {
     required Future<bool> Function(String) onClipboardWrite,
     ValueChanged<String>? onClipboardWriteBlocked,
     ValueChanged<String>? onClipboardWriteSucceeded,
+    bool Function(String text)? onPasteRequest,
   })  : _clipboardWritePermission = clipboardWritePermission,
         _onClipboardWrite = onClipboardWrite,
         _onClipboardWriteBlocked = onClipboardWriteBlocked,
-        _onClipboardWriteSucceeded = onClipboardWriteSucceeded {
+        _onClipboardWriteSucceeded = onClipboardWriteSucceeded,
+        _onPasteRequest = onPasteRequest {
     onPrivateOSC = _handlePrivateOsc;
   }
 
@@ -32,9 +34,16 @@ class RustDeskTerminal extends Terminal {
   final Future<bool> Function(String) _onClipboardWrite;
   final ValueChanged<String>? _onClipboardWriteBlocked;
   final ValueChanged<String>? _onClipboardWriteSucceeded;
+  final bool Function(String text)? _onPasteRequest;
 
   bool get isClipboardWriteAllowed =>
       _clipboardWritePermission() == TerminalClipboardWritePermission.allowed;
+
+  @override
+  void paste(String text) {
+    if (_onPasteRequest?.call(text) == true) return;
+    super.paste(text);
+  }
 
   void _handlePrivateOsc(String code, List<String> args) {
     if (code != _clipboardOscCode) return;

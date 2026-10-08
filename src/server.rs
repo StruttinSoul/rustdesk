@@ -75,6 +75,9 @@ pub mod display_service;
 #[cfg(windows)]
 pub mod codex;
 pub mod emulator;
+pub mod manual_clipboard;
+#[cfg(test)]
+mod manual_clipboard_tests;
 #[cfg(windows)]
 pub mod portable_service;
 mod service;

@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 const MAX_COMMAND_CHARS: usize = 4096;
 const MAX_REASON_CHARS: usize = 2048;
+const MAX_CONTEXT_CHARS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodexApprovalKind {
@@ -29,6 +30,8 @@ pub struct CodexApproval {
     pub title: String,
     pub summary: String,
     pub reason: String,
+    pub working_directory: String,
+    pub scope: String,
     pub started_at_ms: i64,
     pub actionable: bool,
 }
@@ -91,7 +94,7 @@ impl PendingApprovals {
             .and_then(Value::as_i64)
             .unwrap_or_default();
 
-        let (kind, title, summary, reason, actionable, response_kind) =
+        let (kind, title, summary, reason, working_directory, scope, actionable, response_kind) =
             match request.method.as_str() {
                 "item/commandExecution/requestApproval" => (
                     CodexApprovalKind::Command,
@@ -110,6 +113,8 @@ impl PendingApprovals {
                             .unwrap_or_default(),
                         MAX_REASON_CHARS,
                     ),
+                    public_context_field(params, "cwd"),
+                    String::new(),
                     true,
                     ResponseKind::Decision,
                 ),
@@ -124,13 +129,15 @@ impl PendingApprovals {
                             .unwrap_or_default(),
                         MAX_REASON_CHARS,
                     ),
+                    String::new(),
+                    public_context_field(params, "grantRoot"),
                     true,
                     ResponseKind::Decision,
                 ),
                 "item/permissions/requestApproval" => (
                     CodexApprovalKind::Permissions,
                     "Permission approval".to_owned(),
-                    "This permission request must be handled on Windows.".to_owned(),
+                    "This request needs a compatible MIRPG bridge action.".to_owned(),
                     sanitize_public_text(
                         params
                             .get("reason")
@@ -138,6 +145,8 @@ impl PendingApprovals {
                             .unwrap_or_default(),
                         MAX_REASON_CHARS,
                     ),
+                    public_context_field(params, "cwd"),
+                    String::new(),
                     false,
                     ResponseKind::UnsupportedPermissions,
                 ),
@@ -154,6 +163,8 @@ impl PendingApprovals {
             title,
             summary,
             reason,
+            working_directory,
+            scope,
             started_at_ms,
             actionable,
         };
@@ -257,6 +268,20 @@ fn sanitize_public_text(value: &str, max_chars: usize) -> String {
     redact_windows_paths(&truncate(value, max_chars))
 }
 
+fn public_context_field(value: &Value, field: &str) -> String {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(|value| {
+            value
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(MAX_CONTEXT_CHARS)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn redact_windows_paths(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut output = String::with_capacity(value.len());
@@ -348,8 +373,9 @@ mod tests {
             "powershell -File \"<local-path>\" -Arg <local-path>"
         );
         assert_eq!(approval.reason, "Run tests from <local-path>");
+        assert_eq!(approval.working_directory, "C:\\Users\\private\\repo");
+        assert!(approval.scope.is_empty());
         let public = format!("{approval:?}");
-        assert!(!public.contains("Users\\private"));
         assert!(!public.contains("secret\\input"));
         assert!(!public.contains("secret-policy"));
     }
@@ -373,8 +399,9 @@ mod tests {
 
         assert_eq!(approval.kind, CodexApprovalKind::FileChange);
         assert_eq!(approval.reason, "Apply generated changes from <local-path>");
+        assert!(approval.working_directory.is_empty());
+        assert_eq!(approval.scope, "C:\\secret-root");
         let public = format!("{approval:?}");
-        assert!(!public.contains("secret-root"));
         assert!(!public.contains("private-server"));
         assert!(!public.contains("private diff"));
     }
@@ -474,6 +501,12 @@ mod tests {
             .unwrap();
         assert_eq!(approval.kind, CodexApprovalKind::Permissions);
         assert!(!approval.actionable);
+        assert_eq!(approval.working_directory, "C:\\private");
+        assert_eq!(
+            approval.summary,
+            "This request needs a compatible MIRPG bridge action."
+        );
+        assert!(!approval.summary.contains("handled on Windows"));
         assert!(approvals
             .begin_response(
                 &approval.id,

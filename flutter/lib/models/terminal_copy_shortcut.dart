@@ -129,29 +129,39 @@ Future<bool> completeTerminalClipboardWrite({
   return true;
 }
 
-Map<ShortcutActivator, Intent>? platformTerminalShortcuts() {
-  final platform = defaultTargetPlatform;
+Map<ShortcutActivator, Intent>? platformTerminalShortcuts({
+  bool allowPaste = true,
+  TargetPlatform? platform,
+}) {
+  platform ??= defaultTargetPlatform;
+  Map<ShortcutActivator, Intent>? shortcuts;
   if (platform == TargetPlatform.linux) {
-    return {
+    shortcuts = {
       for (final entry in defaultTerminalShortcuts.entries)
         if (!_isControlShortcut(entry.key, LogicalKeyboardKey.keyV))
           entry.key: entry.value,
       _controlShiftVPasteShortcut:
           const PasteTextIntent(SelectionChangedCause.keyboard),
     };
-  }
-  if (platform != TargetPlatform.windows &&
+  } else if (platform != TargetPlatform.windows &&
       platform != TargetPlatform.android) {
-    return null;
+    shortcuts = null;
+  } else {
+    shortcuts = {
+      for (final entry in defaultTerminalShortcuts.entries)
+        if (!_isControlShortcut(
+          entry.key,
+          LogicalKeyboardKey.keyC,
+          shift: true,
+        ))
+          entry.key: entry.value,
+    };
   }
+  if (allowPaste) return shortcuts;
+  shortcuts ??= Map<ShortcutActivator, Intent>.from(defaultTerminalShortcuts);
   return {
-    for (final entry in defaultTerminalShortcuts.entries)
-      if (!_isControlShortcut(
-        entry.key,
-        LogicalKeyboardKey.keyC,
-        shift: true,
-      ))
-        entry.key: entry.value,
+    for (final entry in shortcuts.entries)
+      if (entry.value is! PasteTextIntent) entry.key: entry.value,
   };
 }
 

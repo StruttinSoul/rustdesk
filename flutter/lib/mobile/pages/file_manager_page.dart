@@ -5,13 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_breadcrumb/flutter_breadcrumb.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:get/get.dart';
-import 'package:toggle_switch/toggle_switch.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../common.dart';
 import '../../common/widgets/dialog.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
+import '../widgets/mirpg_remote_theme.dart';
 
 class FileManagerPage extends StatefulWidget {
   FileManagerPage(
@@ -116,7 +116,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
           continue;
         }
         final destination =
-          PathUtil.join(importDirectory, name, importIsWindows);
+            PathUtil.join(importDirectory, name, importIsWindows);
         var overwrite = false;
         if (await File(destination).exists()) {
           final overwriteResult = await model.showFileConfirmDialog(
@@ -126,8 +126,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
           overwrite = true;
         }
         try {
-          final success = await _ffi.invokeMethod(
-              AndroidChannel.kImportFile,
+          final success = await _ffi.invokeMethod(AndroidChannel.kImportFile,
               {'uri': uri, 'path': destination, 'overwrite': overwrite});
           if (success == true) {
             imported++;
@@ -153,8 +152,8 @@ class _FileManagerPageState extends State<FileManagerPage> {
 
   Future<void> _exportFile(Entry entry) async {
     try {
-      final exported = await _runAndroidDocumentPicker(() => _ffi
-          .invokeMethod(AndroidChannel.kExportFile, {'path': entry.path}));
+      final exported = await _runAndroidDocumentPicker(() =>
+          _ffi.invokeMethod(AndroidChannel.kExportFile, {'path': entry.path}));
       if (exported == true) {
         showToast(translate('Successful'));
       }
@@ -234,8 +233,8 @@ class _FileManagerPageState extends State<FileManagerPage> {
 
   Future<void> _exportPaths(Iterable<String> paths) async {
     try {
-      final result = await _runAndroidDocumentPicker(() =>
-          _ffi.invokeMethodWithResult<Map<dynamic, dynamic>>(
+      final result = await _runAndroidDocumentPicker(() => _ffi
+          .invokeMethodWithResult<Map<dynamic, dynamic>>(
               AndroidChannel.kExportFiles, {'paths': paths.toList()}));
       if (result == null) return;
       final exported = result['exported'] as int? ?? 0;
@@ -313,27 +312,25 @@ class _FileManagerPageState extends State<FileManagerPage> {
                       icon: Icon(Icons.close),
                       onPressed: () => clientClose(_ffi.sessionId, _ffi)),
                 ]),
-          centerTitle: true,
-          title: ToggleSwitch(
-            initialLabelIndex: showLocal ? 0 : 1,
-            activeBgColor: [MyTheme.idColor],
-            inactiveBgColor: Theme.of(context).brightness == Brightness.light
-                ? MyTheme.grayBg
-                : null,
-            inactiveFgColor: Theme.of(context).brightness == Brightness.light
-                ? Colors.black54
-                : null,
-            totalSwitches: 2,
-            minWidth: 100,
-            fontSize: 15,
-            iconSize: 18,
-            labels: [translate("Local"), translate("Remote")],
-            icons: [Icons.phone_android_sharp, Icons.screen_share],
-            onToggle: (index) {
-              final current = showLocal ? 0 : 1;
-              if (index != current) {
-                setState(() => showLocal = !showLocal);
-              }
+          centerTitle: widget.embedded,
+          title: SegmentedButton<bool>(
+            showSelectedIcon: false,
+            segments: [
+              ButtonSegment(
+                value: true,
+                icon: const Icon(Icons.phone_android_sharp, size: 18),
+                label: Text(translate("Local")),
+              ),
+              ButtonSegment(
+                value: false,
+                icon: const Icon(Icons.screen_share, size: 18),
+                label: Text(translate("Remote")),
+              ),
+            ],
+            selected: {showLocal},
+            onSelectionChanged: (selection) {
+              final next = selection.first;
+              if (next != showLocal) setState(() => showLocal = next);
             },
           ),
           actions: [
@@ -549,8 +546,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
                     IconButton(
                       tooltip: translate("Save as"),
                       icon: Icon(Icons.save_alt),
-                      onPressed: () =>
-                          _exportFile(selectedItems!.items.single),
+                      onPressed: () => _exportFile(selectedItems!.items.single),
                     )
                   else
                     IconButton(
@@ -614,22 +610,100 @@ class _FileManagerPageState extends State<FileManagerPage> {
         return Offstage();
       }
 
-      // Find the first job that is in progress (the one actually transferring data)
-      // Rust backend processes jobs sequentially, so the first inProgress job is the active one
-      final activeJob = jobTable
-              .firstWhereOrNull((job) => job.state == JobState.inProgress) ??
+      // Rust processes transfer jobs sequentially. Keep acknowledged/pending
+      // transfer lifecycle states attached to the same active row instead of
+      // falling through to whichever job happens to be last in the list.
+      final activeJob = jobTable.firstWhereOrNull((job) => {
+                JobState.inProgress,
+                JobState.pauseRequested,
+                JobState.paused,
+                JobState.resumeRequested,
+                JobState.interrupted,
+                JobState.cancelRequested,
+              }.contains(job.state)) ??
           jobTable.last;
+      final filePermission = _ffi.ffiModel.permissions['file'] != false;
+      final pauseSupported = _ffi.ffiModel.pi.features.filePause;
+      final resumeSupported =
+          versionCmp(_ffi.ffiModel.pi.version, '1.4.2') >= 0;
 
       switch (activeJob.state) {
         case JobState.inProgress:
           return BottomSheetBody(
             leading: CircularProgressIndicator(),
-            title: translate("Waiting"),
+            title: translate("Transfer file"),
             text: "${readableFileSize(activeJob.speed)}/s",
             onCanceled: () {
               model.jobController.cancelJob(activeJob.id);
-              jobTable.clear();
             },
+            actions: pauseSupported && filePermission
+                ? [
+                    IconButton(
+                      tooltip: 'Pause transfer',
+                      icon: const Icon(Icons.pause_rounded),
+                      onPressed: () => model.jobController.pauseJob(
+                        activeJob.id,
+                        supported: true,
+                      ),
+                    )
+                  ]
+                : null,
+          );
+        case JobState.pauseRequested:
+          return BottomSheetBody(
+            leading: const CircularProgressIndicator(),
+            title: 'Pausing…',
+            text: activeJob.fileName,
+            onCanceled: () => model.jobController.cancelJob(activeJob.id),
+          );
+        case JobState.paused:
+          return BottomSheetBody(
+            leading: const Icon(Icons.pause_circle_outline_rounded),
+            title: translate('Paused'),
+            text: activeJob.fileName,
+            onCanceled: () => model.jobController.cancelJob(activeJob.id),
+            actions: resumeSupported && filePermission
+                ? [
+                    IconButton(
+                      tooltip: 'Resume transfer',
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      onPressed: () =>
+                          model.jobController.resumeJob(activeJob.id),
+                    )
+                  ]
+                : null,
+          );
+        case JobState.resumeRequested:
+          return BottomSheetBody(
+            leading: const CircularProgressIndicator(),
+            title: 'Resuming…',
+            text: activeJob.fileName,
+            onCanceled: () => model.jobController.cancelJob(activeJob.id),
+          );
+        case JobState.interrupted:
+          return BottomSheetBody(
+            leading: const Icon(Icons.warning_amber_rounded),
+            title: 'Interrupted',
+            text: activeJob.err.isNotEmpty
+                ? activeJob.err.replaceFirst('pause_outcome_unknown: ', '')
+                : activeJob.fileName,
+            onCanceled: () => model.jobController.cancelJob(activeJob.id),
+            actions: resumeSupported && filePermission
+                ? [
+                    IconButton(
+                      tooltip: 'Resume transfer',
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      onPressed: () =>
+                          model.jobController.resumeJob(activeJob.id),
+                    )
+                  ]
+                : null,
+          );
+        case JobState.cancelRequested:
+          return BottomSheetBody(
+            leading: const CircularProgressIndicator(),
+            title: 'Cancelling…',
+            text: activeJob.fileName,
           );
         case JobState.done:
           return BottomSheetBody(
@@ -642,14 +716,18 @@ class _FileManagerPageState extends State<FileManagerPage> {
           return BottomSheetBody(
             leading: Icon(Icons.error),
             title: "${translate("Error")}!",
-            text: "",
+            text: activeJob.err.isNotEmpty ? activeJob.err : activeJob.fileName,
             onCanceled: () => jobTable.clear(),
           );
         case JobState.none:
           break;
-        case JobState.paused:
-          // TODO: Handle this case.
-          break;
+        case JobState.cancelled:
+          return BottomSheetBody(
+            leading: const Icon(Icons.cancel_outlined),
+            title: 'Cancelled',
+            text: activeJob.err.isNotEmpty ? activeJob.err : activeJob.fileName,
+            onCanceled: () => jobTable.remove(activeJob),
+          );
       }
       return Offstage();
     });
@@ -735,113 +813,121 @@ class _FileManagerViewState extends State<FileManagerView> {
               return widget.selectMode.value != SelectMode.none &&
                   widget.selectMode.value.eq(controller.selectedItems.isLocal);
             }();
-            return Card(
-              child: ListTile(
-                leading: entries[index].isDrive
-                    ? Padding(
-                        padding: EdgeInsets.symmetric(vertical: 8),
-                        child: Image(
-                            image: iconHardDrive,
-                            fit: BoxFit.scaleDown,
-                            color: Theme.of(context)
-                                .iconTheme
-                                .color
-                                ?.withOpacity(0.7)))
-                    : Icon(
-                        entries[index].isFile
-                            ? Icons.feed_outlined
-                            : Icons.folder,
-                        size: 40),
-                title: Text(entries[index].name),
-                selected: selected,
-                subtitle: entries[index].isDrive
-                    ? null
-                    : Text(
-                        "${entries[index].lastModified().toString().replaceAll(".000", "")}   $sizeStr",
-                        style: TextStyle(fontSize: 12, color: MyTheme.darkGray),
-                      ),
-                trailing: entries[index].isDrive
-                    ? null
-                    : showCheckBox
-                        ? Checkbox(
-                            value: selected,
-                            onChanged: (v) {
-                              if (v == null) return;
-                              if (v && !selected) {
-                                _selectedItems.add(entries[index]);
-                              } else if (!v && selected) {
-                                _selectedItems.remove(entries[index]);
-                              }
-                              setState(() {});
-                            })
-                        : PopupMenuButton<String>(
-                            tooltip: "",
-                            icon: Icon(Icons.more_vert),
-                            itemBuilder: (context) {
-                              return [
-                                PopupMenuItem(
-                                  child: Text(translate("Delete")),
-                                  value: "delete",
-                                ),
-                                PopupMenuItem(
-                                  child: Text(translate("Multi Select")),
-                                  value: "multi_select",
-                                ),
-                                PopupMenuItem(
-                                  child: Text(translate("Properties")),
-                                  value: "properties",
-                                  enabled: false,
-                                ),
-                                if (!entries[index].isDrive &&
-                                    versionCmp(widget.remoteVersion(), "1.3.0") >=
-                                        0)
-                                  PopupMenuItem(
-                                    child: Text(translate("Rename")),
-                                    value: "rename",
-                                  )
-                              ];
-                            },
-                            onSelected: (v) {
-                              if (v == "delete") {
-                                final items = SelectedItems(isLocal: isLocal);
-                                items.add(entries[index]);
-                                controller.removeAction(items);
-                              } else if (v == "multi_select") {
-                                _selectedItems.clear();
-                                widget.selectMode.toggle(isLocal);
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: entries[index].isDrive
+                      ? Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Image(
+                              image: iconHardDrive,
+                              fit: BoxFit.scaleDown,
+                              color: Theme.of(context)
+                                  .iconTheme
+                                  .color
+                                  ?.withOpacity(0.7)))
+                      : Icon(
+                          entries[index].isFile
+                              ? Icons.feed_outlined
+                              : Icons.folder,
+                          size: 32),
+                  title: Text(entries[index].name),
+                  selected: selected,
+                  subtitle: entries[index].isDrive
+                      ? null
+                      : Text(
+                          "${entries[index].lastModified().toString().replaceAll(".000", "")}   $sizeStr",
+                          style: const TextStyle(
+                              fontSize: 12,
+                              color: MirpgRemoteTheme.textSecondary),
+                        ),
+                  trailing: entries[index].isDrive
+                      ? null
+                      : showCheckBox
+                          ? Checkbox(
+                              value: selected,
+                              onChanged: (v) {
+                                if (v == null) return;
+                                if (v && !selected) {
+                                  _selectedItems.add(entries[index]);
+                                } else if (!v && selected) {
+                                  _selectedItems.remove(entries[index]);
+                                }
                                 setState(() {});
-                              } else if (v == "rename") {
-                                controller.renameAction(
-                                    entries[index], isLocal);
-                              }
-                            }),
-                onTap: () {
-                  if (showCheckBox) {
-                    if (selected) {
-                      _selectedItems.remove(entries[index]);
-                    } else {
-                      _selectedItems.add(entries[index]);
+                              })
+                          : PopupMenuButton<String>(
+                              tooltip: "",
+                              icon: Icon(Icons.more_vert),
+                              itemBuilder: (context) {
+                                return [
+                                  PopupMenuItem(
+                                    child: Text(translate("Delete")),
+                                    value: "delete",
+                                  ),
+                                  PopupMenuItem(
+                                    child: Text(translate("Multi Select")),
+                                    value: "multi_select",
+                                  ),
+                                  PopupMenuItem(
+                                    child: Text(translate("Properties")),
+                                    value: "properties",
+                                    enabled: false,
+                                  ),
+                                  if (!entries[index].isDrive &&
+                                      versionCmp(widget.remoteVersion(),
+                                              "1.3.0") >=
+                                          0)
+                                    PopupMenuItem(
+                                      child: Text(translate("Rename")),
+                                      value: "rename",
+                                    )
+                                ];
+                              },
+                              onSelected: (v) {
+                                if (v == "delete") {
+                                  final items = SelectedItems(isLocal: isLocal);
+                                  items.add(entries[index]);
+                                  controller.removeAction(items);
+                                } else if (v == "multi_select") {
+                                  _selectedItems.clear();
+                                  widget.selectMode.toggle(isLocal);
+                                  setState(() {});
+                                } else if (v == "rename") {
+                                  controller.renameAction(
+                                      entries[index], isLocal);
+                                }
+                              }),
+                  onTap: () {
+                    if (showCheckBox) {
+                      if (selected) {
+                        _selectedItems.remove(entries[index]);
+                      } else {
+                        _selectedItems.add(entries[index]);
+                      }
+                      setState(() {});
+                      return;
                     }
-                    setState(() {});
-                    return;
-                  }
-                  if (entries[index].isDirectory || entries[index].isDrive) {
-                    controller.openDirectory(entries[index].path);
-                  } else {
-                    // Perform file-related tasks.
-                  }
-                },
-                onLongPress: entries[index].isDrive
-                    ? null
-                    : () {
-                        _selectedItems.clear();
-                        widget.selectMode.toggle(isLocal);
-                        if (widget.selectMode.value != SelectMode.none) {
-                          _selectedItems.add(entries[index]);
-                        }
-                        setState(() {});
-                      },
-              ),
+                    if (entries[index].isDirectory || entries[index].isDrive) {
+                      controller.openDirectory(entries[index].path);
+                    } else {
+                      // Perform file-related tasks.
+                    }
+                  },
+                  onLongPress: entries[index].isDrive
+                      ? null
+                      : () {
+                          _selectedItems.clear();
+                          widget.selectMode.toggle(isLocal);
+                          if (widget.selectMode.value != SelectMode.none) {
+                            _selectedItems.add(entries[index]);
+                          }
+                          setState(() {});
+                        },
+                ),
+                if (index < entries.length - 1)
+                  const Divider(height: 1, indent: 64),
+              ],
             );
           },
         );
@@ -861,7 +947,12 @@ class _FileManagerViewState extends State<FileManagerView> {
   }
 
   Widget headTools() => Container(
-          child: Row(
+      padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+      decoration: const BoxDecoration(
+        color: MirpgRemoteTheme.surface,
+        border: Border(bottom: BorderSide(color: MirpgRemoteTheme.divider)),
+      ),
+      child: Row(
         children: [
           Expanded(child: Obx(() {
             final home = controller.options.value.home;
@@ -932,14 +1023,14 @@ class _FileManagerViewState extends State<FileManagerView> {
               padding: EdgeInsets.fromLTRB(30, 5, 30, 0),
               child: Text(
                 controller.directory.value.path,
-                style: TextStyle(color: MyTheme.darkGray),
+                style: const TextStyle(color: MirpgRemoteTheme.textSecondary),
               ),
             ),
             Padding(
               padding: EdgeInsets.all(2),
               child: Text(
                 "${translate("Total")}: ${controller.directory.value.entries.length} ${translate("items")}",
-                style: TextStyle(color: MyTheme.darkGray),
+                style: const TextStyle(color: MirpgRemoteTheme.textSecondary),
               ),
             )
           ],
@@ -990,8 +1081,11 @@ class BottomSheetBody extends StatelessWidget {
             height: 65,
             alignment: Alignment.centerLeft,
             decoration: BoxDecoration(
-                color: MyTheme.accent50,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(10))),
+                color: MirpgRemoteTheme.raised,
+                border: const Border(
+                    top: BorderSide(color: MirpgRemoteTheme.outline)),
+                borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(MirpgRemoteTheme.sheetRadius))),
             child: Padding(
               padding: EdgeInsets.symmetric(horizontal: 15),
               child: Row(

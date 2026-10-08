@@ -2,6 +2,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../models/emulator_model.dart';
 import '../../models/host_management_model.dart';
+import '../../models/remote_operation_state.dart';
+import '../widgets/mirpg_remote_theme.dart';
+import '../widgets/gateway_management_panel.dart';
+import '../widgets/phone_workspace_sheet.dart';
 
 class HostManagementPage extends StatefulWidget {
   const HostManagementPage({
@@ -39,11 +43,42 @@ class _HostManagementPageState extends State<HostManagementPage> {
     _refreshTimer?.cancel();
     if (!widget.active) return;
     if (!widget.model.hostLoading) unawaited(widget.model.refreshHost());
+    if (widget.model.phoneWorkspaceCapability == CapabilityStatus.supported &&
+        !widget.model.phoneWorkspaceLoading) {
+      unawaited(widget.model.refreshPhoneWorkspace());
+    }
+    if (widget.model.gatewayStatusCapability == CapabilityStatus.supported &&
+        !widget.model.gatewayStatusLoading) {
+      unawaited(widget.model.refreshGatewayStatus());
+    }
     _refreshTimer = Timer.periodic(const Duration(seconds: 6), (_) {
+      if (mounted) setState(() {});
       if (widget.active && !widget.model.hostLoading) {
         unawaited(widget.model.refreshHost());
       }
+      if (widget.active &&
+          widget.model.phoneWorkspaceCapability == CapabilityStatus.supported &&
+          !widget.model.phoneWorkspaceLoading) {
+        unawaited(widget.model.refreshPhoneWorkspace());
+      }
+      if (widget.active &&
+          widget.model.gatewayStatusCapability == CapabilityStatus.supported &&
+          !widget.model.gatewayStatusLoading &&
+          !widget.model.gatewayStatusFresh) {
+        unawaited(widget.model.refreshGatewayStatus());
+      }
     });
+  }
+
+  Future<void> _refreshAll() async {
+    final requests = <Future<void>>[widget.model.refreshHost()];
+    if (widget.model.gatewayStatusCapability == CapabilityStatus.supported) {
+      requests.add(widget.model.refreshGatewayStatus());
+    }
+    if (widget.model.phoneWorkspaceCapability == CapabilityStatus.supported) {
+      requests.add(widget.model.refreshPhoneWorkspace());
+    }
+    await Future.wait(requests);
   }
 
   @override
@@ -59,7 +94,7 @@ class _HostManagementPageState extends State<HostManagementPage> {
         builder: (context, _) {
           final snapshot = widget.model.hostSnapshot;
           return RefreshIndicator(
-            onRefresh: widget.model.refreshHost,
+            onRefresh: _refreshAll,
             child: ListView(
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
@@ -72,8 +107,25 @@ class _HostManagementPageState extends State<HostManagementPage> {
                       error: true),
                 if (widget.model.hostMessage.isNotEmpty)
                   _Notice(
-                      text: widget.model.hostMessage,
-                      icon: Icons.check_circle_outline),
+                      text: widget.model.hostMessage, icon: Icons.info_outline),
+                _phoneWorkspaceCard(),
+                if (widget.model.gatewayStatusCapability ==
+                    CapabilityStatus.supported) ...[
+                  const SizedBox(height: 16),
+                  const MirpgSectionHeader(
+                    title: 'Services',
+                    subtitle: 'Services running on this Windows PC',
+                  ),
+                  const SizedBox(height: 10),
+                  _gatewayCard(),
+                ],
+                const SizedBox(height: 16),
+                if (snapshot != null && !widget.model.hostSnapshotFresh)
+                  const _Notice(
+                    text:
+                        'System data is stale. Refresh before using process controls.',
+                    icon: Icons.schedule_outlined,
+                  ),
                 if (snapshot == null && !widget.model.hostLoading)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 48),
@@ -88,7 +140,7 @@ class _HostManagementPageState extends State<HostManagementPage> {
                 if (snapshot != null) ...[
                   _systemSummary(snapshot),
                   const SizedBox(height: 16),
-                  _watchdog(snapshot.watchdog),
+                  _watchdog(snapshot.watchdog, widget.model.hostSnapshotFresh),
                   const SizedBox(height: 16),
                   _processes(snapshot.processes),
                 ],
@@ -98,43 +150,175 @@ class _HostManagementPageState extends State<HostManagementPage> {
         },
       );
 
+  Widget _gatewayCard() {
+    final status = widget.model.gatewayStatus;
+    final loading = widget.model.gatewayStatusLoading;
+    final fresh = widget.model.gatewayStatusFresh;
+    final title = status == null
+        ? 'Marquee Gateway'
+        : !status.installed
+            ? 'Gateway not found'
+            : status.running &&
+                    status.reachable &&
+                    fresh &&
+                    status.healthMeasured &&
+                    status.healthReady
+                ? 'Gateway healthy'
+                : status.running
+                    ? 'Gateway running'
+                    : 'Gateway needs attention';
+    final subtitle = widget.model.gatewayError.isNotEmpty
+        ? widget.model.gatewayError
+        : status == null
+            ? loading
+                ? 'Checking Gateway…'
+                : 'Gateway status has not been measured yet'
+            : '${status.version.isEmpty ? 'Version unknown' : status.version} • '
+                '${fresh ? 'Live' : 'Stale'} • '
+                '${status.reachability == 'reachable' ? 'Reachable' : status.reachability == 'unreachable' ? 'Unreachable' : 'Reachability unknown'}';
+    final good = status != null &&
+        status.installed &&
+        status.running &&
+        status.reachable &&
+        status.healthMeasured &&
+        status.healthReady &&
+        fresh;
+    return Card(
+      child: ListTile(
+        minVerticalPadding: 14,
+        leading: Icon(
+          Icons.hub_outlined,
+          color:
+              good ? MirpgRemoteTheme.accent : MirpgRemoteTheme.textSecondary,
+        ),
+        title: Text(title),
+        subtitle: Text(subtitle, maxLines: 3, overflow: TextOverflow.ellipsis),
+        trailing: loading
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.chevron_right),
+        onTap: () => showGatewayManagementPanel(
+          context,
+          model: widget.model,
+          canControl: widget.canControl,
+        ),
+      ),
+    );
+  }
+
+  Widget _phoneWorkspaceCard() {
+    final capability = widget.model.phoneWorkspaceCapability;
+    final support = widget.model.phoneWorkspaceSupport;
+    final active = support?.activeSession;
+    final loading = widget.model.phoneWorkspaceLoading;
+    final title = active != null
+        ? 'Phone Workspace active'
+        : support?.supported == true
+            ? 'Phone Workspace ready'
+            : capability == CapabilityStatus.unsupported
+                ? 'Phone Workspace unavailable'
+                : 'Phone Workspace';
+    final subtitle = active != null
+        ? active.profile.label
+        : support?.reason.isNotEmpty == true
+            ? support!.reason
+            : loading
+                ? 'Checking virtual display support…'
+                : 'Phone-shaped remote desktop without changing physical monitors';
+    return Card(
+      child: ListTile(
+        minVerticalPadding: 14,
+        leading: Icon(
+          active != null ? Icons.phone_android : Icons.add_to_queue_outlined,
+          color: active != null || support?.supported == true
+              ? MirpgRemoteTheme.accent
+              : MirpgRemoteTheme.textSecondary,
+        ),
+        title: Text(title),
+        subtitle: Text(subtitle, maxLines: 3, overflow: TextOverflow.ellipsis),
+        trailing: loading
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.chevron_right),
+        onTap: capability == CapabilityStatus.unsupported
+            ? null
+            : () => showPhoneWorkspaceSheet(
+                  context,
+                  model: widget.model,
+                  canControl: widget.canControl,
+                ),
+      ),
+    );
+  }
+
   Widget _systemSummary(HostSystemSnapshot snapshot) {
-    final memory = snapshot.memoryTotalBytes <= 0
-        ? 0.0
-        : snapshot.memoryUsedBytes / snapshot.memoryTotalBytes * 100;
+    final memoryUsed = snapshot.memoryUsedBytes;
+    final memoryTotal = snapshot.memoryTotalBytes;
+    final memory = memoryUsed != null && memoryTotal != null && memoryTotal > 0
+        ? memoryUsed / memoryTotal * 100
+        : null;
+    final now = hostMonotonicNowMs();
+    final age = snapshot.ageAt(now);
+    final fresh =
+        snapshot.isFreshAt(now, connected: widget.model.hostConnectionCurrent);
+    final source = snapshot.source == 'windows_sysinfo'
+        ? 'Windows sampler'
+        : snapshot.source;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('System', style: Theme.of(context).textTheme.titleLarge),
-      const SizedBox(height: 8),
+      MirpgSectionHeader(
+        title: 'System',
+        subtitle:
+            '${fresh ? 'Live' : 'Stale'} • Last updated ${_age(age)}${source.isEmpty || source == 'unknown' ? '' : ' • $source'}',
+      ),
+      const SizedBox(height: 12),
       Wrap(spacing: 10, runSpacing: 10, children: [
         _MetricCard(
             icon: Icons.memory,
             label: 'CPU',
-            value: '${snapshot.cpuPercent.toStringAsFixed(0)}%',
-            detail:
-                '${snapshot.logicalCpus} logical cores${snapshot.cpuName.isEmpty ? '' : ' • ${snapshot.cpuName}'}'),
+            value: snapshot.cpuPercent == null
+                ? 'Unavailable'
+                : '${snapshot.cpuPercent!.toStringAsFixed(0)}%',
+            detail: snapshot.logicalCpus == null
+                ? 'Whole PC'
+                : 'Whole PC • ${snapshot.logicalCpus} logical cores${snapshot.cpuName.isEmpty ? '' : ' • ${snapshot.cpuName}'}'),
         _MetricCard(
             icon: Icons.storage_outlined,
             label: 'Memory',
-            value: '${memory.toStringAsFixed(0)}%',
-            detail:
-                '${_bytes(snapshot.memoryUsedBytes)} / ${_bytes(snapshot.memoryTotalBytes)}'),
+            value: memory == null
+                ? 'Unavailable'
+                : '${memory.toStringAsFixed(0)}%',
+            detail: memory == null
+                ? 'Measurement unavailable'
+                : '${_bytes(memoryUsed)} / ${_bytes(memoryTotal)}'),
         _MetricCard(
             icon: Icons.schedule,
             label: 'Uptime',
-            value: _uptime(snapshot.uptimeSecs),
+            value: snapshot.uptimeSecs == null
+                ? 'Unavailable'
+                : _uptime(snapshot.uptimeSecs!),
             detail: 'Windows uptime'),
         _MetricCard(
             icon: snapshot.watchdog.running
                 ? Icons.health_and_safety_outlined
                 : Icons.warning_amber_rounded,
             label: 'Watchdog',
-            value: snapshot.watchdog.running ? 'Active' : 'Stopped',
-            detail: '20 second health checks'),
+            value: fresh
+                ? (snapshot.watchdog.running ? 'Active' : 'Stopped')
+                : 'Stale',
+            detail: fresh
+                ? '20 second health checks'
+                : 'Refresh to verify watchdog state'),
       ]),
     ]);
   }
 
-  Widget _watchdog(HostWatchdogInfo watchdog) => Card(
+  Widget _watchdog(HostWatchdogInfo watchdog, bool fresh) => Card(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child:
@@ -145,7 +329,7 @@ class _HostManagementPageState extends State<HostManagementPage> {
               Expanded(
                   child: Text('Recovery watchdog',
                       style: Theme.of(context).textTheme.titleMedium)),
-              Text(watchdog.running ? 'Active' : 'Stopped'),
+              Text(fresh ? (watchdog.running ? 'Active' : 'Stopped') : 'Stale'),
             ]),
             const SizedBox(height: 8),
             for (final component in watchdog.components)
@@ -155,7 +339,11 @@ class _HostManagementPageState extends State<HostManagementPage> {
                     color: _healthColor(context, component.state)),
                 title: Text(component.label),
                 subtitle: Text(component.detail),
-                trailing: component.recoverable && widget.canControl
+                trailing: component.recoverable &&
+                        fresh &&
+                        widget.canControl &&
+                        widget.model.hostRecoveryCapability ==
+                            CapabilityStatus.supported
                     ? IconButton(
                         tooltip: 'Recover ${component.label}',
                         icon: const Icon(Icons.restart_alt),
@@ -171,6 +359,8 @@ class _HostManagementPageState extends State<HostManagementPage> {
       );
 
   Widget _processes(List<HostProcessInfo> processes) {
+    final snapshot = widget.model.hostSnapshot;
+    final fresh = widget.model.hostSnapshotFresh;
     final query = _search.text.trim().toLowerCase();
     final visible = processes
         .where((process) =>
@@ -204,8 +394,18 @@ class _HostManagementPageState extends State<HostManagementPage> {
               title: Text(
                   process.name.isEmpty ? 'PID ${process.pid}' : process.name),
               subtitle: Text(
-                  'PID ${process.pid} • ${process.cpuPercent.toStringAsFixed(1)}% CPU • ${_bytes(process.memoryBytes)}'),
-              trailing: process.canEnd && widget.canControl
+                  'PID ${process.pid} • ${_processCpu(process, snapshot)} • ${_bytes(process.memoryBytes)}'),
+              trailing: process.canEnd &&
+                      process.startTimeSecs > 0 &&
+                      process.creationTime100ns > 0 &&
+                      snapshot?.schema != null &&
+                      snapshot!.schema >= 3 &&
+                      fresh &&
+                      widget.canControl &&
+                      widget.model.hostProcessEndCapability ==
+                          CapabilityStatus.supported &&
+                      widget.model.hostProcessIdentityCapability ==
+                          CapabilityStatus.supported
                   ? IconButton(
                       tooltip: 'End task',
                       icon: const Icon(Icons.stop_circle_outlined),
@@ -242,7 +442,14 @@ class _HostManagementPageState extends State<HostManagementPage> {
           ),
         ) ??
         false;
-    if (confirmed) await widget.model.endProcess(process.pid);
+    if (confirmed &&
+        mounted &&
+        widget.canControl &&
+        widget.model.hostSnapshotFresh) {
+      await widget.model.endProcess(process.pid,
+          startTimeSecs: process.startTimeSecs,
+          creationTime100ns: process.creationTime100ns);
+    }
   }
 }
 
@@ -307,12 +514,13 @@ IconData _healthIcon(String state) => switch (state) {
     };
 
 Color? _healthColor(BuildContext context, String state) => switch (state) {
-      'healthy' => Colors.green,
+      'healthy' => MirpgRemoteTheme.accent,
       'unhealthy' => Theme.of(context).colorScheme.error,
       _ => null,
     };
 
-String _bytes(int bytes) {
+String _bytes(int? bytes) {
+  if (bytes == null) return 'Unavailable';
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   var value = bytes.toDouble();
@@ -322,6 +530,22 @@ String _bytes(int bytes) {
     unit++;
   }
   return '${value.toStringAsFixed(unit < 2 ? 0 : 1)} ${units[unit]}';
+}
+
+String _age(Duration? age) {
+  if (age == null) return 'unknown';
+  if (age.inSeconds < 2) return 'just now';
+  if (age.inSeconds < 60) return '${age.inSeconds}s ago';
+  return '${age.inMinutes}m ago';
+}
+
+String _processCpu(HostProcessInfo process, HostSystemSnapshot? snapshot) {
+  final value = process.cpuPercent;
+  if (value == null) return 'CPU unavailable';
+  if ((snapshot?.schema ?? 1) >= 2) {
+    return '${value.toStringAsFixed(1)}% of whole PC';
+  }
+  return '${value.toStringAsFixed(1)}% CPU (legacy scale)';
 }
 
 String _uptime(int seconds) {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::server::emulator::{
-    remote::{authorize_request, GuestEvent},
+    remote::{authorize_host_operation, authorize_request, GuestEvent},
     remote_windows::{self, GuestSession},
 };
 
@@ -17,22 +17,47 @@ impl Connection {
                 .send_emulator_response(remote_windows::error_response(id, error))
                 .await;
         }
+        if let Err(error) = authorize_host_operation(
+            &request,
+            &self.emulator_operation_identity,
+            self.emulator_operation_generation,
+        ) {
+            return self
+                .send_emulator_response(remote_windows::error_response(id, error))
+                .await;
+        }
         let response = match request.union.as_ref() {
+            Some(emulator_request::Union::RefreshVideo(_)) => {
+                let session = self
+                    .emulator_session
+                    .as_ref()
+                    .filter(|session| session.id == request.session_id)
+                    .or_else(|| {
+                        self.emulator_previews
+                            .values()
+                            .find(|session| session.id == request.session_id)
+                    });
+                if let Some(session) = session {
+                    if let Err(error) = session.refresh_video() {
+                        return self
+                            .send_emulator_response(remote_windows::error_response(
+                                id,
+                                error.to_string(),
+                            ))
+                            .await;
+                    }
+                }
+                self.update_auto_disconnect_timer();
+                return true;
+            }
             Some(emulator_request::Union::Previews(previews)) => {
                 return self.set_emulator_previews(id, previews).await;
             }
             Some(emulator_request::Union::List(_)) => {
-                match hbb_common::tokio::task::spawn_blocking(move || remote_windows::inventory(id))
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(error) => remote_windows::error_response(id, error.to_string()),
-                }
-            }
-            Some(emulator_request::Union::Host(host)) => {
-                let host = host.clone();
+                let operation_identity = self.emulator_operation_identity.clone();
+                let operation_generation = self.emulator_operation_generation;
                 match hbb_common::tokio::task::spawn_blocking(move || {
-                    crate::server::emulator::host_management::handle_request(id, &host)
+                    remote_windows::inventory(id, &operation_identity, operation_generation)
                 })
                 .await
                 {
@@ -40,9 +65,64 @@ impl Connection {
                     Err(error) => remote_windows::error_response(id, error.to_string()),
                 }
             }
+            Some(emulator_request::Union::Host(host)) => {
+                let host = host.clone();
+                if host.action == "status" {
+                    match hbb_common::tokio::task::spawn_blocking(move || {
+                        crate::server::emulator::host_management::handle_request(id, &host)
+                    })
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => remote_windows::error_response(id, error.to_string()),
+                    }
+                } else if matches!(
+                    host.action.as_str(),
+                    "windows_list" | "phone_workspace_support" | "gateway_status"
+                ) {
+                    let operation_identity = self.emulator_operation_identity.clone();
+                    let operation_generation = self.emulator_operation_generation;
+                    match hbb_common::tokio::task::spawn_blocking(move || {
+                        crate::server::emulator::host_management::handle_request_scoped(
+                            id,
+                            &host,
+                            &operation_identity,
+                            operation_generation,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => remote_windows::error_response(id, error.to_string()),
+                    }
+                } else {
+                    let action_host = host.clone();
+                    let operation_identity = self.emulator_operation_identity.clone();
+                    let operation_generation = self.emulator_operation_generation;
+                    self.emulator_operation_replay
+                        .apply(&host, id, || async move {
+                            match hbb_common::tokio::task::spawn_blocking(move || {
+                                crate::server::emulator::host_management::handle_request_scoped(
+                                    id,
+                                    &action_host,
+                                    &operation_identity,
+                                    operation_generation,
+                                )
+                            })
+                            .await
+                            {
+                                Ok(response) => response,
+                                Err(error) => remote_windows::error_response(id, error.to_string()),
+                            }
+                        })
+                        .await
+                }
+            }
             Some(emulator_request::Union::Select(_)) => {
                 self.emulator_session.take();
-                if !self.emulator_dashboard { self.suspend_emulator_desktop(); }
+                if !self.emulator_dashboard {
+                    self.suspend_emulator_desktop();
+                }
                 if let Some(emulator_request::Union::Select(selection)) = request.union.as_ref() {
                     self.emulator_previews.remove(&selection.target_id);
                 }
@@ -105,24 +185,42 @@ impl Connection {
     pub(super) async fn handle_emulator_event(&mut self, event: GuestEvent) -> bool {
         let preview_id = match &event {
             GuestEvent::Response(response) => match response.union.as_ref() {
-                Some(emulator_response::Union::Status(status)) if status.preview => Some(status.session_id),
+                Some(emulator_response::Union::Status(status)) if status.preview => {
+                    Some(status.session_id)
+                }
                 _ => None,
             },
-            GuestEvent::Frame(frame) if self.emulator_previews.values().any(|session| session.id == frame.session_id) => Some(frame.session_id),
+            GuestEvent::Frame(frame)
+                if self
+                    .emulator_previews
+                    .values()
+                    .any(|session| session.id == frame.session_id) =>
+            {
+                Some(frame.session_id)
+            }
             _ => None,
         };
         if let Some(id) = preview_id {
-            if !self.emulator_previews.values().any(|session| session.id == id) { return true; }
+            if !self
+                .emulator_previews
+                .values()
+                .any(|session| session.id == id)
+            {
+                return true;
+            }
             let mut message = Message::new();
             match event {
                 GuestEvent::Response(response) => {
-                    if let Some(emulator_response::Union::Status(status)) = response.union.as_ref() {
-                        if status.state.enum_value_or_default() == EmulatorSessionState::EmulatorFailed {
+                    if let Some(emulator_response::Union::Status(status)) = response.union.as_ref()
+                    {
+                        if status.state.enum_value_or_default()
+                            == EmulatorSessionState::EmulatorFailed
+                        {
                             self.emulator_previews.retain(|_, session| session.id != id);
                         }
                     }
                     message.set_emulator_response(response);
-                },
+                }
                 GuestEvent::Frame(frame) => message.set_emulator_video_frame(frame),
             }
             return self.send_emulator_message(message).await;
@@ -155,23 +253,71 @@ impl Connection {
     }
 
     async fn set_emulator_previews(&mut self, id: u64, previews: &EmulatorPreviewRequest) -> bool {
-        let displays = previews.displays.iter().map(|id| *id as usize).collect::<Vec<_>>();
-        if displays.iter().any(|id| *id >= Self::video_source_count(self.video_source())) {
-            return self.send_emulator_response(remote_windows::error_response(id, "Monitor is no longer available")).await;
+        let displays = previews
+            .displays
+            .iter()
+            .map(|id| *id as usize)
+            .collect::<Vec<_>>();
+        if displays
+            .iter()
+            .any(|id| *id >= Self::video_source_count(self.video_source()))
+        {
+            return self
+                .send_emulator_response(remote_windows::error_response(
+                    id,
+                    "Monitor is no longer available",
+                ))
+                .await;
         }
         self.emulator_dashboard = previews.enabled;
-        let selected = self.emulator_session.as_ref().map(|session| session.target_id.as_str());
-        self.emulator_previews.retain(|target, _| previews.enabled && previews.target_ids.contains(target) && Some(target.as_str()) != selected);
+        let selected = self
+            .emulator_session
+            .as_ref()
+            .map(|session| session.target_id.as_str());
+        self.emulator_previews.retain(|target, _| {
+            previews.enabled
+                && previews.target_ids.contains(target)
+                && Some(target.as_str()) != selected
+        });
         for target in &previews.target_ids {
-            if self.emulator_previews.contains_key(target) || self.emulator_session.as_ref().map(|session| &session.target_id) == Some(target) { continue; }
+            if self.emulator_previews.contains_key(target)
+                || self
+                    .emulator_session
+                    .as_ref()
+                    .map(|session| &session.target_id)
+                    == Some(target)
+            {
+                continue;
+            }
             match GuestSession::start_preview(id, target.clone(), self.emulator_tx.clone()) {
                 Ok(session) => {
-                    let response = remote_windows::with_preview(remote_windows::status_response(id, session.id, target, EmulatorSessionState::EmulatorStarting, 0, 0, String::new()), true);
+                    let response = remote_windows::with_preview(
+                        remote_windows::status_response(
+                            id,
+                            session.id,
+                            target,
+                            EmulatorSessionState::EmulatorStarting,
+                            0,
+                            0,
+                            String::new(),
+                        ),
+                        true,
+                    );
                     self.emulator_previews.insert(target.clone(), session);
-                    if !self.send_emulator_response(response).await { return false; }
+                    if !self.send_emulator_response(response).await {
+                        return false;
+                    }
                 }
                 Err(error) => {
-                    if !self.send_emulator_response(remote_windows::error_response(id, error.to_string())).await { return false; }
+                    if !self
+                        .send_emulator_response(remote_windows::error_response(
+                            id,
+                            error.to_string(),
+                        ))
+                        .await
+                    {
+                        return false;
+                    }
                 }
             }
         }
@@ -181,7 +327,16 @@ impl Connection {
             self.capture_displays(&[], &[], &[self.display_idx]).await;
         }
         let mut response = remote_windows::response(id);
-        response.set_previews(EmulatorPreviewState { enabled: previews.enabled, session_ids: self.emulator_previews.values().map(|session| session.id).collect(), ..Default::default() });
+        response.set_previews(EmulatorPreviewState {
+            enabled: previews.enabled,
+            session_ids: self
+                .emulator_previews
+                .values()
+                .map(|session| session.id)
+                .collect(),
+            displays: previews.displays.clone(),
+            ..Default::default()
+        });
         self.send_emulator_response(response).await
     }
 

@@ -788,9 +788,29 @@ pub fn session_set_confirm_override_file(
     need_override: bool,
     remember: bool,
     is_upload: bool,
+    conflict_token: String,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.set_confirm_override_file(act_id, file_num, need_override, remember, is_upload);
+        session.set_confirm_override_file(
+            act_id,
+            file_num,
+            need_override,
+            remember,
+            is_upload,
+            conflict_token,
+        );
+    }
+}
+
+pub fn session_set_confirm_keep_both_file(
+    session_id: SessionID,
+    act_id: i32,
+    file_num: i32,
+    is_upload: bool,
+    conflict_token: String,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.set_confirm_keep_both_file(act_id, file_num, is_upload, conflict_token);
     }
 }
 
@@ -832,6 +852,12 @@ pub fn session_remove_all_empty_dirs(
 pub fn session_cancel_job(session_id: SessionID, act_id: i32) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.cancel_job(act_id);
+    }
+}
+
+pub fn session_pause_job(session_id: SessionID, act_id: i32) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.pause_job(act_id);
     }
 }
 
@@ -900,9 +926,10 @@ pub fn session_add_job(
     file_num: i32,
     include_hidden: bool,
     is_remote: bool,
+    ownership_token: String,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.add_job(
+        session.add_job_with_ownership_token(
             act_id,
             fs::JobType::Generic.into(),
             path,
@@ -910,6 +937,7 @@ pub fn session_add_job(
             file_num,
             include_hidden,
             is_remote,
+            ownership_token,
         );
     }
 }
@@ -2929,10 +2957,62 @@ pub fn main_set_common(_key: String, _value: String) {
     }
 }
 
+fn codex_operation_scope(
+    payload: &serde_json::Value,
+) -> crate::ui_session_interface::CodexOperationScope {
+    crate::ui_session_interface::CodexOperationScope {
+        operation_id: payload
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        session_identity: payload
+            .get("session_identity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        target_identity: payload
+            .get("target_identity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        session_generation: payload
+            .get("session_generation")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default(),
+    }
+}
+
 pub fn session_set_common(session_id: SessionID, key: String, value: String) {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
         if key == "emulator-request" {
             s.request_emulator(value);
+            return;
+        }
+        if key == "manual-clipboard-request" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let direction = payload
+                    .get("direction")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let target_identity = payload
+                    .get("target_identity")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                s.request_manual_clipboard(request_id, direction, text, target_identity);
+            }
             return;
         }
         if key == "continue-insecure-connection" {
@@ -2941,6 +3021,139 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
         }
         if key == "codex-list-threads" {
             s.request_codex_threads(value);
+            return;
+        }
+        if key == "codex-list-workspaces" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = payload
+                    .get("cursor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(50)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_workspaces(request_id, cursor, limit);
+            }
+            return;
+        }
+        if key == "codex-list-task-changes" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = payload
+                    .get("cursor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(25)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_task_changes(request_id, thread_id, cursor, limit);
+            }
+            return;
+        }
+        if key == "codex-read-task-diff" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let change_id = payload
+                    .get("change_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let offset = payload
+                    .get("offset")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(16 * 1024)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_task_diff(request_id, thread_id, change_id, offset, limit);
+            }
+            return;
+        }
+        if key == "codex-list-artifacts" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = payload
+                    .get("cursor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(25)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_artifacts(request_id, thread_id, cursor, limit);
+            }
+            return;
+        }
+        if key == "codex-read-artifact" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let artifact_id = payload
+                    .get("artifact_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let offset = payload
+                    .get("offset")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(16 * 1024)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_artifact(request_id, thread_id, artifact_id, offset, limit);
+            }
             return;
         }
         if key == "codex-thread-history" {
@@ -3017,7 +3230,8 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                s.resume_codex_thread(request_id, thread_id);
+                let scope = codex_operation_scope(&payload);
+                s.resume_codex_thread(request_id, thread_id, scope);
             }
             return;
         }
@@ -3028,12 +3242,18 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                let workspace_id = payload
+                    .get("workspace_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
                 let workspace_thread_id = payload
                     .get("workspace_thread_id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                s.start_codex_thread(request_id, workspace_thread_id);
+                let scope = codex_operation_scope(&payload);
+                s.start_codex_thread(request_id, workspace_id, workspace_thread_id, scope);
             }
             return;
         }
@@ -3054,7 +3274,8 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                s.start_codex_turn(request_id, thread_id, text);
+                let scope = codex_operation_scope(&payload);
+                s.start_codex_turn(request_id, thread_id, text, scope);
             }
             return;
         }
@@ -3080,7 +3301,35 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                s.steer_codex_turn(request_id, thread_id, turn_id, text);
+                let scope = codex_operation_scope(&payload);
+                s.steer_codex_turn(request_id, thread_id, turn_id, text, scope);
+            }
+            return;
+        }
+        if key == "codex-queue-turn" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let scope = codex_operation_scope(&payload);
+                s.queue_codex_turn(request_id, thread_id, turn_id, text, scope);
             }
             return;
         }
@@ -3101,7 +3350,8 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                s.interrupt_codex_turn(request_id, thread_id, turn_id);
+                let scope = codex_operation_scope(&payload);
+                s.interrupt_codex_turn(request_id, thread_id, turn_id, scope);
             }
             return;
         }
@@ -3127,12 +3377,26 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                let item_id = payload
+                    .get("item_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
                 let approve = payload
                     .get("decision")
                     .and_then(serde_json::Value::as_str)
                     .map(|decision| decision == "approve")
                     .unwrap_or(false);
-                s.respond_codex_approval(request_id, approval_id, thread_id, turn_id, approve);
+                let scope = codex_operation_scope(&payload);
+                s.respond_codex_approval(
+                    request_id,
+                    approval_id,
+                    thread_id,
+                    turn_id,
+                    item_id,
+                    approve,
+                    scope,
+                );
             }
             return;
         }

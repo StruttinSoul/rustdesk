@@ -114,6 +114,8 @@ qrcode-generator = "4.1"
 winapi = { version = "0.3", features = [
     "winuser",
     "wincrypt",
+    "dpapi",
+    "winbase",
     "shellscalingapi",
     "pdh",
     "synchapi",
@@ -127,6 +129,7 @@ winapi = { version = "0.3", features = [
     "winspool",
     "iphlpapi",
 ] }
+native-tls = "0.2"
 windows = { version = "0.61", features = [
     "Win32",
     "Win32_Foundation",

@@ -58,6 +58,21 @@ mod mobile_wheel;
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Clone, Default)]
+pub struct CodexOperationScope {
+    pub operation_id: String,
+    pub session_identity: String,
+    pub target_identity: String,
+    pub session_generation: u64,
+}
+
+fn apply_codex_operation_scope(request: &mut CodexControlRequest, scope: CodexOperationScope) {
+    request.operation_id = scope.operation_id;
+    request.session_identity = scope.session_identity;
+    request.target_identity = scope.target_identity;
+    request.session_generation = scope.session_generation;
+}
+
+#[derive(Clone, Default)]
 pub struct Session<T: InvokeUiSession> {
     pub password: String,
     pub args: Vec<String>,
@@ -534,6 +549,7 @@ impl<T: InvokeUiSession> Session<T> {
             is_override,
             remember,
             is_upload,
+            String::new(),
         )));
         true
     }
@@ -850,12 +866,133 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    pub fn request_codex_workspaces(&self, request_id: String, cursor: String, limit: u32) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_list_workspaces(CodexListWorkspacesRequest {
+            cursor,
+            limit,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn request_codex_task_changes(
+        &self,
+        request_id: String,
+        thread_id: String,
+        cursor: String,
+        limit: u32,
+    ) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_list_task_changes(CodexListTaskChangesRequest {
+            thread_id,
+            cursor,
+            limit,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn request_codex_task_diff(
+        &self,
+        request_id: String,
+        thread_id: String,
+        change_id: String,
+        offset: u64,
+        limit: u32,
+    ) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_read_task_diff(CodexReadTaskDiffRequest {
+            thread_id,
+            change_id,
+            offset,
+            limit,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn request_codex_artifacts(
+        &self,
+        request_id: String,
+        thread_id: String,
+        cursor: String,
+        limit: u32,
+    ) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_list_artifacts(CodexListArtifactsRequest {
+            thread_id,
+            cursor,
+            limit,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn request_codex_artifact(
+        &self,
+        request_id: String,
+        thread_id: String,
+        artifact_id: String,
+        offset: u64,
+        limit: u32,
+    ) {
+        let mut request = CodexReadRequest::new();
+        request.request_id = request_id;
+        request.set_read_artifact(CodexReadArtifactRequest {
+            thread_id,
+            artifact_id,
+            offset,
+            limit,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_read_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
     pub fn request_emulator(&self, payload: String) {
         if let Some(request) = crate::client::emulator_request_from_json(&payload) {
             let mut message = Message::new();
             message.set_emulator_request(request);
             self.send(Data::Message(message));
         }
+    }
+
+    pub fn request_manual_clipboard(
+        &self,
+        request_id: String,
+        direction: String,
+        text: String,
+        target_identity: String,
+    ) {
+        let direction = match direction.as_str() {
+            "phone_to_host" => ManualClipboardDirection::ManualClipboardPhoneToHost,
+            "host_to_phone" => ManualClipboardDirection::ManualClipboardHostToPhone,
+            _ => ManualClipboardDirection::ManualClipboardUnknown,
+        };
+        let request = ManualClipboardRequest {
+            request_id,
+            direction: direction.into(),
+            text,
+            target_identity,
+            ..Default::default()
+        };
+        let mut message = Message::new();
+        message.set_manual_clipboard_request(request);
+        self.send(Data::Message(message));
     }
 
     pub fn request_codex_history(
@@ -903,9 +1040,15 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
-    pub fn resume_codex_thread(&self, request_id: String, thread_id: String) {
+    pub fn resume_codex_thread(
+        &self,
+        request_id: String,
+        thread_id: String,
+        scope: CodexOperationScope,
+    ) {
         let mut request = CodexControlRequest::new();
         request.request_id = request_id;
+        apply_codex_operation_scope(&mut request, scope);
         request.set_resume_thread(CodexResumeThreadRequest {
             thread_id,
             ..Default::default()
@@ -915,11 +1058,19 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
-    pub fn start_codex_thread(&self, request_id: String, workspace_thread_id: String) {
+    pub fn start_codex_thread(
+        &self,
+        request_id: String,
+        workspace_id: String,
+        workspace_thread_id: String,
+        scope: CodexOperationScope,
+    ) {
         let mut request = CodexControlRequest::new();
         request.request_id = request_id;
+        apply_codex_operation_scope(&mut request, scope);
         request.set_start_thread(CodexStartThreadRequest {
             workspace_thread_id,
+            workspace_id,
             ..Default::default()
         });
         let mut msg_out = Message::new();
@@ -927,9 +1078,16 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
-    pub fn start_codex_turn(&self, request_id: String, thread_id: String, text: String) {
+    pub fn start_codex_turn(
+        &self,
+        request_id: String,
+        thread_id: String,
+        text: String,
+        scope: CodexOperationScope,
+    ) {
         let mut request = CodexControlRequest::new();
         request.request_id = request_id;
+        apply_codex_operation_scope(&mut request, scope);
         request.set_start_turn(CodexStartTurnRequest {
             thread_id,
             text,
@@ -946,9 +1104,11 @@ impl<T: InvokeUiSession> Session<T> {
         thread_id: String,
         turn_id: String,
         text: String,
+        scope: CodexOperationScope,
     ) {
         let mut request = CodexControlRequest::new();
         request.request_id = request_id;
+        apply_codex_operation_scope(&mut request, scope);
         request.set_steer_turn(CodexSteerTurnRequest {
             thread_id,
             turn_id,
@@ -960,9 +1120,38 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
-    pub fn interrupt_codex_turn(&self, request_id: String, thread_id: String, turn_id: String) {
+    pub fn queue_codex_turn(
+        &self,
+        request_id: String,
+        thread_id: String,
+        turn_id: String,
+        text: String,
+        scope: CodexOperationScope,
+    ) {
         let mut request = CodexControlRequest::new();
         request.request_id = request_id;
+        apply_codex_operation_scope(&mut request, scope);
+        request.set_queue_turn(CodexQueueTurnRequest {
+            thread_id,
+            turn_id,
+            text,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_codex_control_request(request);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn interrupt_codex_turn(
+        &self,
+        request_id: String,
+        thread_id: String,
+        turn_id: String,
+        scope: CodexOperationScope,
+    ) {
+        let mut request = CodexControlRequest::new();
+        request.request_id = request_id;
+        apply_codex_operation_scope(&mut request, scope);
         request.set_interrupt_turn(CodexInterruptTurnRequest {
             thread_id,
             turn_id,
@@ -979,14 +1168,18 @@ impl<T: InvokeUiSession> Session<T> {
         approval_id: String,
         thread_id: String,
         turn_id: String,
+        item_id: String,
         approve: bool,
+        scope: CodexOperationScope,
     ) {
         let mut request = CodexControlRequest::new();
         request.request_id = request_id;
+        apply_codex_operation_scope(&mut request, scope);
         request.set_respond_approval(CodexRespondApprovalRequest {
             approval_id,
             thread_id,
             turn_id,
+            item_id,
             decision: if approve {
                 CodexApprovalDecision::CodexApprovalApprove
             } else {
@@ -1475,6 +1668,14 @@ impl<T: InvokeUiSession> Session<T> {
         let round = connection_round_state_lock.new_round();
         drop(connection_round_state_lock);
 
+        // Privacy and lock-on-disconnect describe the authenticated transport
+        // that just ended. A reconnect is a new connection round, so do not
+        // carry those sensitive runtime states into it.
+        self.lc
+            .write()
+            .unwrap()
+            .reset_sensitive_session_state();
+
         let cloned = self.clone();
 
         // override only if true
@@ -1599,6 +1800,12 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     fn try_auto_start_job_str(is_reconnected: bool, job_str: &str) -> Option<String> {
+        // Flutter/mobile exposes interrupted transfers for explicit user resume.
+        // Reconnection must never replay a transfer automatically because the
+        // previous request may already have been accepted by the peer.
+        if cfg!(feature = "flutter") {
+            return None;
+        }
         if is_reconnected {
             let job_str = job_str.trim();
             if let Some(stripped) = job_str.strip_suffix('}') {
@@ -1875,10 +2082,21 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn set_permission(&self, name: &str, value: bool);
     fn close_success(&self);
     fn update_quality_status(&self, qs: QualityStatus);
+    fn update_stream_liveness(&self, _display: usize, _sequence: u64) {}
+    fn update_decoder_health(&self, _display: usize, _healthy: bool) {}
     fn set_connection_type(&self, is_secured: bool, direct: bool, stream_type: &str);
     fn set_fingerprint(&self, fingerprint: String);
     fn job_error(&self, id: i32, err: String, file_num: i32);
     fn job_done(&self, id: i32, file_num: i32);
+    fn job_paused(&self, _id: i32, _accepted: bool, _error: String) {}
+    fn job_cancelled(
+        &self,
+        _id: i32,
+        _applied: bool,
+        _confirmed: bool,
+        _error: String,
+    ) {
+    }
     fn clear_all_jobs(&self);
     fn new_message(&self, msg: String);
     fn update_transfer_list(&self);
@@ -1899,6 +2117,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
         to: String,
         is_upload: bool,
         is_identical: bool,
+        conflict_token: String,
     );
     fn update_block_input_state(&self, on: bool);
     fn job_progress(&self, id: i32, file_num: i32, speed: f64, finished_size: f64);
@@ -1930,6 +2149,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn handle_codex_read_response(&self, response: CodexReadResponse);
     fn handle_codex_control_response(&self, response: CodexControlResponse);
     fn handle_emulator_response(&self, _response: EmulatorResponse) {}
+    fn handle_manual_clipboard_response(&self, _response: ManualClipboardResponse) {}
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {

@@ -63,6 +63,7 @@ use std::{
 };
 
 pub const OPTION_REFRESH: &'static str = "refresh";
+const VIDEO_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[cfg(windows)]
 const DXGI_RECOVERY_LIMIT: usize = 3;
@@ -730,6 +731,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     let capture_width = c.width;
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+    let mut stream_heartbeat_at = Instant::now();
+    let mut stream_heartbeat_sequence = 0u64;
 
     while sp.ok() {
         #[cfg(windows)]
@@ -785,6 +788,17 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
         }
         let now = time::Instant::now();
+        if stream_heartbeat_at.elapsed() >= VIDEO_STREAM_HEARTBEAT_INTERVAL {
+            stream_heartbeat_sequence = stream_heartbeat_sequence.wrapping_add(1).max(1);
+            let mut heartbeat = Message::new();
+            heartbeat.set_video_stream_heartbeat(VideoStreamHeartbeat {
+                display: display_idx as u32,
+                sequence: stream_heartbeat_sequence,
+                ..Default::default()
+            });
+            sp.send(heartbeat);
+            stream_heartbeat_at = now;
+        }
         if vs.source.is_monitor() && last_check_displays.elapsed().as_millis() > 1000 {
             last_check_displays = now;
             // This check may be redundant, but it is better to be safe.

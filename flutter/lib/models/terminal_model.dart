@@ -94,11 +94,30 @@ class TerminalModel with ChangeNotifier {
 
   ValueChanged<String>? onClipboardWriteBlocked;
   ValueChanged<String>? onClipboardWriteSucceeded;
+  ValueChanged<String>? onUnsafeMobileMultilineInput;
+
+  bool _interceptTerminalPaste(String text) {
+    final isMobileTerminal = isMobile || (isWeb && !isWebDesktop);
+    if (!isMobileTerminal) return false;
+    onUnsafeMobileMultilineInput?.call(text);
+    return true;
+  }
 
   Future<void> _handleInput(String data) async {
     // xterm can complete asynchronous input after the Flutter page has gone
     // away. Stop before reading or clearing widget-owned modifier state.
     if (_disposed) return;
+
+    final isMobileTerminal = isMobile || (isWeb && !isWebDesktop);
+    final isBracketedPaste = isBracketedTerminalPastePayload(data);
+    final reviewText = terminalPasteReviewText(data);
+    if (isMobileTerminal &&
+        (isBracketedPaste ||
+            shouldStagePotentialMobileTerminalPaste(reviewText)) &&
+        onUnsafeMobileMultilineInput != null) {
+      onUnsafeMobileMultilineInput?.call(reviewText);
+      return;
+    }
 
     // Soft keyboards (notably iOS) emit '\n' when Enter is pressed, while a
     // real keyboard's Enter sends '\r'. Some Android keyboards also emit '\n'.
@@ -175,6 +194,7 @@ class TerminalModel with ChangeNotifier {
       onClipboardWriteBlocked: (text) => onClipboardWriteBlocked?.call(text),
       onClipboardWriteSucceeded: (text) =>
           onClipboardWriteSucceeded?.call(text),
+      onPasteRequest: _interceptTerminalPaste,
     );
     terminal.mouseHandler = const WheelButtonFixMouseHandler();
     terminalController = TerminalController();
@@ -279,6 +299,11 @@ class TerminalModel with ChangeNotifier {
   }
 
   Future<void> pasteText(String data) async {
+    final isMobileTerminal = isMobile || (isWeb && !isWebDesktop);
+    if (isMobileTerminal && onUnsafeMobileMultilineInput != null) {
+      onUnsafeMobileMultilineInput?.call(data);
+      return;
+    }
     final payload = prepareTerminalInputPayload(
       data,
       source: TerminalInputSource.paste,
@@ -288,6 +313,59 @@ class TerminalModel with ChangeNotifier {
       altLocked: false,
     );
     return _sendInputPayload(payload);
+  }
+
+  /// Sends a locally reviewed Shell draft only when the terminal is live.
+  /// This path deliberately never buffers input for a later reconnect because
+  /// replaying a reviewed command after connectivity changes can execute it in
+  /// a different shell state than the user approved.
+  Future<ReviewedShellSendResult> runReviewedText(
+    String data, {
+    String? expectedPeerId,
+    int? expectedPeerInfoGeneration,
+    int? expectedReconnectGeneration,
+  }) async {
+    bool scopeIsCurrent() =>
+        !parent.closed &&
+        parent.ffiModel.authenticatedPeer &&
+        (expectedPeerId == null || parent.id == expectedPeerId) &&
+        (expectedPeerInfoGeneration == null ||
+            parent.ffiModel.peerInfoGeneration == expectedPeerInfoGeneration) &&
+        (expectedReconnectGeneration == null ||
+            parent.ffiModel.reconnectGeneration == expectedReconnectGeneration);
+
+    if (_disposed || !_terminalOpened || data.isEmpty || !scopeIsCurrent()) {
+      return ReviewedShellSendResult.notSent;
+    }
+    final peerId = parent.id;
+    final generation = parent.ffiModel.peerInfoGeneration;
+    final reconnectGeneration = parent.ffiModel.reconnectGeneration;
+    final payload = prepareTerminalInputPayload(
+      data,
+      source: TerminalInputSource.paste,
+      isMobileOrWebMobile: false,
+      bracketedPasteMode: terminal.bracketedPasteMode,
+      ctrlLocked: false,
+      altLocked: false,
+    );
+    try {
+      await bind.sessionSendTerminalInput(
+        sessionId: parent.sessionId,
+        terminalId: terminalId,
+        data: '$payload\r',
+      );
+      if (_disposed ||
+          !scopeIsCurrent() ||
+          parent.id != peerId ||
+          parent.ffiModel.peerInfoGeneration != generation ||
+          parent.ffiModel.reconnectGeneration != reconnectGeneration) {
+        return ReviewedShellSendResult.uncertain;
+      }
+      return ReviewedShellSendResult.submitted;
+    } catch (e) {
+      debugPrint('[TerminalModel] Error sending reviewed Shell draft: $e');
+      return ReviewedShellSendResult.uncertain;
+    }
   }
 
   Future<void> closeTerminal() async {
@@ -640,6 +718,7 @@ class TerminalModel with ChangeNotifier {
     onClosed = null;
     onClipboardWriteBlocked = null;
     onClipboardWriteSucceeded = null;
+    onUnsafeMobileMultilineInput = null;
     // Clear buffers to free memory
     _inputBuffer.clear();
     _pendingOutputChunks.clear();
@@ -650,4 +729,10 @@ class TerminalModel with ChangeNotifier {
     // Terminal cleanup is handled server-side when service closes
     super.dispose();
   }
+}
+
+enum ReviewedShellSendResult {
+  notSent,
+  submitted,
+  uncertain,
 }

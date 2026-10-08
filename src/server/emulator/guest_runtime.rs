@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub const SCRCPY_CONTROL_RESET_VIDEO: u8 = 17;
+
 pub struct GuestHelper {
     video: Option<TcpStream>,
     control: Option<TcpStream>,
@@ -31,7 +33,12 @@ impl GuestHelper {
         Self::connect_with_options(adb, serial, helper, true)
     }
 
-    fn connect_with_options(adb: &Path, serial: &str, helper: &Path, preview: bool) -> ResultType<Self> {
+    fn connect_with_options(
+        adb: &Path,
+        serial: &str,
+        helper: &Path,
+        preview: bool,
+    ) -> ResultType<Self> {
         if !is_local_emulator(serial) {
             bail!("Guest helper requires a local emulator ADB endpoint")
         }
@@ -85,9 +92,17 @@ impl GuestHelper {
                     "power_on=false",
                     "cleanup=false",
                     "log_level=warn",
-                    if preview { "max_size=360" } else { "max_size=1280" },
+                    if preview {
+                        "max_size=360"
+                    } else {
+                        "max_size=1280"
+                    },
                     if preview { "max_fps=6" } else { "max_fps=30" },
-                    if preview { "video_bit_rate=350000" } else { "video_bit_rate=4000000" },
+                    if preview {
+                        "video_bit_rate=350000"
+                    } else {
+                        "video_bit_rate=4000000"
+                    },
                     "video_codec_options=i-frame-interval:int=1",
                 ])
                 .stdin(Stdio::null())
@@ -279,6 +294,7 @@ impl Drop for GuestHelper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn selects_the_emulator_adb_server_instead_of_the_phone_pairing_server() {
@@ -339,5 +355,89 @@ mod tests {
             }
         }
         assert!(got_key, "Guest must produce an initial keyframe");
+    }
+
+    #[test]
+    #[ignore = "Measures keyframe cadence in an explicitly selected local Android guest"]
+    fn real_local_guest_measures_preview_keyframe_cadence() {
+        let adb = PathBuf::from(std::env::var("MIRPG_TEST_ADB").expect("Set MIRPG_TEST_ADB"));
+        let serial = std::env::var("MIRPG_TEST_GUEST_SERIAL").expect("Set MIRPG_TEST_GUEST_SERIAL");
+        let mut helper =
+            GuestHelper::connect_preview(&adb, &serial, &helper_path().unwrap()).unwrap();
+        helper.video.as_ref().unwrap().set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut first_pts = None;
+        let mut last_pts = 0_u64;
+        let mut keyframes = 0_usize;
+        for _ in 0..180 {
+            match helper.read_packet().unwrap() {
+                VideoPacket::Frame {
+                    key,
+                    pts_us,
+                    config,
+                    ..
+                } => {
+                    if config {
+                        continue;
+                    }
+                    if first_pts.is_none() {
+                        first_pts = Some(pts_us);
+                    }
+                    last_pts = pts_us;
+                    if key {
+                        keyframes += 1;
+                    }
+                    if let Some(first) = first_pts {
+                        if last_pts.saturating_sub(first) >= 3_000_000 {
+                            break;
+                        }
+                    }
+                }
+                VideoPacket::Session { .. } => {}
+            }
+        }
+        let span = first_pts.map(|first| last_pts.saturating_sub(first)).unwrap_or(0);
+        assert!(span >= 2_500_000, "Preview did not produce enough timed video: {span} us");
+        eprintln!("Observed {keyframes} preview keyframes over {span} us");
+    }
+
+    #[test]
+    #[ignore = "Verifies scrcpy reset-video recovery in an explicitly selected local Android guest"]
+    fn real_local_guest_reset_video_emits_fresh_keyframe() {
+        let adb = PathBuf::from(std::env::var("MIRPG_TEST_ADB").expect("Set MIRPG_TEST_ADB"));
+        let serial = std::env::var("MIRPG_TEST_GUEST_SERIAL").expect("Set MIRPG_TEST_GUEST_SERIAL");
+        let mut helper =
+            GuestHelper::connect_preview(&adb, &serial, &helper_path().unwrap()).unwrap();
+        helper.video.as_ref().unwrap().set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut control = helper.control_socket().unwrap();
+        let mut initial_pts = None;
+        for _ in 0..60 {
+            if let VideoPacket::Frame {
+                key: true,
+                pts_us,
+                config: false,
+                ..
+            } = helper.read_packet().unwrap()
+            {
+                initial_pts = Some(pts_us);
+                break;
+            }
+        }
+        let initial_pts = initial_pts.expect("Guest must produce an initial keyframe");
+        control.write_all(&[SCRCPY_CONTROL_RESET_VIDEO]).unwrap();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if let VideoPacket::Frame {
+                key: true,
+                pts_us,
+                config: false,
+                ..
+            } = helper.read_packet().unwrap()
+            {
+                if pts_us > initial_pts {
+                    return;
+                }
+            }
+        }
+        panic!("scrcpy reset-video did not produce a fresh keyframe");
     }
 }

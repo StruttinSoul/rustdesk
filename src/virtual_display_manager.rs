@@ -11,6 +11,69 @@ const IDD_IMPL_RUSTDESK: &str = "rustdesk_idd";
 const IDD_IMPL_AMYUNI: &str = "amyuni_idd";
 const IDD_PLUG_OUT_ALL_INDEX: i32 = -1;
 
+pub fn current_driver_impl() -> &'static str {
+    IDD_IMPL
+}
+
+pub fn is_virtual_display_driver_installed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let device_string = get_cur_device_string();
+        !device_string.is_empty()
+            && windows::get_display_drivers()
+                .iter()
+                .any(|(name, status)| name == device_string && *status == 0)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+pub fn current_virtual_display_names() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::get_device_names(Some(get_cur_device_string()))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
+pub fn supports_owned_virtual_display_cleanup() -> bool {
+    matches!(IDD_IMPL, IDD_IMPL_RUSTDESK | IDD_IMPL_AMYUNI)
+}
+
+pub fn owned_monitor_matches(index: u32, device_name: &str) -> bool {
+    match IDD_IMPL {
+        IDD_IMPL_RUSTDESK => rustdesk_idd::owned_monitor_matches(index, device_name),
+        IDD_IMPL_AMYUNI => amyuni_idd::owned_monitor_matches(device_name),
+        _ => false,
+    }
+}
+
+pub fn plug_in_owned_monitor_existing_driver(
+    modes: Vec<virtual_display::MonitorMode>,
+) -> ResultType<(u32, String)> {
+    if !is_virtual_display_driver_installed() {
+        bail!("Virtual display driver is not installed.");
+    }
+    match IDD_IMPL {
+        IDD_IMPL_RUSTDESK => rustdesk_idd::plug_in_owned_existing_driver(modes),
+        IDD_IMPL_AMYUNI => amyuni_idd::plug_in_owned_existing_driver(modes),
+        _ => bail!("Unsupported virtual display implementation."),
+    }
+}
+
+pub fn plug_out_owned_monitor(index: u32, device_name: &str) -> ResultType<()> {
+    match IDD_IMPL {
+        IDD_IMPL_RUSTDESK => rustdesk_idd::plug_out_owned(index, device_name),
+        IDD_IMPL_AMYUNI => amyuni_idd::plug_out_owned(device_name),
+        _ => bail!("Unsupported virtual display implementation."),
+    }
+}
+
 pub fn is_amyuni_idd() -> bool {
     IDD_IMPL == IDD_IMPL_AMYUNI
 }
@@ -283,6 +346,86 @@ pub mod rustdesk_idd {
         Ok(())
     }
 
+    pub fn plug_in_owned_existing_driver(
+        mut modes: Vec<virtual_display::MonitorMode>,
+    ) -> ResultType<(u32, String)> {
+        if !super::is_virtual_display_driver_installed() {
+            bail!("Virtual display driver is not installed.");
+        }
+        let mut manager = VIRTUAL_DISPLAY_MANAGER.lock().unwrap();
+        if modes.is_empty() {
+            modes.push(virtual_display::MonitorMode {
+                width: 1080,
+                height: 2400,
+                sync: 60,
+            });
+        }
+        let index = (VIRTUAL_DISPLAY_START_FOR_PEER..VIRTUAL_DISPLAY_MAX_COUNT)
+            .find(|index| !manager.peer_index_name.contains_key(index))
+            .ok_or_else(|| hbb_common::anyhow::anyhow!("No virtual display slots are available"))?;
+        let device_names = get_device_names().into_iter().collect();
+        if let Err(error) = virtual_display::plug_in_monitor(index) {
+            bail!("Plug in monitor failed {}", error);
+        }
+        if let Err(error) = virtual_display::update_monitor_modes(index, modes.as_slice()) {
+            let _ = virtual_display::plug_out_monitor(index);
+            bail!("Update monitor modes failed {}", error);
+        }
+        let device_name = get_new_device_name(&device_names);
+        if device_name.is_empty() {
+            let _ = virtual_display::plug_out_monitor(index);
+            bail!("Windows did not expose the new virtual display.");
+        }
+        manager.peer_index_name.insert(index, device_name.clone());
+        Ok((index, device_name))
+    }
+
+    pub fn owned_monitor_matches(index: u32, device_name: &str) -> bool {
+        if device_name.is_empty() {
+            return false;
+        }
+        VIRTUAL_DISPLAY_MANAGER
+            .lock()
+            .unwrap()
+            .peer_index_name
+            .get(&index)
+            .is_some_and(|owned| windows::is_device_name(owned, device_name))
+    }
+
+    pub fn plug_out_owned(index: u32, device_name: &str) -> ResultType<()> {
+        if device_name.is_empty() {
+            bail!("Owned virtual display identity is missing.");
+        }
+        let current = get_device_names();
+        if !current
+            .iter()
+            .any(|name| windows::is_device_name(name, device_name))
+        {
+            VIRTUAL_DISPLAY_MANAGER
+                .lock()
+                .unwrap()
+                .peer_index_name
+                .remove(&index);
+            return Ok(());
+        }
+        if !owned_monitor_matches(index, device_name) {
+            bail!("RustDesk virtual display ownership cannot be proven in this process; no display was removed.");
+        }
+        virtual_display::plug_out_monitor(index)?;
+        if get_device_names()
+            .iter()
+            .any(|name| windows::is_device_name(name, device_name))
+        {
+            bail!("Windows still reports the owned Phone Workspace display after cleanup.");
+        }
+        VIRTUAL_DISPLAY_MANAGER
+            .lock()
+            .unwrap()
+            .peer_index_name
+            .remove(&index);
+        Ok(())
+    }
+
     pub fn reset_all() -> ResultType<()> {
         if super::is_virtual_display_supported() {
             return Ok(());
@@ -410,6 +553,7 @@ pub mod amyuni_idd {
     lazy_static::lazy_static! {
         static ref LOCK: Arc<Mutex<()>> = Default::default();
         static ref LAST_PLUG_IN_HEADLESS_TIME: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        static ref OWNED_PHONE_DISPLAY: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     }
     const VIRTUAL_DISPLAY_MAX_COUNT: usize = 4;
     // The count of virtual displays plugged in.
@@ -657,6 +801,120 @@ pub mod amyuni_idd {
         }
 
         plug_in_monitor_(true, is_async, None)
+    }
+
+    pub fn plug_in_owned_existing_driver(
+        modes: Vec<virtual_display::MonitorMode>,
+    ) -> ResultType<(u32, String)> {
+        if !super::is_virtual_display_driver_installed() {
+            bail!("Virtual display driver is not installed.");
+        }
+        let before = windows::get_device_names(Some(super::AMYUNI_IDD_DEVICE_STRING));
+        {
+            let mut owned = OWNED_PHONE_DISPLAY.lock().unwrap();
+            if let Some(name) = owned.as_ref() {
+                if before
+                    .iter()
+                    .any(|current| windows::is_device_name(current, name))
+                {
+                    bail!("Phone Workspace already owns an Amyuni virtual display.");
+                }
+                *owned = None;
+            }
+        }
+        if !before.is_empty() {
+            bail!(
+                "Phone Workspace cannot safely claim the Amyuni virtual display while another virtual display already exists."
+            );
+        }
+
+        plug_monitor_(true, Some(Duration::from_millis(3_000)))?;
+        let after = windows::get_device_names(Some(super::AMYUNI_IDD_DEVICE_STRING));
+        if after.len() != 1 {
+            bail!(
+                "Amyuni virtual display ownership became ambiguous during creation; no cleanup was attempted."
+            );
+        }
+        let device_name = after[0].clone();
+        if device_name.is_empty() {
+            bail!("Windows did not expose the new virtual display.");
+        }
+        *OWNED_PHONE_DISPLAY.lock().unwrap() = Some(device_name.clone());
+
+        let mode = modes
+            .first()
+            .cloned()
+            .unwrap_or(virtual_display::MonitorMode {
+                width: 1080,
+                height: 2400,
+                sync: 60,
+            });
+        let mut resolution_applied = false;
+        for _ in 0..10 {
+            if crate::platform::change_resolution(
+                &device_name,
+                mode.width as usize,
+                mode.height as usize,
+            )
+            .is_ok()
+            {
+                resolution_applied = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !resolution_applied {
+            let _ = plug_out_owned(&device_name);
+            bail!(
+                "Windows created the Phone Workspace display but did not accept the requested resolution."
+            );
+        }
+        Ok((0, device_name))
+    }
+
+    pub fn owned_monitor_matches(device_name: &str) -> bool {
+        if device_name.is_empty() {
+            return false;
+        }
+        let owned = OWNED_PHONE_DISPLAY.lock().unwrap();
+        owned
+            .as_ref()
+            .is_some_and(|name| windows::is_device_name(name, device_name))
+    }
+
+    pub fn plug_out_owned(device_name: &str) -> ResultType<()> {
+        if device_name.is_empty() {
+            bail!("Owned virtual display identity is missing.");
+        }
+        let current = windows::get_device_names(Some(super::AMYUNI_IDD_DEVICE_STRING));
+        if !current
+            .iter()
+            .any(|name| windows::is_device_name(name, device_name))
+        {
+            let mut owned = OWNED_PHONE_DISPLAY.lock().unwrap();
+            if owned
+                .as_ref()
+                .is_some_and(|name| windows::is_device_name(name, device_name))
+            {
+                *owned = None;
+            }
+            return Ok(());
+        }
+        if !owned_monitor_matches(device_name) {
+            bail!("Amyuni virtual display ownership cannot be proven in this process; no display was removed.");
+        }
+        if current.len() != 1 {
+            bail!("Amyuni virtual display ownership is ambiguous; no display was removed.");
+        }
+        plug_monitor_(false, Some(Duration::from_millis(3_000)))?;
+        if windows::get_device_names(Some(super::AMYUNI_IDD_DEVICE_STRING))
+            .iter()
+            .any(|name| windows::is_device_name(name, device_name))
+        {
+            bail!("Windows still reports the owned Phone Workspace display after cleanup.");
+        }
+        *OWNED_PHONE_DISPLAY.lock().unwrap() = None;
+        Ok(())
     }
 
     // `index` the display index to plug out. -1 means plug out all.

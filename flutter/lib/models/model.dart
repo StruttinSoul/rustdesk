@@ -15,6 +15,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
+import 'package:flutter_hbb/models/clipboard_transfer_model.dart';
 import 'package:flutter_hbb/models/codex_model.dart';
 import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
@@ -27,6 +28,7 @@ import 'package:flutter_hbb/models/user_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/models/desktop_render_texture.dart';
 import 'package:flutter_hbb/models/terminal_model.dart';
+import 'package:flutter_hbb/models/task_notification_policy.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:flutter_hbb/utils/http_service.dart' as http;
@@ -106,6 +108,20 @@ class CachedPeerData {
 }
 
 class FfiModel with ChangeNotifier {
+  FfiModel(
+    this.parent, {
+    void Function()? onConnectionInvalidated,
+    void Function()? onClipboardContextChanged,
+  })  : _onConnectionInvalidated = onConnectionInvalidated,
+        _onClipboardContextChanged = onClipboardContextChanged {
+    clear();
+    sessionId = parent.target!.sessionId;
+    cachedPeerData.permissions = _permissions;
+    virtualMouseMode = VirtualMouseMode(this);
+  }
+
+  final void Function()? _onConnectionInvalidated;
+  final void Function()? _onClipboardContextChanged;
   bool authenticatedPeer = false;
   int peerInfoGeneration = 0;
   int _reconnectGeneration = 0;
@@ -177,13 +193,6 @@ class FfiModel with ChangeNotifier {
     _inputBlocked = v;
   }
 
-  FfiModel(this.parent) {
-    clear();
-    sessionId = parent.target!.sessionId;
-    cachedPeerData.permissions = _permissions;
-    virtualMouseMode = VirtualMouseMode(this);
-  }
-
   Rect? globalDisplaysRect() => _getDisplaysRect(_pi.displays, true);
   Rect? displaysRect() => _getDisplaysRect(_pi.getCurDisplays(), false);
   Rect? _getDisplaysRect(List<Display> displays, bool useDisplayScale) {
@@ -245,6 +254,8 @@ class FfiModel with ChangeNotifier {
       }
     }
 
+    _onClipboardContextChanged?.call();
+
     debugPrint('updatePermission: $_permissions');
     notifyListeners();
   }
@@ -255,6 +266,8 @@ class FfiModel with ChangeNotifier {
 
   void markReconnectStarted() {
     _reconnectGeneration++;
+    _onConnectionInvalidated?.call();
+    _onClipboardContextChanged?.call();
     notifyListeners();
   }
 
@@ -265,6 +278,8 @@ class FfiModel with ChangeNotifier {
     _secure = null;
     _direct = null;
     authenticatedPeer = false;
+    _onConnectionInvalidated?.call();
+    _onClipboardContextChanged?.call();
     _inputBlocked = false;
     _timer?.cancel();
     _timer = null;
@@ -368,7 +383,9 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'cursor_position') {
         await parent.target?.cursorModel.updateCursorPosition(evt, peerId);
       } else if (name == 'clipboard') {
-        Clipboard.setData(ClipboardData(text: evt['content']));
+        if (!_pi.features.manualClipboard) {
+          Clipboard.setData(ClipboardData(text: evt['content']));
+        }
       } else if (name == 'permission') {
         updatePermission(evt, peerId);
       } else if (name == 'chat_client_mode') {
@@ -395,6 +412,8 @@ class FfiModel with ChangeNotifier {
                 (model.selected && !model.streaming))) {
           parent.target?.imageModel.disposeImage();
         }
+      } else if (name == 'manual_clipboard_response') {
+        parent.target?.clipboardTransferModel.handleResponse(evt);
       } else if (name == 'codex_control_response') {
         parent.target?.codexModel.handleControlResponse(evt);
       } else if (name == 'file_dir') {
@@ -403,6 +422,10 @@ class FfiModel with ChangeNotifier {
         parent.target?.fileModel.receiveEmptyDirs(evt);
       } else if (name == 'job_progress') {
         parent.target?.fileModel.jobController.tryUpdateJobProgress(evt);
+      } else if (name == 'job_paused') {
+        parent.target?.fileModel.jobController.jobPaused(evt);
+      } else if (name == 'job_cancelled') {
+        parent.target?.fileModel.jobController.jobCancelled(evt);
       } else if (name == 'job_done') {
         bool? refresh =
             await parent.target?.fileModel.jobController.jobDone(evt);
@@ -425,6 +448,10 @@ class FfiModel with ChangeNotifier {
         parent.target?.serverModel.onClientRemove(evt);
       } else if (name == 'update_quality_status') {
         parent.target?.qualityMonitorModel.updateQualityStatus(evt);
+      } else if (name == 'update_stream_liveness') {
+        parent.target?.qualityMonitorModel.updateStreamLiveness(evt);
+      } else if (name == 'update_decoder_health') {
+        parent.target?.qualityMonitorModel.updateDecoderHealth(evt);
       } else if (name == 'update_block_input_state') {
         updateBlockInputState(evt, peerId);
       } else if (name == 'update_privacy_mode') {
@@ -917,6 +944,13 @@ class FfiModel with ChangeNotifier {
     final title = evt['title'];
     final text = evt['text'];
     final link = evt['link'];
+
+    final connectionInterrupted = title == 'Connection Error' ||
+        type == 'restarting' ||
+        (type == 'restarting-show' && title == 'Connecting...');
+    if (connectionInterrupted) {
+      _onConnectionInvalidated?.call();
+    }
 
     // The peer-gone detector reconnects under `restarting-show` rather than an error title, so
     // it needs naming here too. By its own title, not the type: an explicitly restarted remote
@@ -1491,6 +1525,10 @@ class FfiModel with ChangeNotifier {
       _pi.features.emulator = features['emulator'] == true;
       _pi.features.targetDashboard = features['target_dashboard'] == true;
       _pi.features.hostManagement = features['host_management'] == true;
+      _pi.features.manualClipboard = features['manual_clipboard'] == true;
+      _pi.features.filePause = features['file_pause'] == true;
+      _pi.features.fileKeepBoth = features['file_keep_both'] == true;
+      _pi.features.fileCancelAck = features['file_cancel_ack'] == true;
       if (!isCache) {
         handleResolutions(peerId, evt["resolutions"]);
       }
@@ -1518,6 +1556,7 @@ class FfiModel with ChangeNotifier {
     if (!isCache) {
       authenticatedPeer = true;
       peerInfoGeneration++;
+      _onClipboardContextChanged?.call();
     }
     _pi.isSet.value = true;
     stateGlobal.resetLastResolutionGroupValues(peerId);
@@ -2073,18 +2112,30 @@ class ImageModel with ChangeNotifier {
         isWeb | isWindows | isLinux
             ? ui.PixelFormat.rgba8888
             : ui.PixelFormat.bgra8888);
+    if (image == null) return;
     await update(image,
         isCurrentSession: () =>
             model.streaming &&
             model.guestSessionId == id &&
             model.width == width &&
             model.height == height);
+    if (model.streaming &&
+        model.guestSessionId == id &&
+        model.width == width &&
+        model.height == height) {
+      model.noteGuestFrameDecoded(
+        sessionId: id,
+        frameWidth: width,
+        frameHeight: height,
+      );
+    }
   }
 
   Future<void> _decodeDashboard(int channel, Uint8List rgba) async {
     final ffi = parent.target;
     if (ffi == null) return;
     final model = ffi.emulatorModel;
+    final previewRequest = model.previewAcknowledgedRequest;
     final preview = model.previewForChannel(channel);
     final active = model.streaming && channel == model.videoChannel;
     final rect =
@@ -2103,6 +2154,7 @@ class ImageModel with ChangeNotifier {
             : ui.PixelFormat.bgra8888);
     if (image == null) return;
     if (parent.target != ffi ||
+        model.previewAcknowledgedRequest != previewRequest ||
         !model.dashboardActive ||
         (channel >= 0x40000000 &&
             model.previewForChannel(channel)?.sessionId != preview?.sessionId &&
@@ -2116,7 +2168,14 @@ class ImageModel with ChangeNotifier {
     _dashboardImages.remove(channel)?.dispose();
     _dashboardImages[channel] = image;
     _dashboardImageUpdatedAt[channel] = DateTime.now();
-    _dashboardImagePreviewRequest[channel] = model.previewAcknowledgedRequest;
+    _dashboardImagePreviewRequest[channel] = previewRequest;
+    if (active && model.streaming && model.videoChannel == channel) {
+      model.noteGuestFrameDecoded(
+        sessionId: model.guestSessionId,
+        frameWidth: model.width,
+        frameHeight: model.height,
+      );
+    }
     notifyListeners();
   }
 
@@ -4031,6 +4090,11 @@ class QualityMonitorData {
   DateTime? targetBitrateUpdatedAt;
   DateTime? codecFormatUpdatedAt;
   DateTime? chromaUpdatedAt;
+  DateTime? transportHeartbeatUpdatedAt;
+  final Map<int, DateTime> streamHeartbeatUpdatedAt = {};
+  final Map<int, int> streamHeartbeatSequence = {};
+  final Map<int, bool> decoderHealthy = {};
+  final Map<int, DateTime> decoderUpdatedAt = {};
 
   DateTime? get latestUpdatedAt {
     final values = <DateTime?>[
@@ -4081,6 +4145,7 @@ class QualityMonitorModel with ChangeNotifier {
   updateQualityStatus(Map<String, dynamic> evt) {
     try {
       final receivedAt = DateTime.now();
+      _data.transportHeartbeatUpdatedAt = receivedAt;
       if (evt.containsKey('speed')) {
         final value = evt['speed'] as String;
         _data.speed = value.isEmpty ? null : value;
@@ -4135,6 +4200,27 @@ class QualityMonitorModel with ChangeNotifier {
     } catch (e) {
       //
     }
+  }
+
+  updateStreamLiveness(Map<String, dynamic> evt) {
+    final display = int.tryParse(evt['display']?.toString() ?? '');
+    final sequence = int.tryParse(evt['sequence']?.toString() ?? '');
+    if (display == null || display < 0 || sequence == null || sequence <= 0) {
+      return;
+    }
+    _data.streamHeartbeatUpdatedAt[display] = DateTime.now();
+    _data.streamHeartbeatSequence[display] = sequence;
+    notifyListeners();
+  }
+
+  updateDecoderHealth(Map<String, dynamic> evt) {
+    final display = int.tryParse(evt['display']?.toString() ?? '');
+    if (display == null || display < 0) return;
+    final value = evt['healthy']?.toString();
+    if (value != 'true' && value != 'false') return;
+    _data.decoderHealthy[display] = value == 'true';
+    _data.decoderUpdatedAt[display] = DateTime.now();
+    notifyListeners();
   }
 }
 
@@ -4206,6 +4292,9 @@ class FFI {
   late final ChatModel chatModel; // session
   late final CodexModel codexModel; // session
   late final EmulatorModel emulatorModel;
+  bool _emulatorModelReady = false;
+  late final ClipboardTransferModel clipboardTransferModel;
+  bool _clipboardTransferReady = false;
   late final FileModel fileModel; // session
   late final AbModel abModel; // global
   late final GroupModel groupModel; // global
@@ -4230,13 +4319,80 @@ class FFI {
   FFI(SessionID? sId) {
     sessionId = sId ?? (isDesktop ? Uuid().v4obj() : _constSessionId);
     imageModel = ImageModel(WeakReference(this));
-    ffiModel = FfiModel(WeakReference(this));
+    ffiModel = FfiModel(
+      WeakReference(this),
+      onConnectionInvalidated: () {
+        if (_emulatorModelReady) {
+          emulatorModel.invalidateConnection();
+        }
+      },
+      onClipboardContextChanged: () => _onClipboardContextChanged(),
+    );
     cursorModel = CursorModel(WeakReference(this));
     canvasModel = CanvasModel(WeakReference(this));
     serverModel = ServerModel(WeakReference(this));
     chatModel = ChatModel(WeakReference(this));
-    codexModel = CodexModel(sessionId);
+    codexModel = CodexModel(
+      sessionId,
+      taskNotificationsEnabled:
+          bind.mainGetLocalOption(key: kCodexTaskNotificationsOption) == 'Y',
+      hideSensitiveNotificationContent:
+          bind.mainGetLocalOption(key: kCodexTaskNotificationPrivacyOption) !=
+              'N',
+      seenNotificationEventIds: TaskNotificationPolicy.decodeSeenEventIds(
+        bind.mainGetLocalOption(key: kCodexTaskNotificationSeenOption),
+      ),
+      notificationRuntimeIdProvider: () => id,
+      notificationPermissionRequester: isAndroid
+          ? () async {
+              if (androidVersion < 33) return true;
+              if (await AndroidPermissionManager.check(
+                  kAndroid13Notification)) {
+                return true;
+              }
+              return AndroidPermissionManager.request(kAndroid13Notification);
+            }
+          : null,
+      notificationSender: isAndroid
+          ? (alert) async {
+              return invokeMethod(
+                  'show_task_notification', alert.toPlatformMap());
+            }
+          : null,
+      notificationSettingsSaver:
+          (enabled, hideSensitiveContent, encodedSeenEventIds) async {
+        await bind.mainSetLocalOption(
+          key: kCodexTaskNotificationsOption,
+          value: enabled ? 'Y' : 'N',
+        );
+        await bind.mainSetLocalOption(
+          key: kCodexTaskNotificationPrivacyOption,
+          value: hideSensitiveContent ? 'Y' : 'N',
+        );
+        await bind.mainSetLocalOption(
+          key: kCodexTaskNotificationSeenOption,
+          value: encodedSeenEventIds,
+        );
+      },
+    );
     emulatorModel = EmulatorModel(sessionId);
+    _emulatorModelReady = true;
+    clipboardTransferModel = ClipboardTransferModel(
+      sessionId,
+      contextProvider: () => ClipboardTransferContext(
+        targetIdentity: id.isEmpty ? '' : 'peer:$id',
+        generation:
+            (ffiModel.peerInfoGeneration << 32) ^ ffiModel.reconnectGeneration,
+        authenticated: ffiModel.authenticatedPeer,
+        capabilitySupported: ffiModel.pi.features.manualClipboard,
+        permissionGranted: ffiModel.permissions['clipboard'] != false &&
+            !bind.sessionGetToggleOptionSync(
+              sessionId: sessionId,
+              arg: 'disable-clipboard',
+            ),
+      ),
+    );
+    _clipboardTransferReady = true;
     fileModel = FileModel(WeakReference(this));
     userModel = UserModel(WeakReference(this));
     peerTabModel = PeerTabModel(WeakReference(this));
@@ -4260,10 +4416,17 @@ class FFI {
         name: PeersModelName.lan, loadEvent: LoadEvent.lan, getInitPeers: null);
   }
 
+  void _onClipboardContextChanged() {
+    if (_clipboardTransferReady) {
+      clipboardTransferModel.onContextChanged();
+    }
+  }
+
   /// Mobile reuse FFI
   void mobileReset() {
     codexModel.reset();
     emulatorModel.reset();
+    clipboardTransferModel.clearEphemeralState();
     ffiModel.resetRestartReconnectState();
     ffiModel.waitForFirstImage.value = true;
     ffiModel.isRefreshing = false;
@@ -4545,6 +4708,7 @@ class FFI {
     chatModel.close();
     codexModel.reset();
     emulatorModel.reset();
+    clipboardTransferModel.clearEphemeralState();
     // Close all terminal models
     for (final model in _terminalModels.values) {
       model.dispose();
@@ -4676,6 +4840,10 @@ class Features {
   bool emulator = false;
   bool targetDashboard = false;
   bool hostManagement = false;
+  bool manualClipboard = false;
+  bool filePause = false;
+  bool fileKeepBoth = false;
+  bool fileCancelAck = false;
 }
 
 const kInvalidDisplayIndex = -1;

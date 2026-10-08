@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'mirpg_remote_theme.dart';
 
@@ -360,9 +361,13 @@ class MonitorControlView extends StatefulWidget {
       required this.onPointer,
       required this.onScroll,
       required this.onKeyboard,
+      this.onClipboard,
+      this.onWindows,
       this.onSwitchView,
       this.onDashboard,
       this.onSessionStatus,
+      this.focusRect,
+      this.focusRevision = 0,
       this.frameStatus,
       this.onCtrlAltDel});
   final Size desktopSize;
@@ -375,9 +380,13 @@ class MonitorControlView extends StatefulWidget {
   final void Function(int action, Offset point) onPointer;
   final void Function(int steps) onScroll;
   final VoidCallback onKeyboard;
+  final VoidCallback? onClipboard;
+  final VoidCallback? onWindows;
   final VoidCallback? onSwitchView;
   final VoidCallback? onDashboard;
   final VoidCallback? onSessionStatus;
+  final Rect? focusRect;
+  final int focusRevision;
   final String? frameStatus;
   final VoidCallback? onCtrlAltDel;
 
@@ -686,15 +695,22 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
 
   Widget _modifierButton(String label, PhysicalKeyboardKey key) {
     final held = _held.contains(key);
-    return OutlinedButton(
-        style: OutlinedButton.styleFrom(
-            minimumSize: const Size(48, 48),
-            backgroundColor:
-                held ? MirpgRemoteTheme.accent.withOpacity(0.18) : null,
-            foregroundColor: held ? MirpgRemoteTheme.accent : null),
-        onPressed:
-            widget.onKeyState == null ? null : () => _toggleModifier(key),
-        child: Text(label));
+    return Semantics(
+      button: true,
+      toggled: held,
+      enabled: widget.onKeyState != null,
+      label: '$label modifier',
+      value: held ? 'Held' : 'Released',
+      child: OutlinedButton(
+          style: OutlinedButton.styleFrom(
+              minimumSize: const Size(48, 48),
+              backgroundColor:
+                  held ? MirpgRemoteTheme.accent.withOpacity(0.18) : null,
+              foregroundColor: held ? MirpgRemoteTheme.accent : null),
+          onPressed:
+              widget.onKeyState == null ? null : () => _toggleModifier(key),
+          child: Text(label)),
+    );
   }
 
   @override
@@ -819,7 +835,7 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
 }
 
 class _MonitorControlViewState extends State<MonitorControlView> {
-  static const Size _floatingMouseSize = Size(132, 52);
+  static const Size _floatingMouseSize = Size(144, 52);
   static const Offset _cursorFingerOffset = Offset(0, -56);
   late Offset _cursor = widget.desktopSize.center(Offset.zero);
   Size _viewport = Size.zero;
@@ -871,6 +887,9 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   void initState() {
     super.initState();
     _loadPreferences(widget.preferences);
+    if (widget.focusRect != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealFocusRect());
+    }
   }
 
   @override
@@ -878,6 +897,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.preferences != widget.preferences) {
       _loadPreferences(widget.preferences, keepCustomZoom: true);
+    }
+    if (oldWidget.focusRevision != widget.focusRevision &&
+        widget.focusRect != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealFocusRect());
     }
     if ((_dragLocked || _gestureDragHeld) && !_canSendInput) {
       final shouldRelease = oldWidget.canControl && !oldWidget.localViewOnly;
@@ -960,6 +983,20 @@ class _MonitorControlViewState extends State<MonitorControlView> {
             : _offset.dy.clamp(_viewport.height - height, 0).toDouble());
   }
 
+  void _revealFocusRect() {
+    if (!mounted || _viewport.isEmpty || widget.focusRect == null) return;
+    final rect = widget.focusRect!;
+    final point = Offset(
+      rect.center.dx.clamp(0, widget.desktopSize.width - 1).toDouble(),
+      rect.center.dy.clamp(0, widget.desktopSize.height - 1).toDouble(),
+    );
+    setState(() {
+      _cursor = point;
+      _offset = _viewport.center(Offset.zero) - point * _scale;
+      _limitOffset();
+    });
+  }
+
   void _setZoom(double zoom, Offset focus,
       {_MonitorViewPreset preset = _MonitorViewPreset.custom}) {
     final point = (focus - _offset) / _scale;
@@ -986,6 +1023,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   }
 
   void _cycleOrientation() {
+    _cancelContactsForLayoutChange();
     setState(() {
       _orientationPreference = switch (_orientationPreference) {
         MonitorOrientationPreference.auto =>
@@ -997,6 +1035,35 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       };
     });
     _emitPreferences();
+  }
+
+  void _cancelContactsForLayoutChange() {
+    final releaseLeft = _dragLocked || _gestureDragHeld || _floatingLeftPressed;
+    final releaseRight = _floatingRightPressed;
+    _doubleTapHoldTimer?.cancel();
+    _doubleTapWindowTimer?.cancel();
+    _doubleTapHoldTimer = null;
+    _doubleTapWindowTimer = null;
+    _doubleTapArmed = false;
+    _doubleTapCandidate = false;
+    _doubleTapPendingTravel = 0;
+    _dragLocked = false;
+    _gestureDragHeld = false;
+    _floatingLeftPressed = false;
+    _floatingRightPressed = false;
+    _rawPointers.clear();
+    _rawMaxFingers = 0;
+    _fingers = 0;
+    _maxFingers = 0;
+    _wheel = 0;
+    _thumbwheelDelta = 0;
+    _twoFingerMode = _TwoFingerMode.undecided;
+    _twoFingerUpdates = 0;
+    _twoFingerPendingDelta = Offset.zero;
+    if (_canSendInput) {
+      if (releaseLeft) widget.onPointer(1, _cursor);
+      if (releaseRight) widget.onPointer(6, _cursor);
+    }
   }
 
   String get _orientationLabel => switch (_orientationPreference) {
@@ -1440,7 +1507,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                     (_zoom ?? 1) / 1.25, _viewport.center(Offset.zero)))),
             Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text(_viewLabel,
+                child: Text('Zoom: $_viewLabel',
                     style: const TextStyle(color: Colors.white))),
             _button(
                 'Zoom in',
@@ -1460,43 +1527,350 @@ class _MonitorControlViewState extends State<MonitorControlView> {
           icon: Icon(icon),
           onPressed: action);
 
-  Widget _sessionToolbar() => Material(
-      color: const Color(0xF2191F22),
-      elevation: 10,
-      borderRadius: BorderRadius.circular(18),
-      child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            _toolbarButton('Keyboard', Icons.keyboard_outlined,
-                _canSendInput ? widget.onKeyboard : null),
-            _toolbarButton(
-                'Actions',
-                Icons.bolt_outlined,
-                () => setState(() => _panel = _panel == _MonitorPanel.actions
-                    ? _MonitorPanel.none
-                    : _MonitorPanel.actions),
-                selected: _panel == _MonitorPanel.actions),
-            _toolbarButton(
-                'Display',
-                Icons.monitor_outlined,
-                () => setState(() => _panel = _panel == _MonitorPanel.display
-                    ? _MonitorPanel.none
-                    : _MonitorPanel.display),
-                selected: _panel == _MonitorPanel.display),
-            _toolbarButton('Quality & connection', Icons.network_check,
-                widget.onSessionStatus),
-            _toolbarButton('Switch view', Icons.view_carousel_outlined,
-                widget.onSwitchView),
-            _toolbarButton(
-                'Dashboard', Icons.grid_view_outlined, widget.onDashboard),
-            _toolbarButton('Hide toolbar', Icons.keyboard_arrow_down, () {
-              setState(() {
-                _toolbarVisible = false;
-                _panel = _MonitorPanel.none;
-              });
-              _emitPreferences();
+  void _handleSessionAction(_MonitorSessionAction action) {
+    switch (action) {
+      case _MonitorSessionAction.clipboard:
+        widget.onClipboard?.call();
+      case _MonitorSessionAction.windows:
+        widget.onWindows?.call();
+      case _MonitorSessionAction.quality:
+        widget.onSessionStatus?.call();
+      case _MonitorSessionAction.actions:
+        setState(() => _panel = _panel == _MonitorPanel.actions
+            ? _MonitorPanel.none
+            : _MonitorPanel.actions);
+      case _MonitorSessionAction.display:
+        setState(() => _panel = _panel == _MonitorPanel.display
+            ? _MonitorPanel.none
+            : _MonitorPanel.display);
+      case _MonitorSessionAction.hideControls:
+        setState(() {
+          _toolbarVisible = false;
+          _panel = _MonitorPanel.none;
+        });
+        _emitPreferences();
+    }
+  }
+
+  Widget _sessionMenu() => PopupMenuButton<_MonitorSessionAction>(
+        tooltip: 'Session controls',
+        icon: const Icon(Icons.more_vert_rounded),
+        onSelected: _handleSessionAction,
+        itemBuilder: (context) => [
+          if (widget.onClipboard != null)
+            const PopupMenuItem(
+              value: _MonitorSessionAction.clipboard,
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.content_copy_outlined),
+                title: Text('Clipboard'),
+              ),
+            ),
+          if (widget.onWindows != null)
+            const PopupMenuItem(
+              value: _MonitorSessionAction.windows,
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.web_asset_outlined),
+                title: Text('Windows'),
+              ),
+            ),
+          if (widget.onSessionStatus != null)
+            const PopupMenuItem(
+              value: _MonitorSessionAction.quality,
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.network_check),
+                title: Text('Quality & connection'),
+              ),
+            ),
+          const PopupMenuDivider(),
+          const PopupMenuItem(
+            value: _MonitorSessionAction.actions,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.tune_rounded),
+              title: Text('Input controls'),
+            ),
+          ),
+          const PopupMenuItem(
+            value: _MonitorSessionAction.display,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.monitor_outlined),
+              title: Text('Display controls'),
+            ),
+          ),
+          const PopupMenuItem(
+            value: _MonitorSessionAction.hideControls,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.keyboard_arrow_down_rounded),
+              title: Text('Hide controls'),
+            ),
+          ),
+        ],
+      );
+
+  Widget _sessionTopBar() => Material(
+        color: const Color(0xFF151D21),
+        child: SafeArea(
+          bottom: false,
+          child: SizedBox(
+            height: 56,
+            child: LayoutBuilder(builder: (context, constraints) {
+              final compact = constraints.maxWidth < 560;
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(children: [
+                  _toolbarButton('Dashboard', Icons.arrow_back_rounded,
+                      widget.onDashboard),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Desktop',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                color: MirpgRemoteTheme.textPrimary,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 2),
+                        Text(
+                          '${widget.desktopSize.width.round()} × ${widget.desktopSize.height.round()} · Pointer',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: MirpgRemoteTheme.textSecondary,
+                              fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (widget.localViewOnly)
+                    Container(
+                      margin: const EdgeInsets.only(right: 4),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: MirpgRemoteTheme.warning.withOpacity(0.14),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Text('View only',
+                          style: TextStyle(
+                              color: MirpgRemoteTheme.warning, fontSize: 12)),
+                    ),
+                  if (!compact && widget.onSessionStatus != null)
+                    TextButton.icon(
+                      onPressed: widget.onSessionStatus,
+                      icon: const Icon(Icons.network_check, size: 18),
+                      label: const Text('Quality'),
+                    ),
+                  _sessionMenu(),
+                ]),
+              );
             }),
-          ])));
+          ),
+        ),
+      );
+
+  Widget _footerControl(
+    String tooltip,
+    IconData icon,
+    String label,
+    VoidCallback? action, {
+    bool selected = false,
+  }) =>
+      Expanded(
+        child: Tooltip(
+          message: tooltip,
+          child: Semantics(
+            button: true,
+            enabled: action != null,
+            selected: selected,
+            label: label,
+            child: InkWell(
+              onTap: action,
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                constraints: const BoxConstraints(
+                    minWidth: MirpgRemoteTheme.minTouchTarget, minHeight: 60),
+                margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                decoration: BoxDecoration(
+                  color: selected
+                      ? MirpgRemoteTheme.accent.withOpacity(0.16)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(icon,
+                        size: 21,
+                        color: action == null
+                            ? Colors.white38
+                            : selected
+                                ? MirpgRemoteTheme.accent
+                                : MirpgRemoteTheme.textSecondary),
+                    const SizedBox(height: 3),
+                    Text(label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: action == null
+                                ? Colors.white38
+                                : selected
+                                    ? const Color(0xFFCEF8EE)
+                                    : MirpgRemoteTheme.textSecondary,
+                            fontSize: 11,
+                            fontWeight:
+                                selected ? FontWeight.w600 : FontWeight.w500)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+  Widget _sessionToolbar() => Material(
+        color: const Color(0xFF192126),
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(children: [
+              _footerControl(
+                  'Fit view',
+                  Icons.fit_screen_outlined,
+                  _viewPreset == _MonitorViewPreset.custom ? _viewLabel : 'Fit',
+                  () => setState(() => _applyPreset(_MonitorViewPreset.fit)),
+                  selected: _viewPreset == _MonitorViewPreset.fit),
+              _footerControl(
+                  'Readable view', Icons.text_fields_rounded, 'Readable', () {
+                setState(() => _applyPreset(_MonitorViewPreset.readable));
+              }, selected: _viewPreset == _MonitorViewPreset.readable),
+              _footerControl('Pan mode', Icons.pan_tool_alt_outlined, 'Pan',
+                  () {
+                setState(() => _panMode = !_panMode);
+              }, selected: _panMode),
+              _footerControl('Precision mode', Icons.gps_fixed, 'Precision',
+                  () {
+                final next = !_precision;
+                if (!next) _releaseVisibleHeldControls();
+                setState(() => _precision = next);
+                _emitPreferences();
+              }, selected: _precision),
+              _footerControl('Keyboard', Icons.keyboard_outlined, 'Keyboard',
+                  _canSendInput ? widget.onKeyboard : null),
+              _footerControl('Switch view', Icons.view_carousel_outlined,
+                  'Targets', widget.onSwitchView),
+            ]),
+          ),
+        ),
+      );
+
+  void _releaseVisibleHeldControls() {
+    if (_dragLocked) _setDragLocked(false);
+    if (_floatingLeftPressed) _setFloatingButton(true, false);
+    if (_floatingRightPressed) _setFloatingButton(false, false);
+  }
+
+  Widget _precisionToolbar() => Material(
+        color: const Color(0xFF17272B),
+        child: SafeArea(
+          top: false,
+          bottom: false,
+          child: LayoutBuilder(builder: (context, constraints) {
+            final compact = constraints.maxWidth < 620;
+            final held =
+                _dragLocked || _floatingLeftPressed || _floatingRightPressed;
+            return SizedBox(
+              height: 64,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(children: [
+                  if (!compact) ...[
+                    const Text('Precision',
+                        style: TextStyle(
+                            color: MirpgRemoteTheme.textSecondary,
+                            fontSize: 12)),
+                    const SizedBox(width: 6),
+                  ],
+                  Expanded(
+                    child: Slider(
+                      value: _precisionGain,
+                      min: 0.1,
+                      max: 1,
+                      divisions: 18,
+                      onChanged: (value) {
+                        setState(() => _precisionGain = value);
+                        _emitPreferences();
+                      },
+                    ),
+                  ),
+                  _floatingMouseButton('Remote left mouse button', Icons.mouse,
+                      true, _floatingLeftPressed),
+                  _floatingMouseButton('Remote right mouse button',
+                      Icons.ads_click, false, _floatingRightPressed),
+                  if (compact)
+                    IconButton(
+                      tooltip: _dragLocked ? 'Release drag lock' : 'Drag lock',
+                      onPressed: _canSendInput
+                          ? () => _setDragLocked(!_dragLocked)
+                          : null,
+                      color: _dragLocked
+                          ? MirpgRemoteTheme.accent
+                          : MirpgRemoteTheme.textPrimary,
+                      icon: Icon(_dragLocked
+                          ? Icons.lock_open_outlined
+                          : Icons.drag_indicator),
+                    )
+                  else
+                    TextButton.icon(
+                      onPressed: _canSendInput
+                          ? () => _setDragLocked(!_dragLocked)
+                          : null,
+                      icon: Icon(_dragLocked
+                          ? Icons.lock_open_outlined
+                          : Icons.drag_indicator),
+                      label: Text(_dragLocked ? 'Drag locked' : 'Drag lock'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: _dragLocked
+                            ? MirpgRemoteTheme.accent
+                            : MirpgRemoteTheme.textPrimary,
+                      ),
+                    ),
+                  IconButton(
+                    tooltip: 'Release all held controls',
+                    onPressed: held ? _releaseVisibleHeldControls : null,
+                    color: MirpgRemoteTheme.warning,
+                    icon: const Icon(Icons.lock_open_outlined),
+                  ),
+                  IconButton(
+                    tooltip: 'Close precision controls',
+                    onPressed: () {
+                      _releaseVisibleHeldControls();
+                      setState(() => _precision = false);
+                      _emitPreferences();
+                    },
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ]),
+              ),
+            );
+          }),
+        ),
+      );
 
   void _setDragLocked(bool locked) {
     if (locked && !_canSendInput) return;
@@ -1519,6 +1893,11 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       (_mouseButtonsPosition.dx + delta.dx / maxX).clamp(0.0, 1.0).toDouble(),
       (_mouseButtonsPosition.dy + delta.dy / maxY).clamp(0.0, 1.0).toDouble(),
     );
+  }
+
+  void _nudgeFloatingMouse(Offset delta) {
+    setState(() => _moveFloatingMouse(delta));
+    _emitPreferences();
   }
 
   void _setFloatingButton(bool left, bool down) {
@@ -1550,6 +1929,13 @@ class _MonitorControlViewState extends State<MonitorControlView> {
           button: true,
           enabled: _canSendInput,
           label: tooltip,
+          value: pressed ? 'Held' : 'Released',
+          onTap: _canSendInput
+              ? () {
+                  _setFloatingButton(left, true);
+                  _setFloatingButton(left, false);
+                }
+              : null,
           child: SizedBox(
             width: 48,
             height: 48,
@@ -1583,17 +1969,31 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         width: _floatingMouseSize.width,
         height: _floatingMouseSize.height,
         child: Row(children: [
-          GestureDetector(
-            key: const ValueKey('monitor-mouse-buttons-drag'),
-            behavior: HitTestBehavior.opaque,
-            onPanUpdate: (details) =>
-                setState(() => _moveFloatingMouse(details.delta)),
-            onPanEnd: (_) => _emitPreferences(),
-            child: const SizedBox(
-              width: 32,
-              height: 52,
-              child:
-                  Icon(Icons.drag_indicator, color: Colors.white70, size: 20),
+          Semantics(
+            label: 'Move mouse button controls',
+            hint: 'Drag to reposition these controls on the screen',
+            customSemanticsActions: {
+              CustomSemanticsAction(label: 'Move controls left'): () =>
+                  _nudgeFloatingMouse(const Offset(-24, 0)),
+              CustomSemanticsAction(label: 'Move controls right'): () =>
+                  _nudgeFloatingMouse(const Offset(24, 0)),
+              CustomSemanticsAction(label: 'Move controls up'): () =>
+                  _nudgeFloatingMouse(const Offset(0, -24)),
+              CustomSemanticsAction(label: 'Move controls down'): () =>
+                  _nudgeFloatingMouse(const Offset(0, 24)),
+            },
+            child: GestureDetector(
+              key: const ValueKey('monitor-mouse-buttons-drag'),
+              behavior: HitTestBehavior.opaque,
+              onPanUpdate: (details) =>
+                  setState(() => _moveFloatingMouse(details.delta)),
+              onPanEnd: (_) => _emitPreferences(),
+              child: const SizedBox(
+                width: 48,
+                height: 52,
+                child:
+                    Icon(Icons.drag_indicator, color: Colors.white70, size: 20),
+              ),
             ),
           ),
           _floatingMouseButton('Remote left mouse button', Icons.mouse, true,
@@ -1606,36 +2006,46 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   }
 
   Widget _thumbwheel() {
-    return GestureDetector(
-      key: const ValueKey('monitor-thumbwheel'),
-      behavior: HitTestBehavior.opaque,
-      onVerticalDragUpdate: _canSendInput
-          ? (details) {
-              _thumbwheelDelta += details.delta.dy / 8;
-              final steps = _thumbwheelDelta.truncate();
-              if (steps != 0) {
-                widget.onScroll(steps);
-                _thumbwheelDelta -= steps;
+    return Semantics(
+      label: 'Remote scroll thumbwheel',
+      value: _canSendInput ? 'Ready' : 'Disabled',
+      increasedValue: _canSendInput ? 'Scroll up' : null,
+      decreasedValue: _canSendInput ? 'Scroll down' : null,
+      enabled: _canSendInput,
+      onIncrease: _canSendInput ? () => widget.onScroll(-1) : null,
+      onDecrease: _canSendInput ? () => widget.onScroll(1) : null,
+      child: GestureDetector(
+        key: const ValueKey('monitor-thumbwheel'),
+        behavior: HitTestBehavior.opaque,
+        onVerticalDragUpdate: _canSendInput
+            ? (details) {
+                _thumbwheelDelta += details.delta.dy / 8;
+                final steps = _thumbwheelDelta.truncate();
+                if (steps != 0) {
+                  widget.onScroll(steps);
+                  _thumbwheelDelta -= steps;
+                }
               }
-            }
-          : null,
-      onVerticalDragEnd: (_) => _thumbwheelDelta = 0,
-      onVerticalDragCancel: () => _thumbwheelDelta = 0,
-      child: Material(
-        color: const Color(0xF2191F22),
-        elevation: 8,
-        borderRadius: BorderRadius.circular(18),
-        child: SizedBox(
-          width: 44,
-          height: 144,
-          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            const Icon(Icons.keyboard_arrow_up, color: Colors.white70),
-            const SizedBox(height: 12),
-            Icon(Icons.unfold_more,
-                color: _canSendInput ? Colors.white : Colors.white38),
-            const SizedBox(height: 12),
-            const Icon(Icons.keyboard_arrow_down, color: Colors.white70),
-          ]),
+            : null,
+        onVerticalDragEnd: (_) => _thumbwheelDelta = 0,
+        onVerticalDragCancel: () => _thumbwheelDelta = 0,
+        child: Material(
+          color: const Color(0xF2191F22),
+          elevation: 8,
+          borderRadius: BorderRadius.circular(18),
+          child: SizedBox(
+            width: 48,
+            height: 144,
+            child:
+                Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+              const Icon(Icons.keyboard_arrow_up, color: Colors.white70),
+              const SizedBox(height: 12),
+              Icon(Icons.unfold_more,
+                  color: _canSendInput ? Colors.white : Colors.white38),
+              const SizedBox(height: 12),
+              const Icon(Icons.keyboard_arrow_down, color: Colors.white70),
+            ]),
+          ),
         ),
       ),
     );
@@ -1667,6 +2077,29 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _limitOffset();
   }
 
+  void _navigateMinimapHitArea(
+      Offset localPosition, Size minimapSize, Size hitSize) {
+    final insetX = (hitSize.width - minimapSize.width) / 2;
+    final insetY = (hitSize.height - minimapSize.height) / 2;
+    _navigateMinimap(
+      Offset(
+        (localPosition.dx - insetX).clamp(0.0, minimapSize.width).toDouble(),
+        (localPosition.dy - insetY).clamp(0.0, minimapSize.height).toDouble(),
+      ),
+      minimapSize,
+    );
+  }
+
+  void _panLocalViewport(Offset fraction) {
+    setState(() {
+      _offset += Offset(
+        _viewport.width * fraction.dx,
+        _viewport.height * fraction.dy,
+      );
+      _limitOffset();
+    });
+  }
+
   Widget _minimap() {
     final aspect = widget.desktopSize.height / widget.desktopSize.width;
     var width = math.min(176.0, _viewport.width * 0.36);
@@ -1676,54 +2109,75 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       width = height / aspect;
     }
     final minimapSize = Size(width, height);
+    final hitSize = Size(math.max(48, width), math.max(48, height));
     final visible = _visibleSourceRect();
     final left = visible.left / widget.desktopSize.width * width;
     final top = visible.top / widget.desktopSize.height * height;
     final rectWidth = visible.width / widget.desktopSize.width * width;
     final rectHeight = visible.height / widget.desktopSize.height * height;
 
-    return GestureDetector(
-      key: const ValueKey('monitor-minimap'),
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (details) =>
-          setState(() => _navigateMinimap(details.localPosition, minimapSize)),
-      onPanUpdate: (details) =>
-          setState(() => _navigateMinimap(details.localPosition, minimapSize)),
-      child: Material(
-        color: Colors.black,
-        elevation: 8,
-        borderRadius: BorderRadius.circular(10),
-        clipBehavior: Clip.antiAlias,
+    return Semantics(
+      label: 'Desktop viewport minimap',
+      hint: 'Moves the local viewport only and does not click Windows',
+      customSemanticsActions: {
+        CustomSemanticsAction(label: 'Move viewport left'): () =>
+            _panLocalViewport(const Offset(0.2, 0)),
+        CustomSemanticsAction(label: 'Move viewport right'): () =>
+            _panLocalViewport(const Offset(-0.2, 0)),
+        CustomSemanticsAction(label: 'Move viewport up'): () =>
+            _panLocalViewport(const Offset(0, 0.2)),
+        CustomSemanticsAction(label: 'Move viewport down'): () =>
+            _panLocalViewport(const Offset(0, -0.2)),
+      },
+      child: GestureDetector(
+        key: const ValueKey('monitor-minimap'),
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (details) => setState(() => _navigateMinimapHitArea(
+            details.localPosition, minimapSize, hitSize)),
+        onPanUpdate: (details) => setState(() => _navigateMinimapHitArea(
+            details.localPosition, minimapSize, hitSize)),
         child: SizedBox(
-          width: width,
-          height: height,
-          child: Stack(children: [
-            Positioned.fill(
-              child: RawImage(
-                key: const ValueKey('monitor-minimap-image'),
-                image: widget.image,
-                fit: BoxFit.fill,
-                filterQuality: FilterQuality.low,
-              ),
-            ),
-            if (widget.image == null)
-              const Positioned.fill(
-                  child: ColoredBox(color: Color(0xFF242C30))),
-            Positioned(
-              left: left,
-              top: top,
-              width: math.max(8, rectWidth),
-              height: math.max(8, rectHeight),
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    border:
-                        Border.all(color: MirpgRemoteTheme.accent, width: 2),
+          width: hitSize.width,
+          height: hitSize.height,
+          child: Center(
+            child: Material(
+              color: Colors.black,
+              elevation: 8,
+              borderRadius: BorderRadius.circular(10),
+              clipBehavior: Clip.antiAlias,
+              child: SizedBox(
+                width: width,
+                height: height,
+                child: Stack(children: [
+                  Positioned.fill(
+                    child: RawImage(
+                      key: const ValueKey('monitor-minimap-image'),
+                      image: widget.image,
+                      fit: BoxFit.fill,
+                      filterQuality: FilterQuality.low,
+                    ),
                   ),
-                ),
+                  if (widget.image == null)
+                    const Positioned.fill(
+                        child: ColoredBox(color: Color(0xFF242C30))),
+                  Positioned(
+                    left: left,
+                    top: top,
+                    width: math.max(8, rectWidth),
+                    height: math.max(8, rectHeight),
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                              color: MirpgRemoteTheme.accent, width: 2),
+                        ),
+                      ),
+                    ),
+                  ),
+                ]),
               ),
             ),
-          ]),
+          ),
         ),
       ),
     );
@@ -1757,173 +2211,183 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   }
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(builder: (context, box) {
-        final size = Size(box.maxWidth, box.maxHeight);
-        if (size.isEmpty || widget.desktopSize.isEmpty) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (_viewport != size) {
-          _viewport = size;
-          _fit = math.min(size.width / widget.desktopSize.width,
-              size.height / widget.desktopSize.height);
-          if (_viewPreset == _MonitorViewPreset.readable) {
-            _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
-          } else if (_viewPreset == _MonitorViewPreset.fit) {
-            _zoom = 1;
-          } else {
-            _zoom ??= 1;
+  Widget build(BuildContext context) => Column(children: [
+        if (_toolbarVisible) _sessionTopBar(),
+        Expanded(child: LayoutBuilder(builder: (context, box) {
+          final size = Size(box.maxWidth, box.maxHeight);
+          if (size.isEmpty || widget.desktopSize.isEmpty) {
+            return const Center(child: CircularProgressIndicator());
           }
-          _offset = size.center(Offset.zero) - _cursor * _scale;
-          _limitOffset();
-        }
-        final floatingMouse = _floatingMouseTopLeft();
-        return Stack(children: [
-          Positioned.fill(
-              child: Listener(
-                  onPointerDown: _rawPointerDown,
-                  onPointerUp: _rawPointerUp,
-                  onPointerCancel: _rawPointerUp,
-                  child: Semantics(
-                      label:
-                          'Windows mouse interaction. Swipe with one finger to move the pointer, tap to click, hold to right-click, pinch to zoom, and drag with two fingers to scroll.',
-                      child: GestureDetector(
-                          key: const ValueKey('monitor-trackpad'),
-                          behavior: HitTestBehavior.opaque,
-                          onTapDown: _panMode
-                              ? null
-                              : (details) =>
-                                  _tapLocalPosition = details.localPosition,
-                          onTap: _panMode ? null : _tap,
-                          onLongPressStart: _canSendInput && !_panMode
-                              ? (details) {
-                                  if (_doubleTapCandidate ||
-                                      _doubleTapHoldTimer != null ||
-                                      _gestureDragHeld) {
-                                    return;
+          if (_viewport != size) {
+            _viewport = size;
+            _fit = math.min(size.width / widget.desktopSize.width,
+                size.height / widget.desktopSize.height);
+            if (_viewPreset == _MonitorViewPreset.readable) {
+              _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
+            } else if (_viewPreset == _MonitorViewPreset.fit) {
+              _zoom = 1;
+            } else {
+              _zoom ??= 1;
+            }
+            _offset = size.center(Offset.zero) - _cursor * _scale;
+            _limitOffset();
+          }
+          final floatingMouse = _floatingMouseTopLeft();
+          return Stack(children: [
+            Positioned.fill(
+                child: Listener(
+                    onPointerDown: _rawPointerDown,
+                    onPointerUp: _rawPointerUp,
+                    onPointerCancel: _rawPointerUp,
+                    child: Semantics(
+                        label:
+                            'Windows mouse interaction. Swipe with one finger to move the pointer, tap to click, hold to right-click, pinch to zoom, and drag with two fingers to scroll.',
+                        child: GestureDetector(
+                            key: const ValueKey('monitor-trackpad'),
+                            behavior: HitTestBehavior.opaque,
+                            onTapDown: _panMode
+                                ? null
+                                : (details) =>
+                                    _tapLocalPosition = details.localPosition,
+                            onTap: _panMode ? null : _tap,
+                            onLongPressStart: _canSendInput && !_panMode
+                                ? (details) {
+                                    if (_doubleTapCandidate ||
+                                        _doubleTapHoldTimer != null ||
+                                        _gestureDragHeld) {
+                                      return;
+                                    }
+                                    if (_cursorOffset) {
+                                      setState(() =>
+                                          _moveToLocal(details.localPosition));
+                                    }
+                                    widget.onPointer(3, _cursor);
                                   }
-                                  if (_cursorOffset) {
-                                    setState(() =>
-                                        _moveToLocal(details.localPosition));
-                                  }
-                                  widget.onPointer(3, _cursor);
-                                }
-                              : null,
-                          onScaleStart: (details) {
-                            _fingers = details.pointerCount;
-                            _maxFingers = details.pointerCount;
-                            _lastFocal = details.localFocalPoint;
-                            _gestureScale = 1;
-                            _wheel = 0;
-                            _twoFingerMode = _TwoFingerMode.undecided;
-                            _twoFingerUpdates = 0;
-                            _twoFingerStartScale = 1;
-                            _twoFingerPendingDelta = Offset.zero;
-                          },
-                          onScaleUpdate: _scaleUpdate,
-                          onScaleEnd: _scaleEnd,
-                          child: ClipRect(
-                              child: Stack(children: [
-                            Positioned(
-                                key: const ValueKey('monitor-frame'),
-                                left: _offset.dx,
-                                top: _offset.dy,
-                                width: widget.desktopSize.width * _scale,
-                                height: widget.desktopSize.height * _scale,
-                                child: RawImage(
-                                    image: widget.image,
-                                    fit: BoxFit.fill,
-                                    filterQuality: FilterQuality.medium)),
-                            if (widget.image == null)
-                              const Center(child: CircularProgressIndicator()),
-                            if (widget.canControl)
+                                : null,
+                            onScaleStart: (details) {
+                              _fingers = details.pointerCount;
+                              _maxFingers = details.pointerCount;
+                              _lastFocal = details.localFocalPoint;
+                              _gestureScale = 1;
+                              _wheel = 0;
+                              _twoFingerMode = _TwoFingerMode.undecided;
+                              _twoFingerUpdates = 0;
+                              _twoFingerStartScale = 1;
+                              _twoFingerPendingDelta = Offset.zero;
+                            },
+                            onScaleUpdate: _scaleUpdate,
+                            onScaleEnd: _scaleEnd,
+                            child: ClipRect(
+                                child: Stack(children: [
                               Positioned(
-                                  left: _offset.dx + _cursor.dx * _scale - 3,
-                                  top: _offset.dy + _cursor.dy * _scale - 3,
-                                  child: const IgnorePointer(
-                                      child: Icon(Icons.north_west,
-                                          size: 24,
+                                  key: const ValueKey('monitor-frame'),
+                                  left: _offset.dx,
+                                  top: _offset.dy,
+                                  width: widget.desktopSize.width * _scale,
+                                  height: widget.desktopSize.height * _scale,
+                                  child: RawImage(
+                                      image: widget.image,
+                                      fit: BoxFit.fill,
+                                      filterQuality: FilterQuality.medium)),
+                              if (widget.image == null)
+                                const Center(
+                                    child: CircularProgressIndicator()),
+                              if (widget.canControl)
+                                Positioned(
+                                    left: _offset.dx + _cursor.dx * _scale - 3,
+                                    top: _offset.dy + _cursor.dy * _scale - 3,
+                                    child: const IgnorePointer(
+                                        child: Icon(Icons.north_west,
+                                            size: 24,
+                                            color: Colors.white,
+                                            shadows: [
+                                          Shadow(
+                                              blurRadius: 3,
+                                              color: Colors.black)
+                                        ]))),
+                            ])))))),
+            if ((_zoom ?? 1) > 1.01)
+              Positioned(top: 12, right: 12, child: _minimap()),
+            if (_dragLocked ||
+                _gestureDragHeld ||
+                _panMode ||
+                _precision ||
+                _cursorOffset)
+              Positioned(top: 12, left: 12, child: _modeBadge()),
+            if (widget.frameStatus != null)
+              Positioned(
+                  top: 12,
+                  left: 0,
+                  right: 0,
+                  child: IgnorePointer(
+                      child: Center(
+                          child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                  color: const Color(0xE61C2225),
+                                  borderRadius: BorderRadius.circular(999)),
+                              child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 12, vertical: 7),
+                                  child: Text(widget.frameStatus!,
+                                      style: const TextStyle(
                                           color: Colors.white,
-                                          shadows: [
-                                        Shadow(
-                                            blurRadius: 3, color: Colors.black)
-                                      ]))),
-                          ])))))),
-          if ((_zoom ?? 1) > 1.01)
-            Positioned(top: 12, right: 12, child: _minimap()),
-          if (_dragLocked ||
-              _gestureDragHeld ||
-              _panMode ||
-              _precision ||
-              _cursorOffset)
-            Positioned(top: 12, left: 12, child: _modeBadge()),
-          if (widget.frameStatus != null)
-            Positioned(
-                top: 12,
-                left: 0,
-                right: 0,
-                child: IgnorePointer(
-                    child: Center(
-                        child: DecoratedBox(
-                            decoration: BoxDecoration(
-                                color: const Color(0xE61C2225),
-                                borderRadius: BorderRadius.circular(999)),
-                            child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 7),
-                                child: Text(widget.frameStatus!,
-                                    style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w600))))))),
-          if (_mouseButtonsVisible)
-            Positioned(
-                left: floatingMouse.dx,
-                top: floatingMouse.dy,
-                child: _floatingMouseButtons()),
-          if (_thumbwheelVisible)
-            Positioned(
-                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
-                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
-                top: math.max(12, (_viewport.height - 144) / 2),
-                child: _thumbwheel()),
-          if (_toolbarVisible && _panel != _MonitorPanel.none)
-            Positioned(
-                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
-                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
-                bottom: 72,
-                child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                        maxWidth: math.max(0, _viewport.width - 16)),
-                    child: _panel == _MonitorPanel.actions
-                        ? _actionsPanel()
-                        : _displayPanel())),
-          if (_toolbarVisible)
-            Positioned(
-                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
-                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
-                bottom: 8,
-                child: _sessionToolbar())
-          else
-            Positioned(
-                left: _toolbarDock == MonitorToolbarDock.left ? 4 : null,
-                right: _toolbarDock == MonitorToolbarDock.right ? 4 : null,
-                bottom: 4,
-                child: Material(
-                    color: const Color(0xF2191F22),
-                    elevation: 8,
-                    borderRadius: BorderRadius.circular(14),
-                    child: IconButton(
-                        tooltip: 'Show toolbar',
-                        color: Colors.white,
-                        icon: const Icon(Icons.keyboard_arrow_up),
-                        onPressed: () {
-                          setState(() => _toolbarVisible = true);
-                          _emitPreferences();
-                        }))),
-        ]);
-      });
+                                          fontWeight: FontWeight.w600))))))),
+            if (_mouseButtonsVisible && !_precision)
+              Positioned(
+                  left: floatingMouse.dx,
+                  top: floatingMouse.dy,
+                  child: _floatingMouseButtons()),
+            if (_thumbwheelVisible)
+              Positioned(
+                  left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                  right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
+                  top: math.max(12, (_viewport.height - 144) / 2),
+                  child: _thumbwheel()),
+            if (_toolbarVisible && _panel != _MonitorPanel.none)
+              Positioned(
+                  left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                  right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
+                  bottom: 12,
+                  child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                          maxWidth: math.max(0, _viewport.width - 16)),
+                      child: _panel == _MonitorPanel.actions
+                          ? _actionsPanel()
+                          : _displayPanel())),
+            if (!_toolbarVisible)
+              Positioned(
+                  left: _toolbarDock == MonitorToolbarDock.left ? 4 : null,
+                  right: _toolbarDock == MonitorToolbarDock.right ? 4 : null,
+                  bottom: 4,
+                  child: Material(
+                      color: const Color(0xF2191F22),
+                      elevation: 8,
+                      borderRadius: BorderRadius.circular(14),
+                      child: IconButton(
+                          tooltip: 'Show toolbar',
+                          color: Colors.white,
+                          icon: const Icon(Icons.keyboard_arrow_up),
+                          onPressed: () {
+                            setState(() => _toolbarVisible = true);
+                            _emitPreferences();
+                          }))),
+          ]);
+        })),
+        if (_toolbarVisible && _precision) _precisionToolbar(),
+        if (_toolbarVisible) _sessionToolbar(),
+      ]);
 }
 
 enum _MonitorPanel { none, actions, display }
+
+enum _MonitorSessionAction {
+  clipboard,
+  windows,
+  quality,
+  actions,
+  display,
+  hideControls,
+}
 
 enum _TwoFingerMode { undecided, scroll, pinch }
 

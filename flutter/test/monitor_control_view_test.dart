@@ -32,14 +32,79 @@ void main() {
         ))));
   }
 
+  Future<void> openSessionMenu(WidgetTester tester) async {
+    await tester.tap(find.byTooltip('Session controls'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+  }
+
+  Future<void> openInputControls(WidgetTester tester) async {
+    await openSessionMenu(tester);
+    await tester.tap(find.text('Input controls'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+  }
+
+  Future<void> openDisplayControls(WidgetTester tester) async {
+    await openSessionMenu(tester);
+    await tester.tap(find.text('Display controls'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+  }
+
   testWidgets('stale video is visibly marked while controls stay disabled',
       (tester) async {
     await show(tester,
         control: false, frameStatus: 'Last frame · waiting for fresh video');
     expect(find.text('Last frame · waiting for fresh video'), findsOneWidget);
-    final keyboardButton = find.ancestor(
-        of: find.byTooltip('Keyboard'), matching: find.byType(IconButton));
-    expect(tester.widget<IconButton>(keyboardButton).onPressed, isNull);
+    final keyboardButton = find.descendant(
+        of: find.byTooltip('Keyboard'), matching: find.byType(InkWell));
+    expect(tester.widget<InkWell>(keyboardButton).onTap, isNull);
+  });
+
+  testWidgets('remote chrome fits a 360dp phone and keeps full touch targets',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(360, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await show(tester);
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byTooltip('Session controls'), findsOneWidget);
+    for (final tooltip in const [
+      'Fit view',
+      'Readable view',
+      'Pan mode',
+      'Precision mode',
+      'Keyboard',
+      'Switch view',
+    ]) {
+      final size = tester.getSize(find.byTooltip(tooltip));
+      expect(size.width, greaterThanOrEqualTo(48), reason: tooltip);
+      expect(size.height, greaterThanOrEqualTo(48), reason: tooltip);
+    }
+  });
+
+  testWidgets('precision mode replaces duplicate floating mouse controls',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(360, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await show(
+      tester,
+      preferences: const MonitorControlPreferences(
+        precision: true,
+        mouseButtonsVisible: true,
+      ),
+    );
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const ValueKey('monitor-mouse-buttons')), findsNothing);
+    expect(find.byTooltip('Remote left mouse button'), findsOneWidget);
+    expect(find.byTooltip('Remote right mouse button'), findsOneWidget);
+    expect(find.byTooltip('Close precision controls'), findsOneWidget);
   });
 
   test('monitor preferences round trip safely', () {
@@ -93,10 +158,13 @@ void main() {
     expect(desktop.width, closeTo(surface.width, 0.01));
     expect(desktop.height, lessThanOrEqualTo(surface.height));
     expect(find.byTooltip('Keyboard'), findsOneWidget);
-    expect(find.byTooltip('Actions'), findsOneWidget);
-    expect(find.byTooltip('Display'), findsOneWidget);
-    await tester.tap(find.byTooltip('Display'));
+    expect(find.byTooltip('Session controls'), findsOneWidget);
+    await openSessionMenu(tester);
+    expect(find.text('Input controls'), findsOneWidget);
+    expect(find.text('Display controls'), findsOneWidget);
+    await tester.tap(find.text('Display controls'));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
     expect(find.text('Fit'), findsOneWidget);
     await tester.tap(find.byTooltip('Zoom in'));
     await tester.pump(const Duration(milliseconds: 350));
@@ -111,8 +179,7 @@ void main() {
     final surface =
         tester.getSize(find.byKey(const ValueKey('monitor-trackpad')));
 
-    await tester.tap(find.byTooltip('Display'));
-    await tester.pump();
+    await openDisplayControls(tester);
     await tester.tap(find.byTooltip('Readable'));
     await tester.pump();
 
@@ -126,8 +193,7 @@ void main() {
       (tester) async {
     final events = <int>[];
     await show(tester, pointer: (action, _) => events.add(action));
-    await tester.tap(find.byTooltip('Display'));
-    await tester.pump();
+    await openDisplayControls(tester);
     await tester.tap(find.byTooltip('Readable'));
     await tester.pump();
 
@@ -141,16 +207,39 @@ void main() {
     expect(tester.getTopLeft(frame), isNot(before));
   });
 
+  testWidgets('minimap keeps at least a 48dp interactive target',
+      (tester) async {
+    await show(tester);
+    await openDisplayControls(tester);
+    await tester.tap(find.byTooltip('Readable'));
+    await tester.pump();
+
+    final size = tester.getSize(find.byKey(const ValueKey('monitor-minimap')));
+    expect(size.width, greaterThanOrEqualTo(48));
+    expect(size.height, greaterThanOrEqualTo(48));
+  });
+
+  testWidgets('overlay_drag_never_remote_clicks', (tester) async {
+    final events = <int>[];
+    await show(tester,
+        preferences: const MonitorControlPreferences(mouseButtonsVisible: true),
+        pointer: (action, _) => events.add(action));
+
+    await tester.drag(find.byKey(const ValueKey('monitor-mouse-buttons-drag')),
+        const Offset(-120, -90));
+    await tester.pump();
+
+    expect(events, isEmpty);
+  });
+
   testWidgets('Pan moves the viewport without moving the remote pointer',
       (tester) async {
     final events = <int>[];
     await show(tester, pointer: (action, _) => events.add(action));
-    await tester.tap(find.byTooltip('Display'));
-    await tester.pump();
+    await openDisplayControls(tester);
     await tester.tap(find.byTooltip('Readable'));
     await tester.pump();
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Pan'));
     await tester.pump();
 
@@ -176,8 +265,7 @@ void main() {
     final normalDelta = normalEnd - 1920;
     moves.clear();
 
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Precision'));
     await tester.pump();
     await tester.drag(surface, const Offset(80, 0));
@@ -190,15 +278,16 @@ void main() {
       (tester) async {
     final events = <int>[];
     await show(tester, pointer: (action, _) => events.add(action));
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Drag lock'));
     await tester.pump();
     expect(events, [0]);
     expect(find.text('Drag locked'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Hide toolbar'));
+    await openSessionMenu(tester);
+    await tester.tap(find.text('Hide controls'));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
     expect(find.text('Drag locked'), findsOneWidget);
     await tester.tap(find.text('Release'));
     await tester.pump();
@@ -225,8 +314,7 @@ void main() {
       }),
     ));
 
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Drag lock'));
     await tester.pump();
     expect(events, [0]);
@@ -239,8 +327,7 @@ void main() {
 
   testWidgets('toolbar can dock left and right', (tester) async {
     await show(tester);
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     expect(find.byTooltip('Dock controls left'), findsOneWidget);
     await tester.tap(find.byTooltip('Dock controls left'));
     await tester.pump();
@@ -292,12 +379,29 @@ void main() {
       (tester) async {
     final changes = <MonitorControlPreferences>[];
     await show(tester, onPreferencesChanged: changes.add);
-    await tester.tap(find.byTooltip('Display'));
-    await tester.pump();
+    await openDisplayControls(tester);
     await tester.tap(find.byTooltip('Orientation: Auto'));
     await tester.pump();
 
     expect(changes.last.orientation, MonitorOrientationPreference.portrait);
+  });
+
+  testWidgets('rotation_cancels_all_contacts', (tester) async {
+    final events = <int>[];
+    await show(tester, pointer: (action, _) => events.add(action));
+
+    await openInputControls(tester);
+    await tester.tap(find.byTooltip('Drag lock'));
+    await tester.pump();
+    expect(events, [0]);
+    expect(find.text('Drag locked'), findsOneWidget);
+
+    await openDisplayControls(tester);
+    await tester.tap(find.byTooltip('Orientation: Auto'));
+    await tester.pump();
+
+    expect(events, [0, 1]);
+    expect(find.text('Drag locked'), findsNothing);
   });
 
   testWidgets('cursor offset maps taps above the finger and stays in bounds',
@@ -324,8 +428,7 @@ void main() {
       (tester) async {
     final changes = <MonitorControlPreferences>[];
     await show(tester, onPreferencesChanged: changes.add);
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Cursor offset'));
     await tester.pump();
 
@@ -336,8 +439,7 @@ void main() {
   testWidgets('precision gain is adjustable and persisted', (tester) async {
     final changes = <MonitorControlPreferences>[];
     await show(tester, onPreferencesChanged: changes.add);
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Precision speed'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
@@ -365,8 +467,7 @@ void main() {
           orientation: MonitorOrientationPreference.portrait,
         ),
         onPreferencesChanged: changes.add);
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Reset controls'));
     await tester.pump();
 
@@ -399,8 +500,7 @@ void main() {
       }),
     ));
 
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('View only'));
     await tester.pump();
     expect(localViewOnly, isTrue);
@@ -527,8 +627,7 @@ void main() {
         ctrlAltDel: () => ctrlAltDel++,
         switchView: () => switches++,
         dashboard: () => dashboards++);
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     expect(find.byTooltip('Right click'), findsOneWidget);
     expect(find.byTooltip('Middle click'), findsOneWidget);
     await tester.tap(find.byTooltip('Ctrl+Alt+Del'));
@@ -542,8 +641,7 @@ void main() {
   testWidgets('gesture guide identifies Windows pointer mode and held drag',
       (tester) async {
     await show(tester);
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Gestures'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
@@ -560,16 +658,14 @@ void main() {
         control: false, pointer: (action, _) => events.add(action));
     await tester.drag(
         find.byKey(const ValueKey('monitor-trackpad')), const Offset(80, 20));
-    await tester.tap(find.byTooltip('Actions'));
-    await tester.pump();
+    await openInputControls(tester);
     await tester.tap(find.byTooltip('Right click'));
     await tester.pump(const Duration(milliseconds: 350));
     expect(events, isEmpty);
-    final keyboard = tester.widget<IconButton>(
-        find.widgetWithIcon(IconButton, Icons.keyboard_outlined));
-    expect(keyboard.onPressed, isNull);
-    await tester.tap(find.byTooltip('Display'));
-    await tester.pump();
+    final keyboard = find.descendant(
+        of: find.byTooltip('Keyboard'), matching: find.byType(InkWell));
+    expect(tester.widget<InkWell>(keyboard).onTap, isNull);
+    await openDisplayControls(tester);
     await tester.tap(find.byTooltip('Fit screen'));
     await tester.pump(const Duration(milliseconds: 350));
     expect(find.text('Fit'), findsOneWidget);
