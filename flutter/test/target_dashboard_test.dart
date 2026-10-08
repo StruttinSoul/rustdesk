@@ -452,6 +452,48 @@ void main() {
     expect(androidResumes, 1);
   });
 
+  testWidgets(
+      'switcher cards keep previews and actions visible in both rotations',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    for (final size in [const Size(900, 360), const Size(360, 700)]) {
+      tester.view.physicalSize = size;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: TargetSwitcherCards(cards: [
+            TargetPreviewCard(
+              name: 'Monitor 1',
+              type: 'Windows',
+              stopped: false,
+              live: true,
+              onOpen: () {},
+            ),
+            TargetPreviewCard(
+              name: 'BlueStacks App Player 3',
+              type: 'Android 13',
+              stopped: false,
+              live: true,
+              onOpen: () {},
+            ),
+          ]),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Open'), findsOneWidget);
+      expect(find.text('Resume'), findsOneWidget);
+      expect(find.text('Tap to control'), findsNWidgets(2));
+      for (final card in find.byType(TargetPreviewCard).evaluate()) {
+        final rect = tester.getRect(find.byWidget(card.widget));
+        expect(rect.bottom, lessThanOrEqualTo(size.height));
+        expect(rect.right, lessThanOrEqualTo(size.width));
+      }
+    }
+  });
+
   testWidgets('launch game is a separate emulator action', (tester) async {
     var boots = 0;
     var launches = 0;

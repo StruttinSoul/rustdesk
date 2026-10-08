@@ -68,6 +68,31 @@ void main() {
     expect(tester.getSize(find.byType(IconButton)).height,
         greaterThanOrEqualTo(48));
   });
+
+  testWidgets('status chips truncate long emulator labels in narrow overlays',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: MirpgRemoteTheme.build(ThemeData.light()),
+      home: Scaffold(
+        body: Center(
+          child: MediaQuery(
+            data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+            child: const SizedBox(
+              width: 190,
+              child: MirpgStatusChip(
+                label: 'BlueStacks App Player 3 · Waiting for live frame',
+                icon: Icons.hourglass_top_rounded,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ));
+
+    expect(tester.takeException(), isNull);
+    expect(tester.getSize(find.byType(MirpgStatusChip)).width,
+        lessThanOrEqualTo(190));
+  });
 }
 
 @immutable

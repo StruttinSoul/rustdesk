@@ -556,20 +556,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           ),
           Expanded(
               child: PageView.builder(
-            itemCount: (targets.length / 4).ceil(),
+            itemCount: (targets.length / 2).ceil(),
             onPageChanged: (page) {
-              _chooserStart = page * 4;
+              _chooserStart = page * 2;
               _subscription = '';
               _subscribe();
             },
-            itemBuilder: (_, page) => GridView.count(
-              crossAxisCount: 2,
-              padding: const EdgeInsets.all(12),
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: 1.6,
-              children: [
-                for (final target in targets.skip(page * 4).take(4))
+            itemBuilder: (_, page) => TargetSwitcherCards(
+              cards: [
+                for (final target in targets.skip(page * 2).take(2))
                   _card(target, () => Navigator.of(sheetContext).pop(target))
               ],
             ),
@@ -1858,6 +1853,42 @@ class _Target {
   final int? display;
   String get id => instance?.id ?? (display == null ? '' : 'monitor:$display');
   String get name => instance?.name ?? 'Monitor ${display! + 1}';
+}
+
+/// Shows two fully visible previews per switcher page, including their actions.
+/// A landscape grid of four cards clipped the bottom of each card on phones.
+class TargetSwitcherCards extends StatelessWidget {
+  const TargetSwitcherCards({super.key, required this.cards});
+
+  final List<Widget> cards;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+        builder: (_, constraints) {
+          final horizontal = constraints.maxWidth > constraints.maxHeight;
+          return Padding(
+            padding: const EdgeInsets.all(12),
+            child: Flex(
+              direction: horizontal ? Axis.horizontal : Axis.vertical,
+              children: [
+                for (var i = 0; i < cards.length; i++)
+                  Expanded(
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        right: horizontal && i == 0 && cards.length > 1 ? 6 : 0,
+                        left: horizontal && i > 0 ? 6 : 0,
+                        bottom:
+                            !horizontal && i == 0 && cards.length > 1 ? 6 : 0,
+                        top: !horizontal && i > 0 ? 6 : 0,
+                      ),
+                      child: cards[i],
+                    ),
+                  ),
+              ],
+            ),
+          );
+        },
+      );
 }
 
 class TargetPreviewCard extends StatelessWidget {
