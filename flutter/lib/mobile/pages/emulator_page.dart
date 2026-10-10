@@ -16,6 +16,49 @@ bool shouldCancelGuestComposition({
     (currentSessionId != previousSessionId ||
         currentTargetId != previousTargetId);
 
+/// Gives portrait video the full screen width. When the screen is tall enough,
+/// the controls occupy the black margin underneath the contained video; on
+/// shorter screens a dedicated row prevents controls covering the game.
+class PortraitGuestStage extends StatelessWidget {
+  const PortraitGuestStage({
+    super.key,
+    required this.guestWidth,
+    required this.guestHeight,
+    required this.video,
+    required this.controls,
+  });
+
+  final int guestWidth;
+  final int guestHeight;
+  final Widget video;
+  final Widget controls;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+        builder: (context, constraints) {
+          final frame = containedGuestFrame(
+            viewportWidth: constraints.maxWidth,
+            viewportHeight: constraints.maxHeight,
+            guestWidth: guestWidth,
+            guestHeight: guestHeight,
+          );
+          final marginBelow = frame == null
+              ? 0.0
+              : constraints.maxHeight - frame.top - frame.height;
+          if (marginBelow < 64) {
+            return Column(children: [
+              Expanded(child: SizedBox.expand(child: video)),
+              controls,
+            ]);
+          }
+          return Stack(children: [
+            Positioned.fill(child: video),
+            Positioned(left: 8, right: 8, bottom: 8, child: controls),
+          ]);
+        },
+      );
+}
+
 class EmulatorPage extends StatefulWidget {
   const EmulatorPage(
       {super.key,
@@ -523,100 +566,78 @@ class _EmulatorPageState extends State<EmulatorPage>
         child: SafeArea(
           child: Stack(
             children: [
-              Row(children: [
-                SizedBox(
-                    width: 56,
-                    child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          _overlayButton(
-                              tooltip: widget.onSwitch == null
-                                  ? 'Return to Windows desktop'
-                                  : 'Switch view',
-                              icon: widget.onSwitch == null
-                                  ? Icons.desktop_windows_outlined
-                                  : Icons.view_agenda_outlined,
-                              onPressed: () async {
-                                _cancelGuestInput();
-                                _discardTextComposer(
-                                    restoreKeyboardFocus: false);
-                                if (widget.onSwitch != null) {
-                                  await widget.onSwitch!();
-                                } else {
-                                  await _back();
-                                }
-                              }),
-                          if (widget.onReturn != null)
+              if (model.height > model.width)
+                PortraitGuestStage(
+                  guestWidth: model.width,
+                  guestHeight: model.height,
+                  video: _guestCanvas(),
+                  controls: _portraitControls(),
+                )
+              else
+                Row(children: [
+                  SizedBox(
+                      width: 56,
+                      child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
                             _overlayButton(
-                                tooltip: 'Dashboard',
-                                icon: Icons.grid_view_outlined,
-                                onPressed: () => unawaited(_back())),
-                        ])),
-                Expanded(
-                    child: LayoutBuilder(
-                  builder: (context, constraints) => Listener(
-                    behavior: HitTestBehavior.opaque,
-                    onPointerDown: (event) => _touch(0, event, constraints),
-                    onPointerMove: (event) {
-                      if (_pointers.containsKey(event.pointer)) {
-                        _touch(2, event, constraints);
-                      }
-                    },
-                    onPointerUp: (event) => _touch(1, event, constraints),
-                    onPointerCancel: (event) => _touch(3, event, constraints),
-                    child: AnimatedBuilder(
-                      animation: widget.ffi.imageModel,
-                      builder: (_, __) => RawImage(
-                        image: widget.dashboardMode
-                            ? widget.ffi.imageModel
-                                .dashboardImage(model.videoChannel)
-                            : widget.ffi.imageModel.image,
-                        fit: BoxFit.contain,
-                        filterQuality: FilterQuality.low,
-                      ),
-                    ),
-                  ),
-                )),
-                SizedBox(
-                    width: 56,
-                    child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          _overlayButton(
-                              tooltip: model.guestTextSupported
-                                  ? 'Type text'
-                                  : 'Text input unavailable on this host',
-                              icon: Icons.keyboard_outlined,
-                              onPressed: canGuestControl &&
-                                      model.streaming &&
-                                      model.guestTextSupported &&
-                                      !_returning
-                                  ? _openTextComposer
-                                  : null),
-                          const SizedBox(height: 8),
-                          _overlayNavigation(Icons.arrow_back, 'Back', 'back'),
-                          const SizedBox(height: 8),
-                          _overlayNavigation(
-                              Icons.home_outlined, 'Home', 'home'),
-                          const SizedBox(height: 8),
-                          _overlayNavigation(
-                              Icons.crop_square, 'Recents', 'recents'),
-                        ])),
-              ]),
+                                tooltip: widget.onSwitch == null
+                                    ? 'Return to Windows desktop'
+                                    : 'Switch view',
+                                icon: widget.onSwitch == null
+                                    ? Icons.desktop_windows_outlined
+                                    : Icons.view_agenda_outlined,
+                                onPressed: () => unawaited(_switchView())),
+                            if (widget.onReturn != null)
+                              _overlayButton(
+                                  tooltip: 'Dashboard',
+                                  icon: Icons.grid_view_outlined,
+                                  onPressed: () => unawaited(_back())),
+                          ])),
+                  Expanded(child: _guestCanvas()),
+                  SizedBox(
+                      width: 56,
+                      child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            _overlayButton(
+                                tooltip: model.guestTextSupported
+                                    ? 'Type text'
+                                    : 'Text input unavailable on this host',
+                                icon: Icons.keyboard_outlined,
+                                onPressed: canGuestControl &&
+                                        model.streaming &&
+                                        model.guestTextSupported &&
+                                        !_returning
+                                    ? _openTextComposer
+                                    : null),
+                            const SizedBox(height: 8),
+                            _overlayNavigation(
+                                Icons.arrow_back, 'Back', 'back'),
+                            const SizedBox(height: 8),
+                            _overlayNavigation(
+                                Icons.home_outlined, 'Home', 'home'),
+                            const SizedBox(height: 8),
+                            _overlayNavigation(
+                                Icons.crop_square, 'Recents', 'recents'),
+                          ])),
+                ]),
               Positioned(
                 top: 8,
-                left: 64,
-                right: 64,
+                left: model.height > model.width ? 8 : 64,
+                right: model.height > model.width ? 8 : 64,
                 child: IgnorePointer(
                   child: Center(
                     child: MirpgStatusChip(
-                      label: model.guestFrameFresh
-                          ? '$_selectedName · Direct touch'
-                          : '$_selectedName · Waiting for live frame',
-                      icon: model.guestFrameFresh
+                      label: !canControl
+                          ? '$_selectedName · View only'
+                          : model.guestFrameFresh
+                              ? '$_selectedName · Direct touch'
+                              : '$_selectedName · Waiting for live frame',
+                      icon: canGuestControl
                           ? Icons.touch_app_outlined
                           : Icons.hourglass_top_rounded,
-                      tone: model.guestFrameFresh
+                      tone: canGuestControl
                           ? MirpgStatusTone.good
                           : MirpgStatusTone.warning,
                     ),
@@ -625,9 +646,9 @@ class _EmulatorPageState extends State<EmulatorPage>
               ),
               if (_textComposerVisible)
                 Positioned(
-                  left: 64,
-                  right: 64,
-                  bottom: 12,
+                  left: model.height > model.width ? 16 : 64,
+                  right: model.height > model.width ? 16 : 64,
+                  bottom: model.height > model.width ? 76 : 12,
                   child: MirpgSurface(
                     child: Row(
                       children: [
@@ -671,6 +692,80 @@ class _EmulatorPageState extends State<EmulatorPage>
       ),
     );
   }
+
+  Future<void> _switchView() async {
+    _cancelGuestInput();
+    _discardTextComposer(restoreKeyboardFocus: false);
+    if (widget.onSwitch != null) {
+      await widget.onSwitch!();
+    } else {
+      await _back();
+    }
+  }
+
+  Widget _guestCanvas() => LayoutBuilder(
+        builder: (context, constraints) => Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) => _touch(0, event, constraints),
+          onPointerMove: (event) {
+            if (_pointers.containsKey(event.pointer)) {
+              _touch(2, event, constraints);
+            }
+          },
+          onPointerUp: (event) => _touch(1, event, constraints),
+          onPointerCancel: (event) => _touch(3, event, constraints),
+          child: AnimatedBuilder(
+            animation: widget.ffi.imageModel,
+            builder: (_, __) => RawImage(
+              image: widget.dashboardMode
+                  ? widget.ffi.imageModel.dashboardImage(model.videoChannel)
+                  : widget.ffi.imageModel.image,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.low,
+            ),
+          ),
+        ),
+      );
+
+  Widget _portraitControls() => SizedBox(
+        height: 56,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            _overlayButton(
+              tooltip: widget.onSwitch == null
+                  ? 'Return to Windows desktop'
+                  : 'Switch view',
+              icon: widget.onSwitch == null
+                  ? Icons.desktop_windows_outlined
+                  : Icons.view_agenda_outlined,
+              onPressed: () => unawaited(_switchView()),
+            ),
+            if (widget.onReturn != null)
+              _overlayButton(
+                tooltip: 'Dashboard',
+                icon: Icons.grid_view_outlined,
+                onPressed: () => unawaited(_back()),
+              ),
+            const Spacer(),
+            _overlayButton(
+              tooltip: model.guestTextSupported
+                  ? 'Type text'
+                  : 'Text input unavailable on this host',
+              icon: Icons.keyboard_outlined,
+              onPressed: canGuestControl &&
+                      model.streaming &&
+                      model.guestTextSupported &&
+                      !_returning
+                  ? _openTextComposer
+                  : null,
+            ),
+            _overlayNavigation(Icons.arrow_back, 'Back', 'back'),
+            _overlayNavigation(Icons.home_outlined, 'Home', 'home'),
+            _overlayNavigation(Icons.crop_square, 'Recents', 'recents'),
+          ],
+        ),
+      );
 
   void _touch(int action, PointerEvent event, BoxConstraints box) {
     if (!canGuestControl ||

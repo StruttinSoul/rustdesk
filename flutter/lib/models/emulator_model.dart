@@ -9,6 +9,28 @@ import 'remote_operation_state.dart';
 
 typedef EmulatorCommandSender = Future<void> Function(String key, String value);
 
+({double left, double top, double width, double height})? containedGuestFrame({
+  required double viewportWidth,
+  required double viewportHeight,
+  required int guestWidth,
+  required int guestHeight,
+}) {
+  if (viewportWidth <= 0 ||
+      viewportHeight <= 0 ||
+      guestWidth <= 0 ||
+      guestHeight <= 0) return null;
+  final scale =
+      math.min(viewportWidth / guestWidth, viewportHeight / guestHeight);
+  final width = guestWidth * scale;
+  final height = guestHeight * scale;
+  return (
+    left: (viewportWidth - width) / 2,
+    top: (viewportHeight - height) / 2,
+    width: width,
+    height: height,
+  );
+}
+
 ({int x, int y})? mapEmulatorTouch({
   required double localX,
   required double localY,
@@ -18,18 +40,18 @@ typedef EmulatorCommandSender = Future<void> Function(String key, String value);
   required int guestHeight,
   bool clampToFrame = false,
 }) {
-  if (viewportWidth <= 0 ||
-      viewportHeight <= 0 ||
-      guestWidth <= 0 ||
-      guestHeight <= 0) return null;
-  final scale =
-      math.min(viewportWidth / guestWidth, viewportHeight / guestHeight);
-  final renderedWidth = guestWidth * scale;
-  final renderedHeight = guestHeight * scale;
-  final left = (viewportWidth - renderedWidth) / 2;
-  final top = (viewportHeight - renderedHeight) / 2;
-  final right = left + renderedWidth;
-  final bottom = top + renderedHeight;
+  final frame = containedGuestFrame(
+    viewportWidth: viewportWidth,
+    viewportHeight: viewportHeight,
+    guestWidth: guestWidth,
+    guestHeight: guestHeight,
+  );
+  if (frame == null) return null;
+  final scale = frame.width / guestWidth;
+  final left = frame.left;
+  final top = frame.top;
+  final right = left + frame.width;
+  final bottom = top + frame.height;
   if (!clampToFrame &&
       (localX < left || localX >= right || localY < top || localY >= bottom)) {
     return null;
