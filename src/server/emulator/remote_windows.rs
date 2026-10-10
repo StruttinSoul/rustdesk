@@ -216,6 +216,63 @@ struct GuestGeometry {
     ready: bool,
 }
 
+// A full connection channel must not stop reading the scrcpy socket: doing
+// so buffers old frames in TCP and eventually makes the remote view jump ahead.
+// After any dropped H.264 reference, wait for a new random-access frame.
+#[derive(Default)]
+struct GuestFrameBackpressure {
+    waiting_key: bool,
+    last_refresh: Option<Instant>,
+}
+
+impl GuestFrameBackpressure {
+    fn deliver(
+        &mut self,
+        frame: EmulatorVideoFrame,
+        events: &hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+        input: &SyncSender<GuestInputCommand>,
+    ) -> ResultType<()> {
+        if self.waiting_key && !frame.key {
+            self.request_refresh(input);
+            return Ok(());
+        }
+        let key = frame.key;
+        match events.try_send(GuestEvent::Frame(frame)) {
+            Ok(()) => {
+                if key {
+                    self.waiting_key = false;
+                    self.last_refresh = None;
+                }
+            }
+            Err(hbb_common::tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.waiting_key = true;
+                hbb_common::throttled_log!(
+                    Duration::from_secs(5),
+                    warn,
+                    "Guest video transport queue saturated; discard dependent frames and request a new keyframe"
+                );
+                self.request_refresh(input);
+            }
+            Err(hbb_common::tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                bail!("Guest event transport disconnected")
+            }
+        }
+        Ok(())
+    }
+
+    fn request_refresh(&mut self, input: &SyncSender<GuestInputCommand>) {
+        if self
+            .last_refresh
+            .is_some_and(|sent| sent.elapsed() < Duration::from_secs(1))
+        {
+            return;
+        }
+        if input.try_send(GuestInputCommand::ResetVideo).is_ok() {
+            self.last_refresh = Some(Instant::now());
+        }
+    }
+}
+
 impl GuestGeometry {
     fn ready(width: u16, height: u16) -> Self {
         Self {
@@ -278,6 +335,7 @@ impl GuestSession {
         let cancel = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(Vec::new()));
         let (input, receiver) = mpsc::sync_channel(32);
+        let capture_input = input.clone();
         let session = Self {
             id,
             target_id: target_id.clone(),
@@ -290,7 +348,15 @@ impl GuestSession {
             .name("emulator-guest".to_owned())
             .spawn(move || {
                 let result = run_session(
-                    &request, id, &target_id, &events, &cancel, &sockets, receiver, preview,
+                    &request,
+                    id,
+                    &target_id,
+                    &events,
+                    &cancel,
+                    &sockets,
+                    receiver,
+                    &capture_input,
+                    preview,
                 );
                 if let Err(error) = result {
                     if !cancel.load(Ordering::Acquire) {
@@ -367,6 +433,7 @@ fn run_session(
     cancel: &Arc<AtomicBool>,
     sockets: &Arc<Mutex<Vec<TcpStream>>>,
     input: mpsc::Receiver<GuestInputCommand>,
+    capture_input: &SyncSender<GuestInputCommand>,
     preview: bool,
 ) -> ResultType<()> {
     let Some(emulator_request::Union::Select(selection)) = request.union.as_ref() else {
@@ -526,6 +593,7 @@ fn run_session(
             }
         })?;
     let mut frames = H264Frames::default();
+    let mut backpressure = GuestFrameBackpressure::default();
     let result = (|| -> ResultType<()> {
         loop {
             if cancel.load(Ordering::Acquire) {
@@ -573,13 +641,17 @@ fn run_session(
                         preview,
                     )))?;
                 }
-                events.blocking_send(GuestEvent::Frame(EmulatorVideoFrame {
-                    session_id: id,
-                    data: frame.data.into(),
-                    key: frame.key,
-                    pts: frame.pts_ms,
-                    ..Default::default()
-                }))?;
+                backpressure.deliver(
+                    EmulatorVideoFrame {
+                        session_id: id,
+                        data: frame.data.into(),
+                        key: frame.key,
+                        pts: frame.pts_ms,
+                        ..Default::default()
+                    },
+                    events,
+                    capture_input,
+                )?;
             }
         }
     })();
@@ -828,6 +900,47 @@ mod tests {
             _ => panic!("Expected emulator status"),
         };
         assert_eq!(status.phase, "waiting_screen");
+    }
+
+    #[test]
+    fn full_guest_event_channel_drops_references_and_recovers_at_next_keyframe() {
+        let (events, mut receiver) = hbb_common::tokio::sync::mpsc::channel(1);
+        let (input, requests) = mpsc::sync_channel(2);
+        let mut sender = GuestFrameBackpressure::default();
+        let frame = |pts, key| EmulatorVideoFrame {
+            session_id: 9,
+            pts,
+            key,
+            ..Default::default()
+        };
+
+        // Simulate a stalled connection: capture must not wait for the receiver.
+        events.try_send(GuestEvent::Frame(frame(0, true))).unwrap();
+        sender.deliver(frame(33, false), &events, &input).unwrap();
+        assert!(sender.waiting_key);
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(GuestInputCommand::ResetVideo)
+        ));
+        sender.deliver(frame(66, false), &events, &input).unwrap();
+        assert!(requests.try_recv().is_err(), "Do not flood reset requests");
+
+        // An available slot is not enough: dependent H.264 frames remain invalid
+        // after the first drop, even if the network briefly catches up.
+        assert!(matches!(receiver.try_recv(), Ok(GuestEvent::Frame(_))));
+        sender.deliver(frame(99, false), &events, &input).unwrap();
+        assert!(receiver.try_recv().is_err());
+        sender.deliver(frame(132, true), &events, &input).unwrap();
+        assert!(!sender.waiting_key);
+        match receiver.try_recv() {
+            Ok(GuestEvent::Frame(recovered)) => {
+                assert!(recovered.key);
+                assert_eq!(recovered.pts, 132);
+            }
+            _ => panic!("Expected fresh keyframe after recovery"),
+        }
+        sender.deliver(frame(165, false), &events, &input).unwrap();
+        assert!(matches!(receiver.try_recv(), Ok(GuestEvent::Frame(frame)) if frame.pts == 165));
     }
 
     #[hbb_common::tokio::test]
