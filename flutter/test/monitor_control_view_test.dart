@@ -75,7 +75,7 @@ void main() {
     for (final tooltip in const [
       'Fit view',
       'Readable view',
-      'Pan mode',
+      'Input mode: Mouse',
       'Precision mode',
       'Keyboard',
       'Switch view',
@@ -109,6 +109,7 @@ void main() {
 
   test('monitor preferences round trip safely', () {
     const preferences = MonitorControlPreferences(
+      inputMode: MonitorInputMode.touch,
       preferredView: MonitorViewPreference.readable,
       precision: true,
       precisionGain: 0.2,
@@ -123,6 +124,12 @@ void main() {
 
     expect(
         MonitorControlPreferences.fromJson(preferences.toJson()), preferences);
+    expect(
+        MonitorControlPreferences.fromJson({'inputMode': 'unsupported'})
+            .inputMode,
+        MonitorInputMode.mouse);
+    expect(MonitorControlPreferences.fromJson({}).inputMode,
+        MonitorInputMode.mouse);
     expect(
         monitorUsesLandscape(
             MonitorOrientationPreference.auto, const Size(2560, 1440)),
@@ -524,6 +531,105 @@ void main() {
     await tester.tap(surface);
     await tester.pump(const Duration(milliseconds: 350));
     expect(events, [0, 1]);
+  });
+
+  testWidgets('Touch and Mouse toggle is accessible and remembers the mode',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(360, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final changes = <MonitorControlPreferences>[];
+    await show(tester, onPreferencesChanged: changes.add);
+    expect(find.byTooltip('Input mode: Mouse'), findsOneWidget);
+    await tester.tap(find.byTooltip('Input mode: Mouse'));
+    await tester.pump();
+    expect(changes.last.inputMode, MonitorInputMode.touch);
+    expect(find.byTooltip('Input mode: Touch'), findsOneWidget);
+    expect(find.byTooltip('Pan mode'), findsOneWidget);
+    expect(find.byTooltip('Precision mode'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Touch Pan moves the local view without dragging Windows',
+      (tester) async {
+    final events = <int>[];
+    await show(tester,
+        preferences:
+            const MonitorControlPreferences(inputMode: MonitorInputMode.touch),
+        pointer: (action, _) => events.add(action));
+    await tester.tap(find.byTooltip('Readable view'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Pan mode'));
+    await tester.pump();
+    final frameBefore =
+        tester.getRect(find.byKey(const ValueKey('monitor-frame')));
+    final trackpad = find.byKey(const ValueKey('monitor-trackpad'));
+    await tester.drag(trackpad, const Offset(50, 40));
+    await tester.pump();
+    final frameAfter =
+        tester.getRect(find.byKey(const ValueKey('monitor-frame')));
+    expect(frameAfter.topLeft, isNot(frameBefore.topLeft));
+    expect(events, isEmpty);
+  });
+
+  testWidgets('Touch taps the exact displayed desktop position',
+      (tester) async {
+    final events = <(int, Offset)>[];
+    await show(tester,
+        preferences:
+            const MonitorControlPreferences(inputMode: MonitorInputMode.touch),
+        pointer: (action, point) => events.add((action, point)));
+    final frame = tester.getRect(find.byKey(const ValueKey('monitor-frame')));
+    final tapPosition =
+        frame.topLeft + Offset(frame.width * .3, frame.height * .6);
+    await tester.tapAt(tapPosition);
+    await tester.pump();
+    expect(events.map((event) => event.$1).toList(), [2, 0, 1]);
+    expect(events.last.$2.dx, closeTo(3840 * .3, 2));
+    expect(events.last.$2.dy, closeTo(2160 * .6, 2));
+
+    events.clear();
+    await tester.tapAt(Offset(frame.center.dx, frame.top - 25));
+    await tester.pump();
+    expect(events, isEmpty, reason: 'Letterbox bars must not click Windows');
+  });
+
+  testWidgets('Touch swipe drags windows with balanced mouse button events',
+      (tester) async {
+    final events = <(int, Offset)>[];
+    await show(tester,
+        preferences:
+            const MonitorControlPreferences(inputMode: MonitorInputMode.touch),
+        pointer: (action, point) => events.add((action, point)));
+    final frame = tester.getRect(find.byKey(const ValueKey('monitor-frame')));
+    final start = frame.topLeft + Offset(frame.width * .3, frame.height * .5);
+    final finger = await tester.startGesture(start, pointer: 87);
+    await finger.moveBy(const Offset(14, 0));
+    await finger.moveBy(const Offset(26, 0));
+    await tester.pump();
+    await finger.up();
+    await tester.pump();
+    expect(events.map((event) => event.$1).toList(),
+        containsAllInOrder([0, 2, 1]));
+    expect(events.where((event) => event.$1 == 0).length, 1);
+    expect(events.where((event) => event.$1 == 1).length, 1);
+    expect(events.last.$2.dx, greaterThan(events.first.$2.dx));
+  });
+
+  testWidgets('Touch long press right-clicks at the finger location',
+      (tester) async {
+    final events = <(int, Offset)>[];
+    await show(tester,
+        preferences:
+            const MonitorControlPreferences(inputMode: MonitorInputMode.touch),
+        pointer: (action, point) => events.add((action, point)));
+    final frame = tester.getRect(find.byKey(const ValueKey('monitor-frame')));
+    final location =
+        frame.topLeft + Offset(frame.width * .7, frame.height * .55);
+    await tester.longPressAt(location);
+    await tester.pump();
+    expect(events.map((event) => event.$1).toList(), [2, 3]);
+    expect(events.last.$2.dx, closeTo(3840 * .7, 2));
+    expect(events.last.$2.dy, closeTo(2160 * .55, 2));
   });
 
   testWidgets('TeamViewer mouse mode hold is right click', (tester) async {

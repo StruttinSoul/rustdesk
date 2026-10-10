@@ -12,6 +12,9 @@ enum MonitorOrientationPreference { auto, portrait, landscape }
 
 enum MonitorToolbarDock { left, right }
 
+/// Mouse moves a relative cursor; Touch sends events at the finger's position.
+enum MonitorInputMode { mouse, touch }
+
 const List<String> _monitorShortcutModifierOrder = <String>[
   'ctrl',
   'alt',
@@ -191,6 +194,7 @@ bool _shortcutListsEqual(
 class MonitorControlPreferences {
   const MonitorControlPreferences({
     this.preferredView = MonitorViewPreference.fit,
+    this.inputMode = MonitorInputMode.mouse,
     this.precision = false,
     this.precisionGain = 0.35,
     this.toolbarDock = MonitorToolbarDock.right,
@@ -204,6 +208,7 @@ class MonitorControlPreferences {
   });
 
   final MonitorViewPreference preferredView;
+  final MonitorInputMode inputMode;
   final bool precision;
   final double precisionGain;
   final MonitorToolbarDock toolbarDock;
@@ -217,6 +222,7 @@ class MonitorControlPreferences {
 
   MonitorControlPreferences copyWith({
     MonitorViewPreference? preferredView,
+    MonitorInputMode? inputMode,
     bool? precision,
     double? precisionGain,
     MonitorToolbarDock? toolbarDock,
@@ -230,6 +236,7 @@ class MonitorControlPreferences {
   }) =>
       MonitorControlPreferences(
         preferredView: preferredView ?? this.preferredView,
+        inputMode: inputMode ?? this.inputMode,
         precision: precision ?? this.precision,
         precisionGain: precisionGain ?? this.precisionGain,
         toolbarDock: toolbarDock ?? this.toolbarDock,
@@ -244,6 +251,7 @@ class MonitorControlPreferences {
 
   Map<String, dynamic> toJson() => {
         'view': preferredView.name,
+        'inputMode': inputMode.name,
         'precision': precision,
         'precisionGain': precisionGain,
         'dock': toolbarDock.name,
@@ -288,6 +296,8 @@ class MonitorControlPreferences {
     return MonitorControlPreferences(
       preferredView: enumValue(MonitorViewPreference.values, json['view'],
           MonitorViewPreference.fit),
+      inputMode: enumValue(
+          MonitorInputMode.values, json['inputMode'], MonitorInputMode.mouse),
       precision: json['precision'] == true,
       precisionGain: precisionGain(json['precisionGain']),
       toolbarDock: enumValue(
@@ -310,6 +320,7 @@ class MonitorControlPreferences {
   bool operator ==(Object other) =>
       other is MonitorControlPreferences &&
       preferredView == other.preferredView &&
+      inputMode == other.inputMode &&
       precision == other.precision &&
       precisionGain == other.precisionGain &&
       toolbarDock == other.toolbarDock &&
@@ -324,6 +335,7 @@ class MonitorControlPreferences {
   @override
   int get hashCode => Object.hash(
       preferredView,
+      inputMode,
       precision,
       precisionGain,
       toolbarDock,
@@ -844,11 +856,15 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   double? _zoom;
   late _MonitorViewPreset _viewPreset;
   late MonitorViewPreference _preferredView;
+  late MonitorInputMode _inputMode;
   bool _panMode = false;
   late bool _precision;
   late double _precisionGain;
   bool _dragLocked = false;
   bool _gestureDragHeld = false;
+  bool _directDragHeld = false;
+  bool _directLongPressed = false;
+  Offset? _directDownPosition;
   bool _doubleTapArmed = false;
   bool _doubleTapCandidate = false;
   Timer? _doubleTapHoldTimer;
@@ -882,6 +898,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   _MonitorPanel _panel = _MonitorPanel.none;
   double get _scale => _fit * (_zoom ?? 1);
   bool get _canSendInput => widget.canControl && !widget.localViewOnly;
+  bool get _directTouch => _inputMode == MonitorInputMode.touch;
 
   @override
   void initState() {
@@ -902,10 +919,13 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         widget.focusRect != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _revealFocusRect());
     }
-    if ((_dragLocked || _gestureDragHeld) && !_canSendInput) {
+    if ((_dragLocked || _gestureDragHeld || _directDragHeld) &&
+        !_canSendInput) {
       final shouldRelease = oldWidget.canControl && !oldWidget.localViewOnly;
       _dragLocked = false;
       _gestureDragHeld = false;
+      _directDragHeld = false;
+      _directDownPosition = null;
       _doubleTapHoldTimer?.cancel();
       _doubleTapHoldTimer = null;
       if (shouldRelease) {
@@ -928,7 +948,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   void dispose() {
     _doubleTapHoldTimer?.cancel();
     _doubleTapWindowTimer?.cancel();
-    if ((_dragLocked || _gestureDragHeld) && _canSendInput) {
+    if ((_dragLocked || _gestureDragHeld || _directDragHeld) && _canSendInput) {
       widget.onPointer(1, _cursor);
     }
     super.dispose();
@@ -937,6 +957,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   void _loadPreferences(MonitorControlPreferences preferences,
       {bool keepCustomZoom = false}) {
     _preferredView = preferences.preferredView;
+    _inputMode = preferences.inputMode;
     if (!keepCustomZoom || _viewPreset != _MonitorViewPreset.custom) {
       _viewPreset = preferences.preferredView == MonitorViewPreference.readable
           ? _MonitorViewPreset.readable
@@ -958,6 +979,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   void _emitPreferences() {
     widget.onPreferencesChanged?.call(MonitorControlPreferences(
       preferredView: _preferredView,
+      inputMode: _inputMode,
       precision: _precision,
       precisionGain: _precisionGain,
       toolbarDock: _toolbarDock,
@@ -1037,8 +1059,22 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _emitPreferences();
   }
 
+  void _toggleInputMode() {
+    _cancelContactsForLayoutChange();
+    setState(() {
+      _inputMode =
+          _directTouch ? MonitorInputMode.mouse : MonitorInputMode.touch;
+      _panMode = false;
+      _panel = _MonitorPanel.none;
+    });
+    _emitPreferences();
+  }
+
   void _cancelContactsForLayoutChange() {
-    final releaseLeft = _dragLocked || _gestureDragHeld || _floatingLeftPressed;
+    final releaseLeft = _dragLocked ||
+        _gestureDragHeld ||
+        _directDragHeld ||
+        _floatingLeftPressed;
     final releaseRight = _floatingRightPressed;
     _doubleTapHoldTimer?.cancel();
     _doubleTapWindowTimer?.cancel();
@@ -1049,6 +1085,9 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _doubleTapPendingTravel = 0;
     _dragLocked = false;
     _gestureDragHeld = false;
+    _directDragHeld = false;
+    _directLongPressed = false;
+    _directDownPosition = null;
     _floatingLeftPressed = false;
     _floatingRightPressed = false;
     _rawPointers.clear();
@@ -1127,6 +1166,51 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     widget.onPointer(2, _cursor);
   }
 
+  /// Ignore taps in the black bars. Once a drag starts, clamp movements to
+  /// the remote desktop so button-up is always delivered at a valid position.
+  Offset? _directDesktopPoint(Offset local, {bool clamp = false}) {
+    final frame = Rect.fromLTWH(_offset.dx, _offset.dy,
+        widget.desktopSize.width * _scale, widget.desktopSize.height * _scale);
+    if (frame.isEmpty || (!clamp && !frame.contains(local))) return null;
+    final point = (local - frame.topLeft) / _scale;
+    return Offset(
+      point.dx.clamp(0, widget.desktopSize.width - 1).toDouble(),
+      point.dy.clamp(0, widget.desktopSize.height - 1).toDouble(),
+    );
+  }
+
+  void _moveToDirectLocal(Offset local, {bool clamp = false}) {
+    if (!_canSendInput) return;
+    final point = _directDesktopPoint(local, clamp: clamp);
+    if (point == null) return;
+    _cursor = point;
+    widget.onPointer(2, _cursor);
+  }
+
+  void _directDrag(Offset local) {
+    if (!_canSendInput ||
+        _directLongPressed ||
+        _rawMaxFingers > 1 ||
+        _directDownPosition == null) {
+      return;
+    }
+    if (!_directDragHeld && (local - _directDownPosition!).distance < 8) {
+      return;
+    }
+    if (!_directDragHeld) {
+      _moveToDirectLocal(_directDownPosition!);
+      _directDragHeld = true;
+      widget.onPointer(0, _cursor);
+    }
+    _moveToDirectLocal(local, clamp: true);
+  }
+
+  void _releaseDirectDrag() {
+    if (!_directDragHeld) return;
+    _directDragHeld = false;
+    if (_canSendInput) widget.onPointer(1, _cursor);
+  }
+
   void _click([int count = 1]) {
     if (!_canSendInput) return;
     for (var i = 0; i < count; i++) {
@@ -1145,6 +1229,13 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _doubleTapHoldTimer?.cancel();
     _doubleTapHoldTimer = null;
     _doubleTapCandidate = false;
+    if (_directTouch) {
+      if (_tapLocalPosition == null ||
+          _directDesktopPoint(_tapLocalPosition!) == null) return;
+      _moveToDirectLocal(_tapLocalPosition!);
+      _click();
+      return;
+    }
     if (_cursorOffset && _tapLocalPosition != null) {
       _moveToLocal(_tapLocalPosition!);
     }
@@ -1256,7 +1347,9 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         _offset += delta;
         _limitOffset();
       } else if (_canSendInput) {
-        if (_cursorOffset) {
+        if (_directTouch) {
+          _directDrag(details.localFocalPoint);
+        } else if (_cursorOffset) {
           _moveToLocal(details.localFocalPoint);
         } else {
           _move(delta);
@@ -1280,6 +1373,12 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     final firstPointer = _rawPointers.isEmpty;
     if (firstPointer) {
       _rawMaxFingers = 0;
+      _directLongPressed = false;
+      _directDownPosition = _directTouch && _canSendInput
+          ? (_directDesktopPoint(event.localPosition) != null
+              ? event.localPosition
+              : null)
+          : null;
     }
     _rawPointers.add(event.pointer);
     _rawMaxFingers = math.max(_rawMaxFingers, _rawPointers.length);
@@ -1288,18 +1387,25 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         _doubleTapLocalPosition != null &&
         (event.localPosition - _doubleTapLocalPosition!).distance <= 48 &&
         _canSendInput &&
-        !_panMode) {
+        !_panMode &&
+        !_directTouch) {
       _beginDoubleTapHold(event.localPosition);
     }
     if (_rawPointers.length > 1) {
       _cancelDoubleTapCandidate();
       if (_gestureDragHeld) _releaseGestureDrag();
+      _releaseDirectDrag();
+      _directDownPosition = null;
     }
   }
 
   void _rawPointerUp(PointerEvent event) {
     _rawPointers.remove(event.pointer);
     if (_rawPointers.isNotEmpty) return;
+    final releasedDirectDrag = _directDragHeld;
+    _releaseDirectDrag();
+    _directDownPosition = null;
+    _directLongPressed = false;
     _doubleTapHoldTimer?.cancel();
     _doubleTapHoldTimer = null;
     final releasedGestureDrag = _gestureDragHeld;
@@ -1307,7 +1413,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       _releaseGestureDrag();
     }
     if (event is PointerCancelEvent) _doubleTapCandidate = false;
-    _suppressTap = releasedGestureDrag || _rawMaxFingers >= 2;
+    _suppressTap =
+        releasedGestureDrag || releasedDirectDrag || _rawMaxFingers >= 2;
     _rawMaxFingers = 0;
   }
 
@@ -1336,7 +1443,12 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                       leading: Icon(Icons.mouse_outlined),
                       title: Text('Windows Pointer'),
                       subtitle: Text(
-                          'Phone gestures control the Windows mouse. Local zoom and Pan never change Windows resolution.')),
+                          'Mouse mode works like a trackpad. Local zoom and Pan never change Windows resolution.')),
+                  const ListTile(
+                      leading: Icon(Icons.touch_app_outlined),
+                      title: Text('Touch mode'),
+                      subtitle: Text(
+                          'Tap exactly where you point, drag with one finger to move windows, hold to right-click. Use Pan to move your zoomed view.')),
                   ListTile(
                       leading: const Icon(Icons.touch_app_outlined),
                       title: const Text('One finger'),
@@ -1347,7 +1459,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                       leading: Icon(Icons.drag_indicator),
                       title: Text('Double tap and hold'),
                       subtitle: Text(
-                          'Hold the second tap to drag. Lift your finger to release the left mouse button.')),
+                          'In Mouse mode, hold the second tap to drag. Lift your finger to release the left mouse button.')),
                   const ListTile(
                       leading: Icon(Icons.zoom_out_map),
                       title: Text('Two fingers'),
@@ -1399,6 +1511,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
 
   void _resetControls() {
     const defaults = MonitorControlPreferences();
+    _cancelContactsForLayoutChange();
     setState(() {
       _loadPreferences(defaults);
       _limitOffset();
@@ -1424,17 +1537,20 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                 _button('Pan', Icons.pan_tool_alt_outlined,
                     () => setState(() => _panMode = !_panMode),
                     selected: _panMode),
-                _button(
-                    'Precision',
-                    Icons.gps_fixed,
-                    _canSendInput
-                        ? () {
-                            setState(() => _precision = !_precision);
-                            _emitPreferences();
-                          }
-                        : null,
-                    selected: _precision),
-                _button('Precision speed', Icons.tune, _showPrecisionSettings),
+                if (!_directTouch) ...[
+                  _button(
+                      'Precision',
+                      Icons.gps_fixed,
+                      _canSendInput
+                          ? () {
+                              setState(() => _precision = !_precision);
+                              _emitPreferences();
+                            }
+                          : null,
+                      selected: _precision),
+                  _button(
+                      'Precision speed', Icons.tune, _showPrecisionSettings),
+                ],
                 _button('Drag lock', Icons.drag_indicator,
                     _canSendInput ? () => _setDragLocked(!_dragLocked) : null,
                     selected: _dragLocked),
@@ -1476,10 +1592,11 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   setState(() => _thumbwheelVisible = !_thumbwheelVisible);
                   _emitPreferences();
                 }, selected: _thumbwheelVisible),
-                _button('Cursor offset', Icons.touch_app_outlined, () {
-                  setState(() => _cursorOffset = !_cursorOffset);
-                  _emitPreferences();
-                }, selected: _cursorOffset),
+                if (!_directTouch)
+                  _button('Cursor offset', Icons.touch_app_outlined, () {
+                    setState(() => _cursorOffset = !_cursorOffset);
+                    _emitPreferences();
+                  }, selected: _cursorOffset),
                 _button('Ctrl+Alt+Del', Icons.security,
                     _canSendInput ? widget.onCtrlAltDel : null),
                 _button('Gestures', Icons.help_outline, _showGestureHelp),
@@ -1646,7 +1763,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                                 fontWeight: FontWeight.w600)),
                         const SizedBox(height: 2),
                         Text(
-                          '${widget.desktopSize.width.round()} × ${widget.desktopSize.height.round()} · Pointer',
+                          '${widget.desktopSize.width.round()} × ${widget.desktopSize.height.round()} · ${_directTouch ? 'Touch' : 'Mouse'}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -1759,17 +1876,26 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   'Readable view', Icons.text_fields_rounded, 'Readable', () {
                 setState(() => _applyPreset(_MonitorViewPreset.readable));
               }, selected: _viewPreset == _MonitorViewPreset.readable),
-              _footerControl('Pan mode', Icons.pan_tool_alt_outlined, 'Pan',
-                  () {
-                setState(() => _panMode = !_panMode);
-              }, selected: _panMode),
-              _footerControl('Precision mode', Icons.gps_fixed, 'Precision',
-                  () {
-                final next = !_precision;
-                if (!next) _releaseVisibleHeldControls();
-                setState(() => _precision = next);
-                _emitPreferences();
-              }, selected: _precision),
+              _footerControl(
+                  'Input mode: ${_directTouch ? 'Touch' : 'Mouse'}',
+                  _directTouch
+                      ? Icons.touch_app_outlined
+                      : Icons.mouse_outlined,
+                  _directTouch ? 'Touch' : 'Mouse',
+                  _toggleInputMode,
+                  selected: _directTouch),
+              if (_directTouch)
+                _footerControl('Pan mode', Icons.pan_tool_alt_outlined, 'Pan',
+                    () => setState(() => _panMode = !_panMode),
+                    selected: _panMode)
+              else
+                _footerControl('Precision mode', Icons.gps_fixed, 'Precision',
+                    () {
+                  final next = !_precision;
+                  if (!next) _releaseVisibleHeldControls();
+                  setState(() => _precision = next);
+                  _emitPreferences();
+                }, selected: _precision),
               _footerControl('Keyboard', Icons.keyboard_outlined, 'Keyboard',
                   _canSendInput ? widget.onKeyboard : null),
               _footerControl('Switch view', Icons.view_carousel_outlined,
@@ -2188,8 +2314,9 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       if (_dragLocked) 'Drag locked',
       if (_gestureDragHeld) 'Dragging',
       if (_panMode) 'Pan',
-      if (_precision) 'Precision ${(_precisionGain * 100).round()}%',
-      if (_cursorOffset) 'Cursor offset',
+      if (_precision && !_directTouch)
+        'Precision ${(_precisionGain * 100).round()}%',
+      if (_cursorOffset && !_directTouch) 'Cursor offset',
     ];
     return Material(
       color: const Color(0xF2191F22),
@@ -2240,8 +2367,9 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                     onPointerUp: _rawPointerUp,
                     onPointerCancel: _rawPointerUp,
                     child: Semantics(
-                        label:
-                            'Windows mouse interaction. Swipe with one finger to move the pointer, tap to click, hold to right-click, pinch to zoom, and drag with two fingers to scroll.',
+                        label: _directTouch
+                            ? 'Windows direct touch interaction. Tap where you want to click, swipe to drag, hold to right-click, pinch to zoom, and drag with two fingers to scroll.'
+                            : 'Windows mouse interaction. Swipe with one finger to move the pointer, tap to click, hold to right-click, pinch to zoom, and drag with two fingers to scroll.',
                         child: GestureDetector(
                             key: const ValueKey('monitor-trackpad'),
                             behavior: HitTestBehavior.opaque,
@@ -2257,7 +2385,17 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                                         _gestureDragHeld) {
                                       return;
                                     }
-                                    if (_cursorOffset) {
+                                    if (_directTouch) {
+                                      if (_directDesktopPoint(
+                                              details.localPosition) ==
+                                          null) {
+                                        return;
+                                      }
+                                      _directLongPressed = true;
+                                      _releaseDirectDrag();
+                                      setState(() => _moveToDirectLocal(
+                                          details.localPosition));
+                                    } else if (_cursorOffset) {
                                       setState(() =>
                                           _moveToLocal(details.localPosition));
                                     }
@@ -2311,8 +2449,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
             if (_dragLocked ||
                 _gestureDragHeld ||
                 _panMode ||
-                _precision ||
-                _cursorOffset)
+                (_precision && !_directTouch) ||
+                (_cursorOffset && !_directTouch))
               Positioned(top: 12, left: 12, child: _modeBadge()),
             if (widget.frameStatus != null)
               Positioned(
@@ -2332,7 +2470,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                                       style: const TextStyle(
                                           color: Colors.white,
                                           fontWeight: FontWeight.w600))))))),
-            if (_mouseButtonsVisible && !_precision)
+            if (_mouseButtonsVisible && (!_precision || _directTouch))
               Positioned(
                   left: floatingMouse.dx,
                   top: floatingMouse.dy,
@@ -2373,7 +2511,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                           }))),
           ]);
         })),
-        if (_toolbarVisible && _precision) _precisionToolbar(),
+        if (_toolbarVisible && _precision && !_directTouch) _precisionToolbar(),
         if (_toolbarVisible) _sessionToolbar(),
       ]);
 }
