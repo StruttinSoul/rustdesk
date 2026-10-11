@@ -2026,4 +2026,99 @@ void main() {
     expect(sent.length, count);
     model.dispose();
   });
+
+  test(
+      'closed guest stays distinct from a running emulator and reselects safely',
+      () async {
+    final sent = <Map<String, dynamic>>[];
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, value) async => sent.add(jsonDecode(value)));
+    await model.refresh();
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'inventory',
+      'request_id': sent.last['request_id'],
+      'instances': [
+        {
+          'target_id': 'bluestacks:Tiramisu64',
+          'name': 'BlueStacks App Player 3',
+          'provider': 'bluestacks',
+          'state': 'ready',
+        }
+      ],
+    });
+    expect(model.instances.single.readyForReconnect, isTrue);
+    expect(model.instances.single.runtimeLabel, 'Running');
+
+    await model.connect('bluestacks:Tiramisu64');
+    final firstRequest = sent.last['request_id'];
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': firstRequest,
+      'target_id': 'bluestacks:Tiramisu64',
+      'session_id': 42,
+      'state': 'starting',
+    });
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': firstRequest,
+      'session_id': 42,
+      'state': 'streaming',
+      'width': 720,
+      'height': 1280,
+    });
+    markCurrentGuestFrameDecoded(model);
+    expect(model.guestFrameFresh, isTrue);
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': firstRequest,
+      'session_id': 42,
+      'state': 'failed',
+      'error': 'Guest session is closed',
+    });
+    expect(model.instances.single.runtimeLabel, 'Running');
+    expect(model.streaming, isFalse);
+    expect(model.guestFrameFresh, isFalse);
+    expect(model.guestFailures['bluestacks:Tiramisu64'],
+        'Guest session is closed');
+
+    await model.connect('bluestacks:Tiramisu64', startIfStopped: false);
+    final retryRequest = sent.last['request_id'];
+    expect(sent.last['start_if_stopped'], isFalse);
+    expect(sent.last['launch_default_app'], isFalse);
+    expect(model.guestFailures, isEmpty);
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': firstRequest,
+      'session_id': 42,
+      'state': 'failed',
+      'error': 'stale failure',
+    });
+    expect(model.error, isEmpty);
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': retryRequest,
+      'session_id': 43,
+      'target_id': 'bluestacks:Tiramisu64',
+      'state': 'starting',
+    });
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'status',
+      'request_id': retryRequest,
+      'session_id': 43,
+      'state': 'streaming',
+      'width': 720,
+      'height': 1280,
+    });
+    expect(model.streaming, isTrue);
+    expect(model.guestSessionId, 43);
+    expect(model.error, isEmpty);
+    model.dispose();
+  });
 }

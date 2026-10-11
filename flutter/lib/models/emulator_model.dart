@@ -81,6 +81,17 @@ class RemoteEmulator {
   final String androidVersion;
   final String defaultPackage;
   final String error;
+
+  /// A ready guest can be reselected without requesting that BlueStacks boot.
+  bool get readyForReconnect => state == 'ready' || state == 'running';
+
+  String get runtimeLabel => switch (state) {
+        'ready' || 'running' => 'Running',
+        'booting' || 'starting' => 'Starting',
+        'adb_offline' => 'ADB offline',
+        'stopped' => 'Stopped',
+        _ => 'Unknown',
+      };
 }
 
 class EmulatorModel extends ChangeNotifier {
@@ -146,6 +157,10 @@ class EmulatorModel extends ChangeNotifier {
   int _operationGeneration = 1;
   Set<String> _previewTargets = {};
   final Map<String, RemotePreview> previews = {};
+
+  /// A failed fullscreen guest is distinct from the emulator's runtime state.
+  /// Preserve its last failure for the dashboard until the stream reconnects.
+  final Map<String, String> guestFailures = {};
   int get previewRequest => _previewRequest;
   int get previewAcknowledgedRequest => _previewAcknowledgedRequest;
   bool get previewsAcknowledged =>
@@ -317,13 +332,16 @@ class EmulatorModel extends ChangeNotifier {
     return _send({'action': 'list', 'request_id': _inventoryRequest});
   }
 
-  Future<void> connect(String targetId, {bool launchDefaultApp = false}) {
+  Future<void> connect(String targetId,
+      {bool launchDefaultApp = false, bool startIfStopped = true}) {
     if (connecting) return Future.value();
     connecting = true;
     streaming = false;
     _invalidateGuestFrameFreshness(notify: false);
     guestSessionId = 0;
     width = height = 0;
+    this.targetId = targetId;
+    guestFailures.remove(targetId);
     error = '';
     startupPhase = 'requesting';
     _selectionRequest = ++_sequence;
@@ -339,7 +357,7 @@ class EmulatorModel extends ChangeNotifier {
       'action': 'select',
       'request_id': _selectionRequest,
       'target_id': targetId,
-      'start_if_stopped': true,
+      'start_if_stopped': startIfStopped,
       'launch_default_app': launchDefaultApp
     });
   }
@@ -1581,6 +1599,8 @@ class EmulatorModel extends ChangeNotifier {
         height = h;
         streaming = true;
         connecting = false;
+        error = '';
+        guestFailures.remove(targetId);
         startupPhase = response['phase']?.toString().isNotEmpty == true
             ? response['phase'].toString()
             : 'stream_ready';
@@ -1589,6 +1609,7 @@ class EmulatorModel extends ChangeNotifier {
           response['session_id'] == guestSessionId) {
         _invalidateGuestFrameFreshness(notify: false);
         error = response['error']?.toString() ?? 'Guest connection failed';
+        if (targetId.isNotEmpty) guestFailures[targetId] = error;
         streaming = false;
         connecting = false;
         startupPhase = 'failed';
@@ -1684,6 +1705,7 @@ class EmulatorModel extends ChangeNotifier {
       if (id == _selectionRequest) {
         connecting = false;
         _selectionTimeout?.cancel();
+        if (targetId.isNotEmpty) guestFailures[targetId] = requestError;
       }
     } else {
       return;
@@ -1779,6 +1801,7 @@ class EmulatorModel extends ChangeNotifier {
     dashboardActive = false;
     _previewAcknowledgedRequest = 0;
     previews.clear();
+    guestFailures.clear();
     _previewTargets.clear();
     _selectionRequest =
         _desktopRequest = _inventoryRequest = _hostStatusRequest = 0;
@@ -1850,6 +1873,7 @@ class EmulatorModel extends ChangeNotifier {
     }
     _hostWindowFocusCompletions.clear();
     previews.clear();
+    guestFailures.clear();
     _previewTargets.clear();
     _selectionRequest =
         _desktopRequest = _inventoryRequest = _hostStatusRequest = 0;

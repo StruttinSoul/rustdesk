@@ -4,6 +4,36 @@ import 'package:flutter_hbb/mobile/pages/emulator_page.dart';
 import 'package:flutter_hbb/models/emulator_model.dart';
 
 void main() {
+  test('automatic guest reconnect has a bounded foreground-only retry budget',
+      () {
+    Duration? attempt(int count,
+            {bool failed = true,
+            bool liveBefore = true,
+            bool ready = true,
+            bool foreground = true,
+            bool canControl = true}) =>
+        guestAutoReconnectDelay(
+          sessionFailed: failed,
+          guestWasLive: liveBefore,
+          emulatorRunning: ready,
+          foreground: foreground,
+          canControl: canControl,
+          attempts: count,
+        );
+    expect(attempt(0), const Duration(seconds: 1));
+    expect(attempt(1), const Duration(seconds: 3));
+    expect(attempt(2), isNull);
+    expect(attempt(0, failed: false), isNull);
+    expect(attempt(0, liveBefore: false), isNull);
+    expect(attempt(0, ready: false), isNull);
+    expect(attempt(0, foreground: false), isNull);
+    expect(attempt(0, canControl: false), isNull);
+    expect(
+        const RemoteEmulator(
+                id: 'x', name: 'x', provider: 'bluestacks', state: 'stopped')
+            .readyForReconnect,
+        isFalse);
+  });
   testWidgets(
       'portrait guest uses the entire phone width and keeps controls below the frame',
       (tester) async {

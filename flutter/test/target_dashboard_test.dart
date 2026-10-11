@@ -520,6 +520,76 @@ void main() {
     expect(boots, 1);
   });
 
+  testWidgets('closed guest stays visible as a running emulator with Reconnect',
+      (tester) async {
+    var reconnects = 0;
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: SizedBox(
+      width: 360,
+      height: 280,
+      child: TargetPreviewCard(
+        name: 'BlueStacks App Player 3',
+        type: 'Android 13',
+        stopped: false,
+        live: false,
+        instanceState: 'Running',
+        streamDisconnected: true,
+        error: 'Guest session is closed',
+        onOpen: () => reconnects++,
+      ),
+    ))));
+    expect(find.text('Disconnected'), findsOneWidget);
+    expect(find.text('Stream disconnected'), findsOneWidget);
+    expect(find.text('Running · Stream disconnected'), findsOneWidget);
+    expect(find.text('Reconnect'), findsOneWidget);
+    expect(find.text('Live'), findsNothing);
+    await tester.tap(find.text('Reconnect'));
+    expect(reconnects, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('disconnected preview fits compact cards with large text',
+      (tester) async {
+    var reconnects = 0;
+    var gameLaunches = 0;
+    for (final size in [const Size(230, 145), const Size(360, 260)]) {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: MediaQuery(
+              data: const MediaQueryData(textScaler: TextScaler.linear(1.4)),
+              child: SizedBox(
+                width: size.width,
+                height: size.height,
+                child: TargetPreviewCard(
+                  name: 'BlueStacks App Player 3',
+                  type: 'Android 13',
+                  stopped: false,
+                  live: false,
+                  instanceState: 'Running',
+                  streamDisconnected: true,
+                  error: 'Guest session is closed',
+                  onOpen: () => reconnects++,
+                  onLaunchGame: () => gameLaunches++,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      expect(tester.takeException(), isNull, reason: 'card size: $size');
+      expect(find.byTooltip('Reconnect'), findsOneWidget);
+      expect(find.byTooltip('Launch game'), findsOneWidget);
+      await tester.tap(find.byTooltip('Reconnect'));
+      await tester.tap(find.byTooltip('Launch game'));
+      expect(reconnects, greaterThan(0));
+      expect(gameLaunches, greaterThan(0));
+    }
+  });
+
   testWidgets(
       'preview failure remains usable in a compact chooser at large font size',
       (tester) async {

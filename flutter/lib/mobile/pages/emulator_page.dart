@@ -16,6 +16,27 @@ bool shouldCancelGuestComposition({
     (currentSessionId != previousSessionId ||
         currentTargetId != previousTargetId);
 
+/// Retry only an unexpectedly failed, previously usable guest. Never boot an
+/// instance in the background or loop indefinitely against a broken runtime.
+Duration? guestAutoReconnectDelay({
+  required bool sessionFailed,
+  required bool guestWasLive,
+  required bool emulatorRunning,
+  required bool foreground,
+  required bool canControl,
+  required int attempts,
+}) {
+  if (!sessionFailed ||
+      !guestWasLive ||
+      !emulatorRunning ||
+      !foreground ||
+      !canControl ||
+      attempts >= 2) {
+    return null;
+  }
+  return Duration(seconds: attempts == 0 ? 1 : 3);
+}
+
 /// Gives portrait video the full screen width. When the screen is tall enough,
 /// the controls occupy the black margin underneath the contained video; on
 /// shorter screens a dedicated row prevents controls covering the game.
@@ -91,6 +112,11 @@ class _EmulatorPageState extends State<EmulatorPage>
   bool _background = false;
   bool _viewFocused = true;
   bool _hostControlWasEnabled = false;
+  Timer? _guestReconnectTimer;
+  Timer? _guestStableTimer;
+  String _guestRecoveryTarget = '';
+  int _guestReconnectAttempts = 0;
+  bool _guestWasLive = false;
   int _observedSessionId = 0;
   String _observedTargetId = '';
   (int, int)? _observedGeometry;
@@ -109,10 +135,106 @@ class _EmulatorPageState extends State<EmulatorPage>
     _hostControlWasEnabled = _hostCanControl;
     _observedSessionId = model.guestSessionId;
     _observedTargetId = model.targetId;
+    _guestRecoveryTarget = model.targetId;
+    _guestWasLive = model.streaming;
     if (model.streaming && model.width > 0 && model.height > 0) {
       _observedGeometry = (model.width, model.height);
     }
     if (!widget.dashboardMode) unawaited(model.refresh());
+    _updateGuestRecovery();
+  }
+
+  void _cancelGuestRecovery() {
+    _guestReconnectTimer?.cancel();
+    _guestReconnectTimer = null;
+    _guestStableTimer?.cancel();
+    _guestStableTimer = null;
+  }
+
+  void _updateGuestRecovery() {
+    if (_guestRecoveryTarget != model.targetId) {
+      _cancelGuestRecovery();
+      _guestRecoveryTarget = model.targetId;
+      _guestReconnectAttempts = 0;
+      _guestWasLive = model.streaming;
+    }
+    if (model.streaming) {
+      _guestWasLive = true;
+      _guestReconnectTimer?.cancel();
+      _guestReconnectTimer = null;
+      if (!model.guestFrameFresh) {
+        _guestStableTimer?.cancel();
+        _guestStableTimer = null;
+      } else if (_guestStableTimer == null) {
+        final target = model.targetId;
+        final session = model.guestSessionId;
+        _guestStableTimer = Timer(const Duration(seconds: 30), () {
+          _guestStableTimer = null;
+          if (mounted &&
+              model.streaming &&
+              model.guestFrameFresh &&
+              model.targetId == target &&
+              model.guestSessionId == session) {
+            _guestReconnectAttempts = 0;
+          }
+        });
+      }
+      return;
+    }
+    _guestStableTimer?.cancel();
+    _guestStableTimer = null;
+    final target = model.targetId;
+    final running = model.instances
+        .any((instance) => instance.id == target && instance.readyForReconnect);
+    final delay = guestAutoReconnectDelay(
+      sessionFailed: model.selected &&
+          !model.connecting &&
+          !_returning &&
+          model.startupPhase == 'failed' &&
+          model.error.isNotEmpty,
+      guestWasLive: _guestWasLive,
+      emulatorRunning: running,
+      foreground: !_background && _viewFocused,
+      canControl: _hostCanControl,
+      attempts: _guestReconnectAttempts,
+    );
+    if (delay == null) {
+      _guestReconnectTimer?.cancel();
+      _guestReconnectTimer = null;
+      return;
+    }
+    if (_guestReconnectTimer != null) return;
+    final failedSession = model.guestSessionId;
+    final failedError = model.error;
+    _guestReconnectTimer = Timer(delay, () {
+      _guestReconnectTimer = null;
+      if (!mounted ||
+          _returning ||
+          model.connecting ||
+          model.streaming ||
+          _background ||
+          !_viewFocused ||
+          !_hostCanControl ||
+          model.targetId != target ||
+          model.guestSessionId != failedSession ||
+          model.error != failedError ||
+          !model.instances.any((instance) =>
+              instance.id == target && instance.readyForReconnect)) {
+        return;
+      }
+      _guestReconnectAttempts++;
+      unawaited(model.connect(target, startIfStopped: false));
+    });
+  }
+
+  void _reconnectGuest() {
+    if (model.connecting || !_hostCanControl || model.targetId.isEmpty) return;
+    _cancelGuestRecovery();
+    _guestReconnectAttempts = 0;
+    final target = model.targetId;
+    final stopped = model.instances.any(
+        (instance) => instance.id == target && instance.state == 'stopped');
+    unawaited(model.connect(target, startIfStopped: stopped));
   }
 
   void _changed() {
@@ -146,6 +268,7 @@ class _EmulatorPageState extends State<EmulatorPage>
         _discardTextComposer(restoreKeyboardFocus: false);
       }
     }
+    _updateGuestRecovery();
     setState(() {});
     _syncGuestPresentation();
     if (_returning && !model.selected && !model.connecting) {
@@ -159,6 +282,7 @@ class _EmulatorPageState extends State<EmulatorPage>
   }
 
   Future<bool> _back() async {
+    _cancelGuestRecovery();
     _cancelGuestInput();
     _discardTextComposer(restoreKeyboardFocus: false);
     if (widget.onReturn != null) {
@@ -174,6 +298,7 @@ class _EmulatorPageState extends State<EmulatorPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _cancelGuestRecovery();
     _cancelGuestInput();
     model.removeListener(_changed);
     widget.ffi.ffiModel.removeListener(_permissionChanged);
@@ -261,6 +386,7 @@ class _EmulatorPageState extends State<EmulatorPage>
       _discardTextComposer(restoreKeyboardFocus: false);
     }
     _hostControlWasEnabled = enabled;
+    _updateGuestRecovery();
     if (mounted) setState(() {});
   }
 
@@ -272,6 +398,7 @@ class _EmulatorPageState extends State<EmulatorPage>
       _discardTextComposer(restoreKeyboardFocus: false);
     }
     _background = background;
+    _updateGuestRecovery();
     if (mounted) setState(() {});
   }
 
@@ -284,6 +411,7 @@ class _EmulatorPageState extends State<EmulatorPage>
       _discardTextComposer(restoreKeyboardFocus: false);
     }
     _viewFocused = focused;
+    _updateGuestRecovery();
     setState(() {});
   }
 
@@ -371,7 +499,9 @@ class _EmulatorPageState extends State<EmulatorPage>
                 body: model.selected || widget.dashboardMode
                     ? _guest()
                     : _picker(),
-                bottomNavigationBar: model.selected && !model.streaming
+                bottomNavigationBar: model.selected &&
+                        !model.streaming &&
+                        model.error.isEmpty
                     ? SafeArea(
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -551,10 +681,31 @@ class _EmulatorPageState extends State<EmulatorPage>
                             ? _startupLabel
                             : model.error,
                     textAlign: TextAlign.center),
+                if (model.error.isNotEmpty && _guestReconnectTimer != null)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: Text('Reconnecting automatically…',
+                        textAlign: TextAlign.center),
+                  ),
                 if (model.error.isNotEmpty)
-                  TextButton(
-                      onPressed: () => unawaited(_back()),
-                      child: const Text('Return to desktop')),
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 8,
+                    children: [
+                      TextButton(
+                          onPressed: () => unawaited(_back()),
+                          child: const Text('Return to desktop')),
+                      if (model.targetId.isNotEmpty)
+                        FilledButton.icon(
+                          onPressed:
+                              model.connecting || _returning || !_hostCanControl
+                                  ? null
+                                  : _reconnectGuest,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Reconnect emulator'),
+                        ),
+                    ],
+                  ),
               ])));
     }
     return KeyboardListener(

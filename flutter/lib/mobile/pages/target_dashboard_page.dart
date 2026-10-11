@@ -1011,10 +1011,34 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               ? null
               : widget.ffi.imageModel.dashboardImage(channel);
           final stopped = target.instance?.state == 'stopped';
-          final live = image != null &&
-              (target.display != null ||
-                  activeGuest ||
-                  preview?.state == 'streaming');
+          final updatedAt = channel == null
+              ? null
+              : widget.ffi.imageModel.dashboardImageUpdatedAt(channel);
+          final frameAge =
+              updatedAt == null ? null : DateTime.now().difference(updatedAt);
+          final guestFrameCurrent = image != null &&
+              frameAge != null &&
+              !frameAge.isNegative &&
+              frameAge < const Duration(seconds: 8) &&
+              (activeGuest
+                  ? model.guestFrameFresh
+                  : preview?.state == 'streaming' &&
+                      model.previewsAcknowledged &&
+                      widget.ffi.imageModel
+                              .dashboardImagePreviewRequest(channel!) ==
+                          model.previewRequest);
+          final live =
+              target.display != null ? image != null : guestFrameCurrent;
+          final streamDisconnected = !stopped &&
+              !live &&
+              target.instance != null &&
+              (preview?.state == 'failed' ||
+                  model.guestFailures.containsKey(target.id));
+          final streamStalled = !stopped &&
+              !live &&
+              target.instance != null &&
+              preview?.state == 'streaming' &&
+              !streamDisconnected;
           return TargetPreviewCard(
             name: target.name,
             type: target.display != null
@@ -1022,8 +1046,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                 : 'Android ${target.instance!.androidVersion}',
             stopped: stopped,
             live: live,
+            instanceState: target.instance?.runtimeLabel ?? '',
+            streamDisconnected: streamDisconnected,
+            streamStalled: streamStalled,
             image: image,
-            error: preview?.error ?? target.instance?.error ?? '',
+            error: preview?.error.isNotEmpty == true
+                ? preview!.error
+                : (streamDisconnected
+                    ? model.guestFailures[target.id] ?? ''
+                    : target.instance?.error ?? ''),
             onOpen: model.connecting ||
                     (target.instance != null &&
                         (!widget.ffi.ffiModel.keyboard ||
@@ -1898,6 +1929,9 @@ class TargetPreviewCard extends StatelessWidget {
       required this.type,
       required this.stopped,
       required this.live,
+      this.instanceState = '',
+      this.streamDisconnected = false,
+      this.streamStalled = false,
       this.image,
       this.error = '',
       this.onOpen,
@@ -1907,6 +1941,9 @@ class TargetPreviewCard extends StatelessWidget {
   final String type;
   final bool stopped;
   final bool live;
+  final String instanceState;
+  final bool streamDisconnected;
+  final bool streamStalled;
   final ui.Image? image;
   final String error;
   final VoidCallback? onOpen;
@@ -1915,20 +1952,29 @@ class TargetPreviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final runtime = instanceState.isEmpty
+        ? 'Emulator'
+        : '${instanceState[0].toUpperCase()}${instanceState.substring(1)}';
     final stateLabel = stopped
         ? 'Stopped'
-        : live
-            ? 'Live'
-            : error.isNotEmpty
-                ? 'Attention'
-                : 'Connecting';
+        : streamDisconnected
+            ? 'Disconnected'
+            : streamStalled
+                ? 'Stalled'
+                : live
+                    ? 'Live'
+                    : error.isNotEmpty
+                        ? 'Attention'
+                        : 'Connecting';
     final stateTone = stopped
         ? MirpgStatusTone.neutral
-        : live
-            ? MirpgStatusTone.good
-            : error.isNotEmpty
-                ? MirpgStatusTone.error
-                : MirpgStatusTone.warning;
+        : streamDisconnected || streamStalled
+            ? MirpgStatusTone.error
+            : live
+                ? MirpgStatusTone.good
+                : error.isNotEmpty
+                    ? MirpgStatusTone.error
+                    : MirpgStatusTone.warning;
 
     return Card(
       margin: EdgeInsets.zero,
@@ -1962,6 +2008,49 @@ class TargetPreviewCard extends StatelessWidget {
                           label: const Text('Boot'),
                         ),
                       )
+                    else if (streamDisconnected || streamStalled)
+                      LayoutBuilder(builder: (context, constraints) {
+                        // The footer and status badge already explain failures
+                        // on tiny cards; don't squeeze a full notice underneath.
+                        if (constraints.maxHeight < 135) {
+                          return const SizedBox.shrink();
+                        }
+                        return Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: SingleChildScrollView(
+                              child: MirpgSurface(
+                                color: MirpgRemoteTheme.background
+                                    .withOpacity(0.92),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      streamDisconnected
+                                          ? 'Stream disconnected'
+                                          : 'Stream stalled',
+                                      textAlign: TextAlign.center,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleSmall,
+                                    ),
+                                    if (error.isNotEmpty) ...[
+                                      const SizedBox(height: 4),
+                                      Text(error,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          textAlign: TextAlign.center,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .bodySmall),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      })
                     else if (error.isNotEmpty)
                       Center(
                         child: Padding(
@@ -1996,22 +2085,39 @@ class TargetPreviewCard extends StatelessWidget {
                       ),
                     Positioned(
                       left: 10,
-                      top: 10,
-                      child: MirpgStatusChip(
-                        label: type,
-                        icon: type == 'Windows'
-                            ? Icons.desktop_windows_outlined
-                            : Icons.android_outlined,
-                      ),
-                    ),
-                    Positioned(
                       right: 10,
                       top: 10,
-                      child: MirpgStatusChip(
-                        label: stateLabel,
-                        icon: live ? Icons.circle : null,
-                        tone: stateTone,
-                      ),
+                      child: LayoutBuilder(builder: (context, constraints) {
+                        final showType = constraints.maxWidth >=
+                            MediaQuery.textScalerOf(context).scale(260);
+                        return Row(
+                          children: [
+                            if (showType)
+                              Flexible(
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: MirpgStatusChip(
+                                    label: type,
+                                    icon: type == 'Windows'
+                                        ? Icons.desktop_windows_outlined
+                                        : Icons.android_outlined,
+                                  ),
+                                ),
+                              ),
+                            if (showType) const SizedBox(width: 8),
+                            Expanded(
+                              child: Align(
+                                alignment: Alignment.centerRight,
+                                child: MirpgStatusChip(
+                                  label: stateLabel,
+                                  icon: live ? Icons.circle : null,
+                                  tone: stateTone,
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      }),
                     ),
                   ],
                 ),
@@ -2019,8 +2125,15 @@ class TargetPreviewCard extends StatelessWidget {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
-              child: Row(
-                children: [
+              child: LayoutBuilder(builder: (context, constraints) {
+                final compact = constraints.maxWidth <
+                    MediaQuery.textScalerOf(context).scale(280);
+                final actionLabel = type == 'Windows'
+                    ? 'Open'
+                    : streamDisconnected || streamStalled
+                        ? 'Reconnect'
+                        : 'Resume';
+                return Row(children: [
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2035,9 +2148,11 @@ class TargetPreviewCard extends StatelessWidget {
                         Text(
                           stopped
                               ? 'Ready to boot'
-                              : live
-                                  ? 'Tap to control'
-                                  : 'Waiting for a usable preview',
+                              : streamDisconnected || streamStalled
+                                  ? '$runtime · ${streamDisconnected ? 'Stream disconnected' : 'Stream stalled'}'
+                                  : live
+                                      ? 'Tap to control'
+                                      : 'Waiting for a usable preview',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.bodySmall,
@@ -2046,21 +2161,40 @@ class TargetPreviewCard extends StatelessWidget {
                     ),
                   ),
                   if (onLaunchGame != null)
-                    TextButton.icon(
-                      onPressed: onLaunchGame,
-                      icon: const Icon(Icons.sports_esports_outlined, size: 18),
-                      label: const Text('Launch game'),
-                    ),
+                    if (compact)
+                      IconButton(
+                        onPressed: onLaunchGame,
+                        icon: const Icon(Icons.sports_esports_outlined),
+                        tooltip: 'Launch game',
+                      )
+                    else
+                      TextButton.icon(
+                        onPressed: onLaunchGame,
+                        icon:
+                            const Icon(Icons.sports_esports_outlined, size: 18),
+                        label: const Text('Launch game'),
+                      ),
                   if (!stopped)
-                    TextButton.icon(
-                      onPressed: onOpen,
-                      icon: Icon(type == 'Windows'
-                          ? Icons.open_in_full_rounded
-                          : Icons.play_arrow_rounded),
-                      label: Text(type == 'Windows' ? 'Open' : 'Resume'),
-                    ),
-                ],
-              ),
+                    if (compact)
+                      IconButton(
+                        onPressed: onOpen,
+                        icon: Icon(type == 'Windows'
+                            ? Icons.open_in_full_rounded
+                            : streamDisconnected || streamStalled
+                                ? Icons.refresh_rounded
+                                : Icons.play_arrow_rounded),
+                        tooltip: actionLabel,
+                      )
+                    else
+                      TextButton.icon(
+                        onPressed: onOpen,
+                        icon: Icon(type == 'Windows'
+                            ? Icons.open_in_full_rounded
+                            : Icons.play_arrow_rounded),
+                        label: Text(actionLabel),
+                      ),
+                ]);
+              }),
             ),
           ],
         ),
