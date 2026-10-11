@@ -8,6 +8,65 @@ import 'package:flutter_hbb/models/codex_model.dart';
 import 'package:uuid/uuid.dart';
 
 void main() {
+  testWidgets('Codex command output stays collapsed until opened',
+      (tester) async {
+    final sent = <({String key, String value})>[];
+    final model = CodexModel(Uuid().v4obj(),
+        commandSender: (key, value) async =>
+            sent.add((key: key, value: value)));
+    const thread = CodexThread(
+      id: 'thread_activity',
+      title: 'Remote task',
+      project: 'MIRPG',
+      originator: 'codex_desktop',
+      updatedAt: 1,
+      state: 'resumable',
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: CodexThreadPage(model: model, thread: thread)),
+    );
+    await tester.pump();
+    final historyRequest = sent.lastWhere(
+      (command) => command.key == 'codex-thread-history',
+    );
+    model.handleResponse({
+      'type': 'thread_history',
+      'request_id': jsonDecode(historyRequest.value)['request_id'],
+      'thread_id': thread.id,
+      'items': [
+        {
+          'id': 'command_1',
+          'turn_id': 'turn_1',
+          'kind': 'command',
+          'text': 'pwsh.exe -Command Get-Content remote.log',
+          'detail': 'Exit code 0',
+          'status': 'completed',
+        },
+      ],
+    });
+    await tester.pump();
+
+    expect(find.text('Command'), findsOneWidget);
+    expect(find.text('Exit code 0'), findsNothing);
+    model.handleResponse({
+      'type': 'event',
+      'thread_id': thread.id,
+      'turn_id': 'turn_1',
+      'item_id': 'command_1',
+      'kind': 'item_updated',
+      'state': 'unavailable',
+      'history_kind': 'command',
+      'text': '\nProcessed 1 item',
+      'status': 'running',
+    });
+    await tester.pump();
+    expect(find.textContaining('Processed 1 item'), findsNothing);
+    await tester.tap(find.text('Command'));
+    await tester.pumpAndSettle();
+    expect(find.text('Exit code 0'), findsOneWidget);
+    expect(find.textContaining('Processed 1 item'), findsOneWidget);
+  });
+
   testWidgets('shows interactive Codex thread list and new task action',
       (tester) async {
     final model = CodexModel(

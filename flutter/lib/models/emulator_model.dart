@@ -167,6 +167,8 @@ class EmulatorModel extends ChangeNotifier {
       _previewRequest != 0 && _previewAcknowledgedRequest == _previewRequest;
 
   void invalidatePreviewAcknowledgement() {
+    dashboardActive = false;
+    _previewRequest = 0;
     _previewAcknowledgedRequest = 0;
   }
 

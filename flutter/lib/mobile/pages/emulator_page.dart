@@ -300,6 +300,7 @@ class _EmulatorPageState extends State<EmulatorPage>
     WidgetsBinding.instance.removeObserver(this);
     _cancelGuestRecovery();
     _cancelGuestInput();
+    if (_textComposerVisible) unawaited(_hideGuestSoftKeyboard());
     model.removeListener(_changed);
     widget.ffi.ffiModel.removeListener(_permissionChanged);
     if (_guestPresentation) unawaited(_restoreRemotePresentation());
@@ -317,12 +318,38 @@ class _EmulatorPageState extends State<EmulatorPage>
       return;
     }
     setState(() => _textComposerVisible = true);
+    unawaited(_showGuestSoftKeyboard());
+  }
+
+  Future<void> _showGuestSoftKeyboard() async {
+    try {
+      await widget.ffi.invokeMethod('enable_soft_keyboard', true);
+    } catch (error) {
+      if (mounted && _textComposerVisible) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unable to open phone keyboard: $error')),
+        );
+      }
+    }
+    if (!mounted || !_textComposerVisible) {
+      await _hideGuestSoftKeyboard();
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _textComposerVisible) _textFocus.requestFocus();
     });
   }
 
+  Future<void> _hideGuestSoftKeyboard() async {
+    try {
+      await widget.ffi.invokeMethod('enable_soft_keyboard', false);
+    } catch (error) {
+      debugPrint('Unable to restore phone keyboard state: $error');
+    }
+  }
+
   void _discardTextComposer({bool restoreKeyboardFocus = true}) {
+    if (_textComposerVisible) unawaited(_hideGuestSoftKeyboard());
     _textSendGeneration++;
     _sendingText = false;
     _textController.value = TextEditingValue.empty;

@@ -680,7 +680,7 @@ class _CodexThreadView extends StatefulWidget {
 class _CodexThreadViewState extends State<_CodexThreadView> {
   final ScrollController _scrollController = ScrollController();
   late final TextEditingController _composerController;
-  int _lastVisibleItemCount = 0;
+  String _lastVisibleTailSignature = '';
   bool _showReview = false;
 
   @override
@@ -706,6 +706,7 @@ class _CodexThreadViewState extends State<_CodexThreadView> {
     }
     if (oldWidget.thread.id != widget.thread.id) {
       _showReview = false;
+      _lastVisibleTailSignature = '';
       _leaveThreadAfterFrame(oldWidget.model, oldWidget.thread.id);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(widget.model.selectThread(widget.thread.id));
@@ -725,12 +726,16 @@ class _CodexThreadViewState extends State<_CodexThreadView> {
 
   void _onModelChanged() {
     _syncComposerDraft();
-    final count = widget.model.historyFor(widget.thread.id).length +
-        widget.model.approvalsFor(widget.thread.id).length;
-    if (count == _lastVisibleItemCount) return;
+    if (mounted) setState(() {});
+    final items = widget.model.historyFor(widget.thread.id);
+    final last = items.isEmpty ? null : items.last;
+    final tailSignature = '${items.length}/'
+        '${widget.model.approvalsFor(widget.thread.id).length}/'
+        '${last?.id}/${last?.text.length}/${last?.detail.length}/${last?.status}';
+    if (tailSignature == _lastVisibleTailSignature) return;
     final followTail = !_scrollController.hasClients ||
         _scrollController.position.extentAfter < 180;
-    _lastVisibleItemCount = count;
+    _lastVisibleTailSignature = tailSignature;
     if (!followTail) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.hasClients) return;
@@ -1119,6 +1124,63 @@ class _ActivityRow extends StatelessWidget {
             borderRadius: BorderRadius.circular(14),
           ),
           child: SelectableText(body, style: theme.textTheme.bodyMedium),
+        ),
+      );
+    }
+
+    if (technical) {
+      final summary = body.trim().split('\n').first;
+      final failed = item.status.toLowerCase().contains('fail') ||
+          item.status.toLowerCase().contains('error');
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: ExpansionTile(
+            key: ValueKey('codex-activity-${item.id}'),
+            dense: true,
+            initiallyExpanded: failed,
+            backgroundColor: theme.colorScheme.surfaceContainerLow,
+            collapsedBackgroundColor: theme.colorScheme.surfaceContainerLow,
+            leading: Icon(_historyIcon(item.kind), size: 18),
+            title: Row(
+              children: [
+                Expanded(
+                  child: Text(_historyLabel(item.kind),
+                      style: theme.textTheme.labelMedium
+                          ?.copyWith(fontWeight: FontWeight.w700)),
+                ),
+                if (item.status.isNotEmpty)
+                  Text(
+                    _stateLabel(item.status),
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: failed
+                          ? theme.colorScheme.error
+                          : theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+              ],
+            ),
+            subtitle: summary.isEmpty
+                ? null
+                : Text(summary, maxLines: 1, overflow: TextOverflow.ellipsis),
+            childrenPadding: const EdgeInsets.fromLTRB(14, 4, 14, 12),
+            children: [
+              if (body.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SelectableText(body,
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(fontFamily: 'monospace')),
+                ),
+              if (item.detail.isNotEmpty && item.text.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SelectableText(item.detail,
+                      style: theme.textTheme.bodySmall),
+                ),
+            ],
+          ),
         ),
       );
     }

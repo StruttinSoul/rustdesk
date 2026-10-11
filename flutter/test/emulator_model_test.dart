@@ -492,7 +492,31 @@ void main() {
     model.dispose();
   });
 
-  test('preview acknowledgement can be invalidated before resubscribe',
+  test('hidden workspace tabs stop previews and Overview can restart them',
+      () async {
+    final sent = <Map<String, dynamic>>[];
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, value) async => sent.add(jsonDecode(value)));
+
+    await model.setPreviews(['bluestacks:one'], [0]);
+    expect(sent.last['enabled'], isTrue);
+    expect(model.dashboardActive, isTrue);
+
+    await model.setPreviews([], [], enabled: false);
+    expect(sent.last['enabled'], isFalse);
+    expect(sent.last['target_ids'], isEmpty);
+    expect(sent.last['displays'], isEmpty);
+    expect(model.dashboardActive, isFalse);
+    expect(model.previews, isEmpty);
+
+    await model.setPreviews(['bluestacks:one'], [0]);
+    expect(sent.last['enabled'], isTrue);
+    expect(sent.last['target_ids'], ['bluestacks:one']);
+    expect(model.dashboardActive, isTrue);
+    model.dispose();
+  });
+
+  test('reconnect invalidates the active monitor preview subscription',
       () async {
     final sent = <Map<String, dynamic>>[];
     final model = EmulatorModel(Uuid().v4obj(),
@@ -508,11 +532,22 @@ void main() {
       'session_ids': const [],
     });
     expect(model.previewsAcknowledged, isTrue);
+    expect(model.dashboardActive, isTrue);
 
     model.invalidatePreviewAcknowledgement();
+    expect(model.dashboardActive, isFalse);
     expect(model.previewsAcknowledged, isFalse);
-    expect(model.previewRequest, request);
+    expect(model.previewRequest, 0);
     expect(model.previewAcknowledgedRequest, 0);
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'previews',
+      'request_id': request,
+      'enabled': true,
+      'session_ids': const [],
+    });
+    expect(model.dashboardActive, isFalse);
+    expect(model.previewsAcknowledged, isFalse);
     model.dispose();
   });
 

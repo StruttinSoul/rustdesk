@@ -427,8 +427,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final guestIds = <String>[];
     final displays = <int>[];
     final active = _fullscreen;
+    final previewsEnabled = !_background &&
+        (active != null || _chooser || _section == _ConnectedPcSection.devices);
     if (!_background && active?.display != null) displays.add(active!.display!);
-    if (!_background && (active == null || _chooser)) {
+    if (!_background && previewsEnabled && (active == null || _chooser)) {
       final first = _chooser
           ? _chooserStart
           : ((_scroll.hasClients ? _scroll.offset : 0) / _extent).floor() *
@@ -446,9 +448,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       }
     }
     final signature = '${guestIds.join(',')}|${displays.join(',')}';
-    if (_subscription == signature && model.dashboardActive) return;
+    if (_subscription == signature &&
+        model.dashboardActive == previewsEnabled) {
+      return;
+    }
     _subscription = signature;
-    unawaited(model.setPreviews(guestIds, displays));
+    unawaited(model.setPreviews(guestIds, displays, enabled: previewsEnabled));
     _retainImages(displays);
   }
 
@@ -792,6 +797,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                 }
                 if (selected == _ConnectedPcSection.codex) _codexOpened = true;
               });
+              _subscribe();
             },
           ),
         ),
