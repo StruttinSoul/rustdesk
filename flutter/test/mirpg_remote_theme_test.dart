@@ -14,34 +14,67 @@ void main() {
     expect(theme.extension<_MarkerTheme>(), same(marker));
   });
 
-  test('MIRPG remote theme uses the fixed graphite and mint palette', () {
-    final theme = MirpgRemoteTheme.build(ThemeData.light());
+  test('Studio V4 honors both appearance modes and their semantic colors', () {
+    for (final brightness in Brightness.values) {
+      final palette = brightness == Brightness.dark
+          ? MirpgStudioPalette.dark
+          : MirpgStudioPalette.light;
+      final base = brightness == Brightness.dark
+          ? ThemeData.dark()
+          : ThemeData.light();
+      final theme = MirpgRemoteTheme.build(base);
 
-    expect(theme.useMaterial3, isTrue);
-    expect(theme.brightness, Brightness.dark);
-    expect(theme.scaffoldBackgroundColor, MirpgRemoteTheme.background);
-    expect(theme.colorScheme.surface, MirpgRemoteTheme.surface);
-    expect(theme.colorScheme.primary, MirpgRemoteTheme.accent);
-    expect(theme.cardTheme.color, MirpgRemoteTheme.raised);
-    expect(theme.cardTheme.shape, isA<RoundedRectangleBorder>());
-    expect(theme.navigationBarTheme.backgroundColor, MirpgRemoteTheme.surface);
-    expect(theme.navigationBarTheme.height, 72);
-    expect(theme.navigationBarTheme.indicatorColor,
-        MirpgRemoteTheme.accent.withOpacity(0.14));
-    expect(theme.appBarTheme.centerTitle, isFalse);
-    expect(theme.appBarTheme.toolbarHeight, 64);
-    expect(theme.dividerColor, MirpgRemoteTheme.divider);
-    expect(theme.inputDecorationTheme.filled, isTrue);
-    expect(theme.inputDecorationTheme.fillColor, MirpgRemoteTheme.surface);
-    expect(theme.bottomSheetTheme.backgroundColor, MirpgRemoteTheme.raised);
-    expect(theme.textTheme.bodyLarge?.color, MirpgRemoteTheme.textPrimary);
-    expect(theme.textTheme.bodyMedium?.color, MirpgRemoteTheme.textPrimary);
-    expect(theme.textTheme.bodySmall?.color, MirpgRemoteTheme.textSecondary);
-    expect(theme.textTheme.titleLarge?.fontSize, 24);
-    expect(theme.textTheme.titleMedium?.fontSize, 18);
-    expect(theme.textTheme.bodyMedium?.fontSize, 16);
-    expect(theme.textTheme.bodySmall?.fontSize, 14);
-    expect(theme.textTheme.labelSmall?.fontSize, 12);
+      expect(theme.useMaterial3, isTrue);
+      expect(theme.brightness, brightness);
+      expect(theme.scaffoldBackgroundColor, palette.background);
+      expect(theme.colorScheme.surface, palette.surface);
+      expect(theme.colorScheme.primary, palette.accent);
+      expect(theme.colorScheme.onSurface, palette.textPrimary);
+      expect(theme.cardTheme.color, palette.raised);
+      expect(theme.cardTheme.shape, isA<RoundedRectangleBorder>());
+      expect(theme.navigationBarTheme.backgroundColor, palette.surface);
+      expect(theme.navigationBarTheme.height, 72);
+      expect(theme.navigationBarTheme.indicatorColor,
+          palette.accent.withOpacity(0.14));
+      expect(theme.appBarTheme.centerTitle, isFalse);
+      expect(theme.appBarTheme.toolbarHeight, 64);
+      expect(theme.dividerColor, palette.divider);
+      expect(theme.inputDecorationTheme.filled, isTrue);
+      expect(theme.inputDecorationTheme.fillColor, palette.surface);
+      expect(theme.bottomSheetTheme.backgroundColor, palette.raised);
+      expect(theme.textTheme.bodyLarge?.color, palette.textPrimary);
+      expect(theme.textTheme.bodyMedium?.color, palette.textPrimary);
+      expect(theme.textTheme.bodySmall?.color, palette.textSecondary);
+      expect(theme.textTheme.titleLarge?.fontSize, 24);
+      expect(theme.textTheme.titleMedium?.fontSize, 18);
+      expect(theme.textTheme.bodyMedium?.fontSize, 16);
+      expect(theme.textTheme.bodySmall?.fontSize, 14);
+      expect(theme.textTheme.labelSmall?.fontSize, 12);
+    }
+  });
+
+  testWidgets('Studio surfaces resolve colors from the inherited theme',
+      (tester) async {
+    for (final brightness in Brightness.values) {
+      final base = brightness == Brightness.dark
+          ? ThemeData.dark()
+          : ThemeData.light();
+      final palette = brightness == Brightness.dark
+          ? MirpgStudioPalette.dark
+          : MirpgStudioPalette.light;
+      await tester.pumpWidget(MaterialApp(
+        theme: MirpgRemoteTheme.build(base),
+        home: const Scaffold(body: MirpgSurface(child: Text('Studio'))),
+      ));
+      await tester.pumpAndSettle();
+      final surface = tester.widget<DecoratedBox>(find.descendant(
+        of: find.byType(MirpgSurface),
+        matching: find.byType(DecoratedBox),
+      ).first);
+      final decoration = surface.decoration as BoxDecoration;
+      expect(decoration.color, palette.surface);
+      expect(MirpgStudioPalette.of(tester.element(find.text('Studio'))), palette);
+    }
   });
 
   testWidgets('MIRPG controls keep a 48dp minimum touch target',

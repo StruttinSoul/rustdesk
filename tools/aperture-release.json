@@ -1,0 +1,7 @@
+{
+  "version": "1.5.0",
+  "versionCode": 4103,
+  "package": "com.carriez.flutter_hbb.mirpgtest",
+  "architecture": "arm64-v8a",
+  "signingCertificateSha256": "c9d0ad94f1001907481470a22b7b771a30dc5d0a69d4aa35d9a15b27395a2e24"
+}

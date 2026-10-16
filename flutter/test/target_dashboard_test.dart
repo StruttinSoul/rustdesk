@@ -72,7 +72,7 @@ void main() {
     expect(stayedConnected, 1);
   });
 
-  testWidgets('connected PC navigation exposes management tabs',
+  testWidgets('Studio V4 navigation exposes four primary destinations',
       (tester) async {
     var selected = 0;
     await tester.pumpWidget(MaterialApp(
@@ -90,28 +90,23 @@ void main() {
       }),
     ));
 
-    expect(find.text('Overview'), findsOneWidget);
-    expect(find.text('System'), findsOneWidget);
-    expect(find.text('Files'), findsOneWidget);
-    expect(find.text('Shell'), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Screens'), findsOneWidget);
+    expect(find.text('Tools'), findsOneWidget);
     expect(find.text('Codex'), findsOneWidget);
     expect(selected, 0);
 
-    await tester.tap(find.text('System'));
+    await tester.tap(find.text('Screens'));
     await tester.pump();
     expect(selected, 1);
 
-    await tester.tap(find.text('Files'));
+    await tester.tap(find.text('Tools'));
     await tester.pump();
     expect(selected, 2);
 
-    await tester.tap(find.text('Shell'));
-    await tester.pump();
-    expect(selected, 3);
-
     await tester.tap(find.text('Codex'));
     await tester.pump();
-    expect(selected, 4);
+    expect(selected, 3);
   });
 
   testWidgets('connected PC navigation keeps useful tabs without Codex',
@@ -130,13 +125,13 @@ void main() {
     ));
 
     expect(find.byType(NavigationBar), findsOneWidget);
-    expect(find.text('System'), findsOneWidget);
-    expect(find.text('Files'), findsOneWidget);
-    expect(find.text('Shell'), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Screens'), findsOneWidget);
+    expect(find.text('Tools'), findsOneWidget);
     expect(find.text('Codex'), findsNothing);
   });
 
-  testWidgets('connected PC navigation omits unavailable management tabs',
+  testWidgets('primary navigation remains available without host tools',
       (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -151,7 +146,9 @@ void main() {
       ),
     ));
 
-    expect(find.text('Overview'), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Screens'), findsOneWidget);
+    expect(find.text('Tools'), findsOneWidget);
     expect(find.text('System'), findsNothing);
     expect(find.text('Files'), findsNothing);
     expect(find.text('Shell'), findsNothing);
@@ -180,8 +177,95 @@ void main() {
     ));
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Overview'), findsOneWidget);
-    expect(find.text('Shell'), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Tools'), findsOneWidget);
+  });
+
+  testWidgets('Studio screen rows keep boot, open and game actions accessible',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 700);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var monitorOpens = 0;
+    var emulatorBoots = 0;
+    var gameLaunches = 0;
+
+    for (final base in [ThemeData.light(), ThemeData.dark()]) {
+      await tester.pumpWidget(MaterialApp(
+        theme: MirpgRemoteTheme.build(base),
+        home: Scaffold(
+          body: MediaQuery(
+            data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
+            child: Column(children: [
+              TargetScreenRow(
+                name: 'Monitor 1',
+                type: 'Windows',
+                stopped: false,
+                live: true,
+                onOpen: () => monitorOpens++,
+              ),
+              TargetScreenRow(
+                name: 'BlueStacks App Player 3',
+                type: 'Android 13',
+                stopped: true,
+                live: false,
+                onOpen: () => emulatorBoots++,
+                onLaunchGame: () => gameLaunches++,
+              ),
+            ]),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Monitor 1'), findsOneWidget);
+      expect(find.text('BlueStacks App Player 3'), findsOneWidget);
+      await tester.tap(find.byTooltip('Open'));
+      await tester.tap(find.byTooltip('Boot'));
+      await tester.tap(find.byTooltip('More BlueStacks App Player 3 actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Launch game'));
+      await tester.pumpAndSettle();
+    }
+    expect(monitorOpens, 2);
+    expect(emulatorBoots, 2);
+    expect(gameLaunches, 2);
+  });
+
+  testWidgets('Studio Home emulator cards avoid overlap at high text scale',
+      (tester) async {
+    var boots = 0;
+    for (final base in [ThemeData.light(), ThemeData.dark()]) {
+      await tester.pumpWidget(MaterialApp(
+        theme: MirpgRemoteTheme.build(base),
+        home: Scaffold(
+          body: Center(
+            child: MediaQuery(
+              data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+              child: SizedBox(
+                width: 134,
+                height: 218,
+                child: TargetPreviewCard(
+                  name: 'BlueStacks App Player 3',
+                  type: 'Android 13',
+                  stopped: true,
+                  live: false,
+                  onOpen: () => boots++,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Boot'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Boot').hitTestable(),
+          findsOneWidget);
+      await tester.tap(find.text('Boot'));
+    }
+    expect(boots, 2);
   });
 
   test('Codex overview prioritizes actionable and running work', () {

@@ -8,6 +8,8 @@ pub mod bluestacks;
 #[cfg(windows)]
 pub mod boot_windows;
 #[cfg(windows)]
+pub mod eco_fps;
+#[cfg(windows)]
 pub mod gateway_management;
 #[cfg(windows)]
 pub mod guest_protocol;
@@ -22,6 +24,8 @@ pub mod phone_workspace;
 pub mod remote;
 #[cfg(windows)]
 pub mod remote_windows;
+#[cfg(windows)]
+pub mod shutdown_windows;
 #[cfg(windows)]
 pub mod window_picker;
 

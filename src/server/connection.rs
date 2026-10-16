@@ -638,7 +638,9 @@ impl Connection {
         let (tx, mut rx) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
         let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
         let (_emulator_tx, mut emulator_rx) =
-            mpsc::channel::<super::emulator::remote::GuestEvent>(2);
+            mpsc::channel::<super::emulator::remote::GuestEvent>(
+                super::emulator::remote::GUEST_EVENT_QUEUE_SIZE,
+            );
         let (tx_input, _rx_input) = std_mpsc::channel();
         let (tx_from_authed, mut rx_from_authed) = mpsc::unbounded_channel::<ipc::Data>();
         let mut hbbs_rx = crate::hbbs_http::sync::signal_receiver();

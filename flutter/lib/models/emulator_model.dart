@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import 'host_management_model.dart';
 import 'platform_model.dart';
 import 'remote_operation_state.dart';
+import 'remote_frame_pacer.dart';
 
 typedef EmulatorCommandSender = Future<void> Function(String key, String value);
 
@@ -138,6 +139,20 @@ class EmulatorModel extends ChangeNotifier {
   bool connecting = false;
   bool dashboardSupported = false;
   bool dashboardActive = false;
+  final framePacer = RemoteFramePacer();
+  bool? _monitorPreviewMode;
+
+  Future<void> setMonitorPreviewMode(bool preview, {bool force = false}) async {
+    if (_disposed || (!force && _monitorPreviewMode == preview)) return;
+    _monitorPreviewMode = preview;
+    try {
+      await _sender('dashboard-preview-mode', preview.toString());
+    } catch (failure) {
+      if (_monitorPreviewMode == preview) _monitorPreviewMode = null;
+      debugPrint('Could not apply preview frame rate: $failure');
+    }
+  }
+
   int _previewRequest = 0;
   int _previewAcknowledgedRequest = 0;
   int _hostStatusRequest = 0;
@@ -153,6 +168,53 @@ class EmulatorModel extends ChangeNotifier {
   final Map<int, int> _hostOperationStartedMonotonicMs = {};
   final Map<int, Completer<HostWindowInfo?>> _hostWindowFocusCompletions = {};
   final Set<int> _pendingHostOperations = {};
+  final Set<String> _shutdownPending = {};
+  final Map<int, String> _shutdownRequests = {};
+  Timer? _shutdownRefreshTimer;
+
+  CapabilityStatus get emulatorShutdownCapability => _capabilities.status('host.emulator_shutdown.v1');
+  bool isEmulatorShuttingDown(String id) => _shutdownPending.contains(id) ||
+      instances.any((item) => item.id == id && item.state == 'stopping');
+  bool canShutdownEmulator(String id) => _canMutateHost('host.emulator_shutdown.v1') &&
+      !isEmulatorShuttingDown(id) && instances.any((item) => item.id == id &&
+          item.provider == 'bluestacks' && item.state != 'stopped');
+
+  Future<void> shutdownEmulator(String id) async {
+    if (isEmulatorShuttingDown(id)) return;
+    if (!canShutdownEmulator(id)) {
+      hostError = 'Shutdown is not available for this emulator. Refresh or update the Windows host.';
+      if (!_disposed) notifyListeners();
+      return;
+    }
+    final requestId = ++_sequence;
+    final operationId = const Uuid().v4();
+    final targetIdentity = 'emulator:$id';
+    _shutdownPending.add(id);
+    _shutdownRequests[requestId] = id;
+    hostError = hostMessage = '';
+    _beginHostOperation(requestId: requestId, operationId: operationId,
+        targetIdentity: targetIdentity, action: 'emulator_shutdown');
+    _shutdownRefreshTimer ??= Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (_disposed || !hostConnectionCurrent) { _clearShutdownState(); return; }
+      if (_shutdownPending.isEmpty && !instances.any((item) => item.state == 'stopping')) {
+        timer.cancel(); _shutdownRefreshTimer = null; return;
+      }
+      if (!loading && !connecting) unawaited(refresh());
+    });
+    notifyListeners();
+    await _sendHostOperation({
+      'action': 'emulator_shutdown', 'request_id': requestId, 'component': id,
+      'operation_id': operationId, 'session_identity': _operationSessionIdentity,
+      'target_identity': targetIdentity, 'session_generation': _operationGeneration,
+    }, requestId: requestId, capability: 'host.emulator_shutdown.v1',
+      stillValid: () => hostConnectionCurrent && instances.any((item) => item.id == id && item.state != 'stopped'));
+  }
+
+  void _clearShutdownState() {
+    _shutdownRefreshTimer?.cancel(); _shutdownRefreshTimer = null;
+    _shutdownPending.clear(); _shutdownRequests.clear();
+  }
+
   String _operationSessionIdentity = '';
   int _operationGeneration = 1;
   Set<String> _previewTargets = {};
@@ -167,6 +229,7 @@ class EmulatorModel extends ChangeNotifier {
       _previewRequest != 0 && _previewAcknowledgedRequest == _previewRequest;
 
   void invalidatePreviewAcknowledgement() {
+    _monitorPreviewMode = null;
     dashboardActive = false;
     _previewRequest = 0;
     _previewAcknowledgedRequest = 0;
@@ -281,6 +344,7 @@ class EmulatorModel extends ChangeNotifier {
     _outbound = next.catchError((Object failure) {
       if (_disposed) return;
       _inventoryCurrent = false;
+      _clearShutdownState();
       error = failure.toString();
       connecting = false;
       loading = false;
@@ -311,6 +375,7 @@ class EmulatorModel extends ChangeNotifier {
     _outbound = next.catchError((Object failure) {
       if (_disposed) return;
       _inventoryCurrent = false;
+      _clearShutdownState();
       error = failure.toString();
       connecting = false;
       loading = false;
@@ -327,6 +392,7 @@ class EmulatorModel extends ChangeNotifier {
     _inventoryTimeout = Timer(const Duration(seconds: 25), () {
       loading = false;
       _inventoryCurrent = false;
+      _clearShutdownState();
       error = 'The PC did not return its emulator list. Refresh to try again.';
       notifyListeners();
     });
@@ -1043,6 +1109,8 @@ class EmulatorModel extends ChangeNotifier {
     _hostOperationTimeouts[requestId] = Timer(_hostOperationTimeout, () {
       if (_disposed || !_hostOperations.markTimedOut(requestId)) return;
       _pendingHostOperations.remove(requestId);
+      final shutdownTarget = _shutdownRequests.remove(requestId);
+      if (shutdownTarget != null) _shutdownPending.remove(shutdownTarget);
       _hostOperationTimeouts.remove(requestId);
       _hostOperationStartedMonotonicMs.remove(requestId);
       _hostWindowFocusCompletions.remove(requestId)?.complete(null);
@@ -1100,6 +1168,8 @@ class EmulatorModel extends ChangeNotifier {
         if (resolved) {
           _hostOperationTimeouts.remove(requestId)?.cancel();
           _pendingHostOperations.remove(requestId);
+          final shutdownTarget = _shutdownRequests.remove(requestId);
+          if (shutdownTarget != null) _shutdownPending.remove(shutdownTarget);
           _hostOperationStartedMonotonicMs.remove(requestId);
           _hostWindowFocusCompletions.remove(requestId)?.complete(null);
           hostMessage = '';
@@ -1155,6 +1225,7 @@ class EmulatorModel extends ChangeNotifier {
         }
       }
       _inventoryCurrent = false;
+      _clearShutdownState();
       error = failure.toString();
       notifyListeners();
     });
@@ -1364,6 +1435,11 @@ class EmulatorModel extends ChangeNotifier {
         );
       }
       _hostOperationTimeouts.remove(id)?.cancel();
+      final shutdownTarget = _shutdownRequests.remove(id);
+      if (shutdownTarget != null) {
+        if (host['ok'] != true) _shutdownPending.remove(shutdownTarget);
+        if (hostConnectionCurrent) unawaited(refresh());
+      }
       _pendingHostOperations.remove(id);
       final requestStartedMonotonicMs =
           _hostOperationStartedMonotonicMs.remove(id) ?? -1;
@@ -1515,6 +1591,7 @@ class EmulatorModel extends ChangeNotifier {
           if (!completion.isCompleted) completion.complete(null);
         }
         _hostWindowFocusCompletions.clear();
+        _clearShutdownState();
       }
       _operationSessionIdentity = operationIdentity;
       _operationGeneration = operationGeneration;
@@ -1538,6 +1615,10 @@ class EmulatorModel extends ChangeNotifier {
           .toList();
       loading = false;
       error = (response['provider_errors'] as List? ?? []).join('\n');
+      if (!_capabilities.allows('host.emulator_shutdown.v1')) _clearShutdownState();
+      _shutdownPending.removeWhere((id) => !instances.any((item) => item.id == id) ||
+          instances.any((item) => item.id == id && ['stopped', 'stopping', 'shutdown_failed'].contains(item.state)));
+
     } else if (response['type'] == 'previews' && id == _previewRequest) {
       dashboardActive = response['enabled'] == true;
       _previewAcknowledgedRequest = id is int ? id : 0;
@@ -1702,6 +1783,7 @@ class EmulatorModel extends ChangeNotifier {
       if (id == _inventoryRequest) {
         loading = false;
         _inventoryCurrent = false;
+        _clearShutdownState();
         _inventoryTimeout?.cancel();
       }
       if (id == _selectionRequest) {
@@ -1780,6 +1862,7 @@ class EmulatorModel extends ChangeNotifier {
     _operationSessionIdentity = '';
     _capabilities = RemoteCapabilitySet.fromWire(null);
     _inventoryCurrent = false;
+    _clearShutdownState();
     _hostStatusLoading = false;
     _hostWindowsLoading = false;
     _phoneWorkspaceLoading = false;
@@ -1848,6 +1931,7 @@ class EmulatorModel extends ChangeNotifier {
     _hostStatusStartedMonotonicMs = -1;
     _gatewayStatusStartedMonotonicMs = -1;
     _inventoryCurrent = false;
+    _clearShutdownState();
     hostSnapshot = null;
     hostWindowsSnapshot = null;
     focusedHostWindow = null;
@@ -1889,6 +1973,7 @@ class EmulatorModel extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _clearShutdownState();
     _selectionTimeout?.cancel();
     _inventoryTimeout?.cancel();
     _desktopTimeout?.cancel();

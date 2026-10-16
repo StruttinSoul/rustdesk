@@ -838,9 +838,9 @@ class _FileManagerViewState extends State<FileManagerView> {
                       ? null
                       : Text(
                           "${entries[index].lastModified().toString().replaceAll(".000", "")}   $sizeStr",
-                          style: const TextStyle(
+                          style: TextStyle(
                               fontSize: 12,
-                              color: MirpgRemoteTheme.textSecondary),
+                              color: MirpgStudioPalette.of(context).textSecondary),
                         ),
                   trailing: entries[index].isDrive
                       ? null
@@ -948,9 +948,10 @@ class _FileManagerViewState extends State<FileManagerView> {
 
   Widget headTools() => Container(
       padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
-      decoration: const BoxDecoration(
-        color: MirpgRemoteTheme.surface,
-        border: Border(bottom: BorderSide(color: MirpgRemoteTheme.divider)),
+      decoration: BoxDecoration(
+        color: MirpgStudioPalette.of(context).surface,
+        border: Border(bottom: BorderSide(
+            color: MirpgStudioPalette.of(context).divider)),
       ),
       child: Row(
         children: [
@@ -1023,14 +1024,14 @@ class _FileManagerViewState extends State<FileManagerView> {
               padding: EdgeInsets.fromLTRB(30, 5, 30, 0),
               child: Text(
                 controller.directory.value.path,
-                style: const TextStyle(color: MirpgRemoteTheme.textSecondary),
+                style: TextStyle(color: MirpgStudioPalette.of(context).textSecondary),
               ),
             ),
             Padding(
               padding: EdgeInsets.all(2),
               child: Text(
                 "${translate("Total")}: ${controller.directory.value.entries.length} ${translate("items")}",
-                style: const TextStyle(color: MirpgRemoteTheme.textSecondary),
+                style: TextStyle(color: MirpgStudioPalette.of(context).textSecondary),
               ),
             )
           ],
@@ -1081,9 +1082,9 @@ class BottomSheetBody extends StatelessWidget {
             height: 65,
             alignment: Alignment.centerLeft,
             decoration: BoxDecoration(
-                color: MirpgRemoteTheme.raised,
-                border: const Border(
-                    top: BorderSide(color: MirpgRemoteTheme.outline)),
+                color: MirpgStudioPalette.of(context).raised,
+                border: Border(top: BorderSide(
+                    color: MirpgStudioPalette.of(context).outline)),
                 borderRadius: const BorderRadius.vertical(
                     top: Radius.circular(MirpgRemoteTheme.sheetRadius))),
             child: Padding(

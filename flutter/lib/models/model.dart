@@ -1992,6 +1992,7 @@ class VirtualMouseMode with ChangeNotifier {
 class ImageModel with ChangeNotifier {
   ui.Image? _image;
   final Map<int, ui.Image> _dashboardImages = {};
+  final Stopwatch _presentationClock = Stopwatch()..start();
   final Map<int, DateTime> _dashboardImageUpdatedAt = {};
   final Map<int, int> _dashboardImagePreviewRequest = {};
   ui.Image? dashboardImage(int channel) => _dashboardImages[channel];
@@ -2069,6 +2070,11 @@ class ImageModel with ChangeNotifier {
   }
 
   decodeAndUpdate(int display, Uint8List rgba) async {
+    final emulator = parent.target?.emulatorModel;
+    if (emulator != null &&
+        !emulator.framePacer.shouldPresent(display, _presentationClock.elapsed)) {
+      return;
+    }
     if (parent.target?.emulatorModel.dashboardActive == true) {
       await _decodeDashboard(display, rgba);
       return;

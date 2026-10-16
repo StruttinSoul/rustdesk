@@ -2337,183 +2337,261 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     );
   }
 
+  Widget _sessionRail(List<Widget> controls) => Material(
+        color: const Color(0xFF151D21),
+        child: SizedBox(
+          width: 56,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: controls,
+          ),
+        ),
+      );
+
   @override
-  Widget build(BuildContext context) => Column(children: [
-        if (_toolbarVisible) _sessionTopBar(),
-        Expanded(child: LayoutBuilder(builder: (context, box) {
-          final size = Size(box.maxWidth, box.maxHeight);
-          if (size.isEmpty || widget.desktopSize.isEmpty) {
-            return const Center(child: CircularProgressIndicator());
+  Widget build(BuildContext context) => LayoutBuilder(builder: (context, box) {
+        final precision = _toolbarVisible && _precision && !_directTouch;
+        final height = box.maxHeight - (precision ? 64 : 0);
+        // Place controls along the axis that preserves the largest whole image.
+        final railScale = math.min(
+            (box.maxWidth - 112) / widget.desktopSize.width,
+            height / widget.desktopSize.height);
+        final barScale = math.min(box.maxWidth / widget.desktopSize.width,
+            (height - 124) / widget.desktopSize.height);
+        if (_toolbarVisible &&
+            height >= 240 &&
+            box.maxWidth >= 400 &&
+            railScale > barScale) {
+          return Column(children: [
+            Expanded(
+                child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                  _sessionRail([
+                    _toolbarButton('Dashboard', Icons.arrow_back_rounded,
+                        widget.onDashboard),
+                    _toolbarButton(
+                        'Fit view',
+                        Icons.fit_screen_outlined,
+                        () => setState(
+                            () => _applyPreset(_MonitorViewPreset.fit)),
+                        selected: _viewPreset == _MonitorViewPreset.fit),
+                    _toolbarButton(
+                        'Readable view',
+                        Icons.text_fields_rounded,
+                        () => setState(
+                            () => _applyPreset(_MonitorViewPreset.readable)),
+                        selected: _viewPreset == _MonitorViewPreset.readable),
+                    _toolbarButton('Switch view', Icons.view_carousel_outlined,
+                        widget.onSwitchView),
+                  ]),
+                  Expanded(child: _remoteViewport()),
+                  _sessionRail([
+                    _sessionMenu(),
+                    _toolbarButton(
+                        'Input mode: ${_directTouch ? 'Touch' : 'Mouse'}',
+                        _directTouch
+                            ? Icons.touch_app_outlined
+                            : Icons.mouse_outlined,
+                        _toggleInputMode,
+                        selected: _directTouch),
+                    if (_directTouch)
+                      _toolbarButton('Pan mode', Icons.pan_tool_alt_outlined,
+                          () => setState(() => _panMode = !_panMode),
+                          selected: _panMode)
+                    else
+                      _toolbarButton('Precision mode', Icons.gps_fixed, () {
+                        final next = !_precision;
+                        if (!next) _releaseVisibleHeldControls();
+                        setState(() => _precision = next);
+                        _emitPreferences();
+                      }, selected: _precision),
+                    _toolbarButton('Keyboard', Icons.keyboard_outlined,
+                        _canSendInput ? widget.onKeyboard : null),
+                  ]),
+                ])),
+            if (precision) _precisionToolbar(),
+          ]);
+        }
+        return Column(children: [
+          if (_toolbarVisible) _sessionTopBar(),
+          Expanded(child: _remoteViewport()),
+          if (precision) _precisionToolbar(),
+          if (_toolbarVisible) _sessionToolbar(),
+        ]);
+      });
+
+  Widget _remoteViewport() => LayoutBuilder(builder: (context, box) {
+        final size = Size(box.maxWidth, box.maxHeight);
+        if (size.isEmpty || widget.desktopSize.isEmpty) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (_viewport != size) {
+          _viewport = size;
+          _fit = math.min(size.width / widget.desktopSize.width,
+              size.height / widget.desktopSize.height);
+          if (_viewPreset == _MonitorViewPreset.readable) {
+            _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
+          } else if (_viewPreset == _MonitorViewPreset.fit) {
+            _zoom = 1;
+          } else {
+            _zoom ??= 1;
           }
-          if (_viewport != size) {
-            _viewport = size;
-            _fit = math.min(size.width / widget.desktopSize.width,
-                size.height / widget.desktopSize.height);
-            if (_viewPreset == _MonitorViewPreset.readable) {
-              _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
-            } else if (_viewPreset == _MonitorViewPreset.fit) {
-              _zoom = 1;
-            } else {
-              _zoom ??= 1;
-            }
-            _offset = size.center(Offset.zero) - _cursor * _scale;
-            _limitOffset();
-          }
-          final floatingMouse = _floatingMouseTopLeft();
-          return Stack(children: [
-            Positioned.fill(
-                child: Listener(
-                    onPointerDown: _rawPointerDown,
-                    onPointerUp: _rawPointerUp,
-                    onPointerCancel: _rawPointerUp,
-                    child: Semantics(
-                        label: _directTouch
-                            ? 'Windows direct touch interaction. Tap where you want to click, swipe to drag, hold to right-click, pinch to zoom, and drag with two fingers to scroll.'
-                            : 'Windows mouse interaction. Swipe with one finger to move the pointer, tap to click, hold to right-click, pinch to zoom, and drag with two fingers to scroll.',
-                        child: GestureDetector(
-                            key: const ValueKey('monitor-trackpad'),
-                            behavior: HitTestBehavior.opaque,
-                            onTapDown: _panMode
-                                ? null
-                                : (details) =>
-                                    _tapLocalPosition = details.localPosition,
-                            onTap: _panMode ? null : _tap,
-                            onLongPressStart: _canSendInput && !_panMode
-                                ? (details) {
-                                    if (_doubleTapCandidate ||
-                                        _doubleTapHoldTimer != null ||
-                                        _gestureDragHeld) {
+          _offset = size.center(Offset.zero) - _cursor * _scale;
+          _limitOffset();
+        }
+        final floatingMouse = _floatingMouseTopLeft();
+        final frameStatus =
+            widget.frameStatus ?? (widget.localViewOnly ? 'View only' : null);
+        return Stack(children: [
+          Positioned.fill(
+              child: Listener(
+                  onPointerDown: _rawPointerDown,
+                  onPointerUp: _rawPointerUp,
+                  onPointerCancel: _rawPointerUp,
+                  child: Semantics(
+                      label: _directTouch
+                          ? 'Windows direct touch interaction. Tap where you want to click, swipe to drag, hold to right-click, pinch to zoom, and drag with two fingers to scroll.'
+                          : 'Windows mouse interaction. Swipe with one finger to move the pointer, tap to click, hold to right-click, pinch to zoom, and drag with two fingers to scroll.',
+                      child: GestureDetector(
+                          key: const ValueKey('monitor-trackpad'),
+                          behavior: HitTestBehavior.opaque,
+                          onTapDown: _panMode
+                              ? null
+                              : (details) =>
+                                  _tapLocalPosition = details.localPosition,
+                          onTap: _panMode ? null : _tap,
+                          onLongPressStart: _canSendInput && !_panMode
+                              ? (details) {
+                                  if (_doubleTapCandidate ||
+                                      _doubleTapHoldTimer != null ||
+                                      _gestureDragHeld) {
+                                    return;
+                                  }
+                                  if (_directTouch) {
+                                    if (_directDesktopPoint(
+                                            details.localPosition) ==
+                                        null) {
                                       return;
                                     }
-                                    if (_directTouch) {
-                                      if (_directDesktopPoint(
-                                              details.localPosition) ==
-                                          null) {
-                                        return;
-                                      }
-                                      _directLongPressed = true;
-                                      _releaseDirectDrag();
-                                      setState(() => _moveToDirectLocal(
-                                          details.localPosition));
-                                    } else if (_cursorOffset) {
-                                      setState(() =>
-                                          _moveToLocal(details.localPosition));
-                                    }
-                                    widget.onPointer(3, _cursor);
+                                    _directLongPressed = true;
+                                    _releaseDirectDrag();
+                                    setState(() => _moveToDirectLocal(
+                                        details.localPosition));
+                                  } else if (_cursorOffset) {
+                                    setState(() =>
+                                        _moveToLocal(details.localPosition));
                                   }
-                                : null,
-                            onScaleStart: (details) {
-                              _fingers = details.pointerCount;
-                              _maxFingers = details.pointerCount;
-                              _lastFocal = details.localFocalPoint;
-                              _gestureScale = 1;
-                              _wheel = 0;
-                              _twoFingerMode = _TwoFingerMode.undecided;
-                              _twoFingerUpdates = 0;
-                              _twoFingerStartScale = 1;
-                              _twoFingerPendingDelta = Offset.zero;
-                            },
-                            onScaleUpdate: _scaleUpdate,
-                            onScaleEnd: _scaleEnd,
-                            child: ClipRect(
-                                child: Stack(children: [
+                                  widget.onPointer(3, _cursor);
+                                }
+                              : null,
+                          onScaleStart: (details) {
+                            _fingers = details.pointerCount;
+                            _maxFingers = details.pointerCount;
+                            _lastFocal = details.localFocalPoint;
+                            _gestureScale = 1;
+                            _wheel = 0;
+                            _twoFingerMode = _TwoFingerMode.undecided;
+                            _twoFingerUpdates = 0;
+                            _twoFingerStartScale = 1;
+                            _twoFingerPendingDelta = Offset.zero;
+                          },
+                          onScaleUpdate: _scaleUpdate,
+                          onScaleEnd: _scaleEnd,
+                          child: ClipRect(
+                              child: Stack(children: [
+                            Positioned(
+                                key: const ValueKey('monitor-frame'),
+                                left: _offset.dx,
+                                top: _offset.dy,
+                                width: widget.desktopSize.width * _scale,
+                                height: widget.desktopSize.height * _scale,
+                                child: RawImage(
+                                    image: widget.image,
+                                    fit: BoxFit.fill,
+                                    filterQuality: FilterQuality.medium)),
+                            if (widget.image == null)
+                              const Center(child: CircularProgressIndicator()),
+                            if (widget.canControl)
                               Positioned(
-                                  key: const ValueKey('monitor-frame'),
-                                  left: _offset.dx,
-                                  top: _offset.dy,
-                                  width: widget.desktopSize.width * _scale,
-                                  height: widget.desktopSize.height * _scale,
-                                  child: RawImage(
-                                      image: widget.image,
-                                      fit: BoxFit.fill,
-                                      filterQuality: FilterQuality.medium)),
-                              if (widget.image == null)
-                                const Center(
-                                    child: CircularProgressIndicator()),
-                              if (widget.canControl)
-                                Positioned(
-                                    left: _offset.dx + _cursor.dx * _scale - 3,
-                                    top: _offset.dy + _cursor.dy * _scale - 3,
-                                    child: const IgnorePointer(
-                                        child: Icon(Icons.north_west,
-                                            size: 24,
-                                            color: Colors.white,
-                                            shadows: [
-                                          Shadow(
-                                              blurRadius: 3,
-                                              color: Colors.black)
-                                        ]))),
-                            ])))))),
-            if ((_zoom ?? 1) > 1.01)
-              Positioned(top: 12, right: 12, child: _minimap()),
-            if (_dragLocked ||
-                _gestureDragHeld ||
-                _panMode ||
-                (_precision && !_directTouch) ||
-                (_cursorOffset && !_directTouch))
-              Positioned(top: 12, left: 12, child: _modeBadge()),
-            if (widget.frameStatus != null)
-              Positioned(
-                  top: 12,
-                  left: 0,
-                  right: 0,
-                  child: IgnorePointer(
-                      child: Center(
-                          child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                  color: const Color(0xE61C2225),
-                                  borderRadius: BorderRadius.circular(999)),
-                              child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 7),
-                                  child: Text(widget.frameStatus!,
-                                      style: const TextStyle(
+                                  left: _offset.dx + _cursor.dx * _scale - 3,
+                                  top: _offset.dy + _cursor.dy * _scale - 3,
+                                  child: const IgnorePointer(
+                                      child: Icon(Icons.north_west,
+                                          size: 24,
                                           color: Colors.white,
-                                          fontWeight: FontWeight.w600))))))),
-            if (_mouseButtonsVisible && (!_precision || _directTouch))
-              Positioned(
-                  left: floatingMouse.dx,
-                  top: floatingMouse.dy,
-                  child: _floatingMouseButtons()),
-            if (_thumbwheelVisible)
-              Positioned(
-                  left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
-                  right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
-                  top: math.max(12, (_viewport.height - 144) / 2),
-                  child: _thumbwheel()),
-            if (_toolbarVisible && _panel != _MonitorPanel.none)
-              Positioned(
-                  left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
-                  right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
-                  bottom: 12,
-                  child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                          maxWidth: math.max(0, _viewport.width - 16)),
-                      child: _panel == _MonitorPanel.actions
-                          ? _actionsPanel()
-                          : _displayPanel())),
-            if (!_toolbarVisible)
-              Positioned(
-                  left: _toolbarDock == MonitorToolbarDock.left ? 4 : null,
-                  right: _toolbarDock == MonitorToolbarDock.right ? 4 : null,
-                  bottom: 4,
-                  child: Material(
-                      color: const Color(0xF2191F22),
-                      elevation: 8,
-                      borderRadius: BorderRadius.circular(14),
-                      child: IconButton(
-                          tooltip: 'Show toolbar',
-                          color: Colors.white,
-                          icon: const Icon(Icons.keyboard_arrow_up),
-                          onPressed: () {
-                            setState(() => _toolbarVisible = true);
-                            _emitPreferences();
-                          }))),
-          ]);
-        })),
-        if (_toolbarVisible && _precision && !_directTouch) _precisionToolbar(),
-        if (_toolbarVisible) _sessionToolbar(),
-      ]);
+                                          shadows: [
+                                        Shadow(
+                                            blurRadius: 3, color: Colors.black)
+                                      ]))),
+                          ])))))),
+          if ((_zoom ?? 1) > 1.01)
+            Positioned(top: 12, right: 12, child: _minimap()),
+          if (_dragLocked ||
+              _gestureDragHeld ||
+              _panMode ||
+              (_precision && !_directTouch) ||
+              (_cursorOffset && !_directTouch))
+            Positioned(top: 12, left: 12, child: _modeBadge()),
+          if (frameStatus != null)
+            Positioned(
+                top: 12,
+                left: 0,
+                right: 0,
+                child: IgnorePointer(
+                    child: Center(
+                        child: DecoratedBox(
+                            decoration: BoxDecoration(
+                                color: const Color(0xE61C2225),
+                                borderRadius: BorderRadius.circular(999)),
+                            child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 7),
+                                child: Text(frameStatus,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w600))))))),
+          if (_mouseButtonsVisible && (!_precision || _directTouch))
+            Positioned(
+                left: floatingMouse.dx,
+                top: floatingMouse.dy,
+                child: _floatingMouseButtons()),
+          if (_thumbwheelVisible)
+            Positioned(
+                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
+                top: math.max(12, (_viewport.height - 144) / 2),
+                child: _thumbwheel()),
+          if (_toolbarVisible && _panel != _MonitorPanel.none)
+            Positioned(
+                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
+                bottom: 12,
+                child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                        maxWidth: math.max(0, _viewport.width - 16)),
+                    child: _panel == _MonitorPanel.actions
+                        ? _actionsPanel()
+                        : _displayPanel())),
+          if (!_toolbarVisible)
+            Positioned(
+                left: _toolbarDock == MonitorToolbarDock.left ? 4 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 4 : null,
+                bottom: 4,
+                child: Material(
+                    color: const Color(0xF2191F22),
+                    elevation: 8,
+                    borderRadius: BorderRadius.circular(14),
+                    child: IconButton(
+                        tooltip: 'Show toolbar',
+                        color: Colors.white,
+                        icon: const Icon(Icons.keyboard_arrow_up),
+                        onPressed: () {
+                          setState(() => _toolbarVisible = true);
+                          _emitPreferences();
+                        }))),
+        ]);
+      });
 }
 
 enum _MonitorPanel { none, actions, display }

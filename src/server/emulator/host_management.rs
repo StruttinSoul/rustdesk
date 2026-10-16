@@ -256,6 +256,10 @@ pub fn handle_request_scoped(
             ),
             "process_end_failed",
         ),
+        "emulator_shutdown" => match super::shutdown_windows::request(&request.component) {
+            Ok(message) => serde_json::json!({"ok": true, "accepted": true, "message": message}),
+            Err(error) => serde_json::json!({"ok": false, "accepted": true, "error_code": "emulator_shutdown_failed", "error": error.to_string()}),
+        },
         "recover" => mutation_result(
             recover_component(&request.component),
             "recover_component_failed",

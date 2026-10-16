@@ -2989,6 +2989,12 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
             s.request_emulator(value);
             return;
         }
+        if key == "dashboard-preview-mode" {
+            if let Ok(preview) = value.parse::<bool>() {
+                s.set_dashboard_preview_mode(preview);
+            }
+            return;
+        }
         if key == "manual-clipboard-request" {
             if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
                 let request_id = payload

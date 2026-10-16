@@ -81,16 +81,21 @@ fn make_tray() -> hbb_common::ResultType<()> {
         tray_menu.append_items(&[&open_i]).ok();
     }
     let tooltip = |count: usize| {
+        let display_name = if cfg!(windows) && !crate::is_custom_client() {
+            "Aperture".to_owned()
+        } else {
+            crate::get_app_name()
+        };
         if count == 0 {
             format!(
                 "{} {}",
-                crate::get_app_name(),
+                display_name,
                 translate("Service is running".to_owned()),
             )
         } else {
             format!(
                 "{} - {}\n{}",
-                crate::get_app_name(),
+                display_name,
                 translate("Ready".to_owned()),
                 translate("{".to_string() + &format!("{count}") + "} sessions"),
             )
@@ -306,7 +311,11 @@ fn load_icon_from_asset() -> Option<image::DynamicImage> {
     #[cfg(target_os = "macos")]
     let path = path.join("../Frameworks/App.framework/Resources/flutter_assets/assets/icon.png");
     #[cfg(windows)]
-    let path = path.join(r"data\flutter_assets\assets\icon.png");
+    let path = path.join(if crate::is_custom_client() {
+        r"data\flutter_assets\assets\icon.png"
+    } else {
+        r"data\flutter_assets\assets\aperture_icon.png"
+    });
     #[cfg(target_os = "linux")]
     let path = path.join(r"data/flutter_assets/assets/icon.png");
     if path.exists() {

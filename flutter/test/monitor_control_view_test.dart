@@ -52,6 +52,47 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
   }
 
+  for (final size in [const Size(798, 384), const Size(384, 832)]) {
+    testWidgets('Fit uses the available screen at $size with controls visible',
+        (tester) async {
+      await tester.binding.setSurfaceSize(size);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      var switches = 0;
+      await show(tester, switchView: () => switches++, dashboard: () {});
+      final frame = tester.getRect(find.byKey(const ValueKey('monitor-frame')));
+      if (size.width > size.height) {
+        expect(frame.height, closeTo(size.height, 0.01));
+      } else {
+        expect(frame.width, closeTo(size.width, 0.01));
+      }
+      for (final tooltip in const [
+        'Fit view',
+        'Readable view',
+        'Input mode: Mouse',
+        'Precision mode',
+        'Keyboard',
+        'Switch view',
+        'Dashboard',
+        'Session controls',
+      ]) {
+        final control = find.byTooltip(tooltip);
+        expect(control.hitTestable(), findsOneWidget, reason: tooltip);
+        final button = find.ancestor(
+            of: control,
+            matching: find.byWidgetPredicate(
+                (widget) => widget is IconButton || widget is PopupMenuButton));
+        final rect =
+            tester.getRect(button.evaluate().isEmpty ? control : button.first);
+        expect(rect.width, greaterThanOrEqualTo(48), reason: tooltip);
+        expect(rect.height, greaterThanOrEqualTo(48), reason: tooltip);
+        expect(rect.overlaps(frame), isFalse, reason: tooltip);
+      }
+      await tester.tap(find.byTooltip('Switch view'));
+      expect(switches, 1);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('stale video is visibly marked while controls stay disabled',
       (tester) async {
     await show(tester,

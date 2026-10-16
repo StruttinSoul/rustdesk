@@ -292,6 +292,8 @@ impl RendezvousMediator {
         tokio::spawn(async move {
             direct_server(server_cloned).await;
         });
+        #[cfg(target_os = "windows")]
+        tokio::spawn(crate::lan::serve_secure(server.clone()));
         #[cfg(target_os = "android")]
         let start_lan_listening = true;
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
