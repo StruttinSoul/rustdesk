@@ -1527,6 +1527,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         },
         child: Scaffold(
             backgroundColor: Colors.black,
+            // The remote view lays the phone keyboard over the picture itself.
+            resizeToAvoidBottomInset: false,
             body: SafeArea(
                 child: Stack(children: [
               Positioned.fill(

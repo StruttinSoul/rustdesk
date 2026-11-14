@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,25 +27,26 @@ void main() {
     await tester.pumpWidget(MaterialApp(
         theme: ThemeData(splashFactory: NoSplash.splashFactory),
         home: Scaffold(
+            resizeToAvoidBottomInset: false,
             body: MonitorControlView(
-          desktopSize: const Size(3840, 2160),
-          canControl: control,
-          preferences: preferences,
-          onPreferencesChanged: onPreferencesChanged,
-          onPointer: pointer ?? (_, __) {},
-          onScroll: scroll ?? (_) {},
-          onSmoothScroll: smoothScroll,
-          onKeyboard: keyboard ?? () {},
-          onTextInput: text,
-          onKeyTap: key,
-          onKeyState: keyState,
-          onSoftKeyboard: softKeyboard,
-          onSwitchView: switchView,
-          onDashboard: dashboard,
-          frameStatus: frameStatus,
-          onCtrlAltDel: ctrlAltDel,
-          onRestartTaskbar: restartTaskbar,
-        ))));
+              desktopSize: const Size(3840, 2160),
+              canControl: control,
+              preferences: preferences,
+              onPreferencesChanged: onPreferencesChanged,
+              onPointer: pointer ?? (_, __) {},
+              onScroll: scroll ?? (_) {},
+              onSmoothScroll: smoothScroll,
+              onKeyboard: keyboard ?? () {},
+              onTextInput: text,
+              onKeyTap: key,
+              onKeyState: keyState,
+              onSoftKeyboard: softKeyboard,
+              onSwitchView: switchView,
+              onDashboard: dashboard,
+              frameStatus: frameStatus,
+              onCtrlAltDel: ctrlAltDel,
+              onRestartTaskbar: restartTaskbar,
+            ))));
   }
 
   final surface = find.byKey(const ValueKey('monitor-surface'));
@@ -586,6 +589,110 @@ void main() {
     await tester.pump();
     expect(composes, 1);
     expect(find.byKey(const ValueKey('monitor-live-keyboard')), findsNothing);
+  });
+
+  group('typing keeps the PC visible', () {
+    test('pan keeps a low tap above the keyboard', () {
+      expect(
+          monitorKeyboardPanDy(
+              offsetDy: 0, scale: 1, tapDesktopY: 500, visibleHeight: 300),
+          300 - 24 - 500);
+    });
+
+    test('pan leaves a visible tap alone', () {
+      expect(
+          monitorKeyboardPanDy(
+              offsetDy: 0, scale: 1, tapDesktopY: 100, visibleHeight: 300),
+          0);
+    });
+
+    test('pan brings a tap above the top back down', () {
+      expect(
+          monitorKeyboardPanDy(
+              offsetDy: -400, scale: 1, tapDesktopY: 100, visibleHeight: 300),
+          24 - 100);
+    });
+
+    const portrait = Size(384, 832);
+    final bar = find.byType(MonitorLiveKeyboardBar);
+    final topBar = find.byKey(const ValueKey('monitor-top-bar'));
+
+    Future<List<Offset>> openTyping(WidgetTester tester,
+        {double inset = 300}) async {
+      await tester.binding.setSurfaceSize(portrait);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      addTearDown(tester.view.resetViewInsets);
+      final points = <Offset>[];
+      await show(tester,
+          pointer: (_, point) => points.add(point),
+          text: (_) {},
+          key: (_) {},
+          keyState: (_, __) {});
+      await tester.tap(find.byTooltip('Keyboard'));
+      await tester.pump(const Duration(milliseconds: 200));
+      tester.view.viewInsets =
+          FakeViewPadding(bottom: inset * tester.view.devicePixelRatio);
+      await tester.pump();
+      await tester.pump();
+      return points;
+    }
+
+    double screenY(WidgetTester tester, Offset desktop) {
+      final rect = tester.getRect(frame);
+      return rect.top + desktop.dy / 2160 * rect.height;
+    }
+
+    testWidgets('typing hides the top bar and keeps the picture size',
+        (tester) async {
+      await tester.binding.setSurfaceSize(portrait);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await show(tester, text: (_) {}, key: (_) {}, keyState: (_, __) {});
+      expect(topBar, findsOneWidget);
+      final before = tester.getSize(frame);
+      await openTyping(tester);
+      expect(topBar, findsNothing);
+      expect(tester.getSize(frame), before);
+    });
+
+    testWidgets('key strip sits on the phone keyboard', (tester) async {
+      await openTyping(tester);
+      expect(tester.getRect(bar).bottom, portrait.height - 300);
+    });
+
+    testWidgets('tap near the bottom scrolls above the keyboard',
+        (tester) async {
+      final points = await openTyping(tester);
+      final rect = tester.getRect(frame);
+      final lowest = math.min(rect.bottom, tester.getRect(bar).top) - 4;
+      await tester.tapAt(Offset(rect.center.dx, lowest));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(points, isNotEmpty);
+      expect(screenY(tester, points.last),
+          lessThanOrEqualTo(tester.getRect(bar).top - 23));
+    });
+
+    testWidgets('keyboard height change re-pans without rescaling',
+        (tester) async {
+      final points = await openTyping(tester);
+      final size = tester.getSize(frame);
+      final rect = tester.getRect(frame);
+      final lowest = math.min(rect.bottom, tester.getRect(bar).top) - 4;
+      await tester.tapAt(Offset(rect.center.dx, lowest));
+      await tester.pump(const Duration(milliseconds: 400));
+      tester.view.viewInsets =
+          FakeViewPadding(bottom: 200 * tester.view.devicePixelRatio);
+      await tester.pump();
+      await tester.pump();
+      expect(tester.getSize(frame), size);
+      expect(screenY(tester, points.last), lessThan(tester.getRect(bar).top));
+    });
+
+    testWidgets('closing the keyboard restores the top bar', (tester) async {
+      await openTyping(tester);
+      await tester.tap(find.byTooltip('Close keyboard'));
+      await tester.pump();
+      expect(topBar, findsOneWidget);
+    });
   });
 
   testWidgets('live keyboard types straight into Windows', (tester) async {

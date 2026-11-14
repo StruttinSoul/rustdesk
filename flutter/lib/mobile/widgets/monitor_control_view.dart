@@ -380,6 +380,24 @@ class MonitorControlView extends StatefulWidget {
   State<MonitorControlView> createState() => _MonitorControlViewState();
 }
 
+/// New vertical offset of the remote picture so the last tap ([tapDesktopY],
+/// in desktop pixels) stays within [margin] of the visible area above the
+/// phone keyboard ([visibleHeight]). Unchanged when the tap is already visible.
+double monitorKeyboardPanDy({
+  required double offsetDy,
+  required double scale,
+  required double tapDesktopY,
+  required double visibleHeight,
+  double margin = 24,
+}) {
+  final y = offsetDy + tapDesktopY * scale;
+  if (y > visibleHeight - margin) {
+    return visibleHeight - margin - tapDesktopY * scale;
+  }
+  if (y < margin) return margin - tapDesktopY * scale;
+  return offsetDy;
+}
+
 class MonitorKeyboardPanel extends StatefulWidget {
   const MonitorKeyboardPanel(
       {super.key,
@@ -853,6 +871,14 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   final GlobalKey<MonitorLiveKeyboardBarState> _keyboardBarKey =
       GlobalKey<MonitorLiveKeyboardBarState>();
 
+  /// Height at the bottom of this view covered by the phone keyboard and the
+  /// key strip while typing.
+  double _keyboardReserve = 0;
+
+  /// Distance from this view's bottom edge to the screen's bottom edge.
+  double _screenGap = 0;
+  bool get _typing => _liveKeyboard && _liveKeyboardSupported;
+
   final Stopwatch _clock = Stopwatch()..start();
   final Map<int, Offset> _contacts = <int, Offset>{};
   final Map<int, Offset> _contactStarts = <int, Offset>{};
@@ -977,9 +1003,49 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         width <= _viewport.width
             ? (_viewport.width - width) / 2
             : _offset.dx.clamp(_viewport.width - width, 0).toDouble(),
-        height <= _viewport.height
-            ? (_viewport.height - height) / 2
-            : _offset.dy.clamp(_viewport.height - height, 0).toDouble());
+        _typing
+            ? _offset.dy
+                .clamp(
+                    math.min(_viewport.height - _keyboardReserve - height, 0),
+                    math.max(_viewport.height - height, 0))
+                .toDouble()
+            : height <= _viewport.height
+                ? (_viewport.height - height) / 2
+                : _offset.dy.clamp(_viewport.height - height, 0).toDouble());
+  }
+
+  /// Keeps the last tap just above the key strip while typing.
+  void _panToPointer() {
+    if (!_typing || _viewport.isEmpty) return;
+    _offset = Offset(
+        _offset.dx,
+        monitorKeyboardPanDy(
+            offsetDy: _offset.dy,
+            scale: _scale,
+            tapDesktopY: _pointer.dy,
+            visibleHeight: _viewport.height - _keyboardReserve));
+    _limitOffset();
+  }
+
+  void _measureKeyboard() {
+    if (!mounted || !_typing) return;
+    final box = context.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return;
+    final screen = MediaQuery.sizeOf(context).height;
+    final gap = math.max(
+        0.0, screen - box.localToGlobal(Offset(0, box.size.height)).dy);
+    final inset = MediaQuery.viewInsetsOf(context).bottom;
+    final strip = _keyboardBarKey.currentContext?.size?.height ?? 0;
+    final reserve = math.max(0.0, inset - gap) + strip;
+    if ((gap - _screenGap).abs() < 0.5 &&
+        (reserve - _keyboardReserve).abs() < 0.5) {
+      return;
+    }
+    setState(() {
+      _screenGap = gap;
+      _keyboardReserve = reserve;
+      _panToPointer();
+    });
   }
 
   void _revealFocusRect() {
@@ -1292,6 +1358,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _lastTapPoint = point;
     _lastTapAt = now;
     _sendMove(point);
+    if (_typing) setState(_panToPointer);
     switch (_armed) {
       case _ArmedButton.right:
         widget.onPointer(3, _pointer);
@@ -1756,6 +1823,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       );
 
   Widget _sessionTopBar() => Material(
+        key: const ValueKey('monitor-top-bar'),
         color: MirpgRemoteTheme.background,
         child: SafeArea(
           bottom: false,
@@ -2006,7 +2074,21 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   @override
   Widget build(BuildContext context) => LayoutBuilder(builder: (context, box) {
         final height = box.maxHeight;
-        final keyboard = _liveKeyboard && _liveKeyboardSupported;
+        final keyboard = _typing;
+        if (keyboard) {
+          // The phone keyboard covers the picture instead of shrinking it.
+          WidgetsBinding.instance
+              .addPostFrameCallback((_) => _measureKeyboard());
+          final inset = MediaQuery.viewInsetsOf(context).bottom;
+          return Stack(children: [
+            Positioned.fill(child: _remoteViewport()),
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: math.max(0.0, inset - _screenGap),
+                child: _liveKeyboardBar()),
+          ]);
+        }
         // Place controls along the axis that preserves the largest whole image.
         final railScale = math.min(
             (box.maxWidth - 112) / widget.desktopSize.width,
@@ -2071,17 +2153,21 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         }
         if (_viewport != size) {
           _viewport = size;
-          _fit = math.min(size.width / widget.desktopSize.width,
-              size.height / widget.desktopSize.height);
-          if (_viewPreset == _MonitorViewPreset.readable) {
-            _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
-          } else if (_viewPreset == _MonitorViewPreset.fit) {
-            _zoom = 1;
-          } else {
-            _zoom ??= 1;
+          // While typing the picture keeps its size; only its position moves.
+          if (!_typing || _fit == 0) {
+            _fit = math.min(size.width / widget.desktopSize.width,
+                size.height / widget.desktopSize.height);
+            if (_viewPreset == _MonitorViewPreset.readable) {
+              _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
+            } else if (_viewPreset == _MonitorViewPreset.fit) {
+              _zoom = 1;
+            } else {
+              _zoom ??= 1;
+            }
           }
           _offset = size.center(Offset.zero) - _pointer * _scale;
           _limitOffset();
+          _panToPointer();
         }
         final frameStatus =
             widget.frameStatus ?? (widget.localViewOnly ? 'View only' : null);
