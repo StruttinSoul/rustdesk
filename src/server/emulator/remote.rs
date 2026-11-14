@@ -15,6 +15,10 @@ pub const GUEST_EVENT_QUEUE_SIZE: usize = 8;
 pub enum GuestEvent {
     Response(EmulatorResponse),
     Frame(EmulatorVideoFrame),
+    Host {
+        generation: u64,
+        response: EmulatorResponse,
+    },
 }
 
 const HOST_OPERATION_REPLAY_LIMIT: usize = 64;

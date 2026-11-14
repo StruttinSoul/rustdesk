@@ -364,12 +364,106 @@ enum ConnAuditPrimaryAuth {
     TemporaryPassword = 2,
     PermanentPassword = 3,
     SwitchSides = 4,
+    DeviceKey = 5,
 }
 
 impl ConnAuditPrimaryAuth {
     fn as_i64(self) -> i64 {
         self as i64
     }
+}
+
+/// Outcome of a paired phone's `device_proof` in a login request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeviceProofDecision {
+    /// No proof: the existing login logic runs unchanged.
+    Absent,
+    /// Proof sent, but not on the encrypted LAN listener, not on a secured stream, or not for
+    /// the main remote connection (key login applies to `ConnType::DEFAULT_CONN` only).
+    Ignored,
+    /// All four conditions hold: 21120 listener, secured stream, listed key, valid signature.
+    Accepted,
+    /// Proof checked and refused. Only a listed key with a bad signature counts as a failure.
+    Rejected { counts_as_failure: bool },
+}
+
+/// Whether a "trust this phone" request may be honoured. Only a session that was authorized with
+/// a password may add a key, so a paired phone cannot enrol further keys by itself.
+fn pair_decision(
+    primary: ConnAuditPrimaryAuth,
+    authorized: bool,
+    secured: bool,
+    key: &[u8],
+) -> Result<(), &'static str> {
+    if !authorized
+        || !matches!(
+            primary,
+            ConnAuditPrimaryAuth::TemporaryPassword | ConnAuditPrimaryAuth::PermanentPassword
+        )
+    {
+        return Err("Pair from a password session");
+    }
+    if !secured {
+        return Err("Pair over an encrypted connection");
+    }
+    if key.len() != 32 {
+        return Err("Invalid key");
+    }
+    Ok(())
+}
+
+/// Trims the phone name, caps it at 64 characters and falls back to `Phone` when empty.
+fn normalize_pair_name(name: &str) -> String {
+    let name: String = name.trim().chars().take(64).collect();
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        "Phone".to_owned()
+    } else {
+        name
+    }
+}
+
+fn device_proof_decision(
+    secure_lan: bool,
+    stream_secured: bool,
+    proof: Option<&DeviceProof>,
+    trusted: impl Fn(&[u8]) -> bool,
+    host_id: &str,
+    hash: &Hash,
+    conn_type: i32,
+) -> DeviceProofDecision {
+    let Some(proof) = proof else {
+        return DeviceProofDecision::Absent;
+    };
+    if !secure_lan || !stream_secured || conn_type != ConnType::DEFAULT_CONN as i32 {
+        return DeviceProofDecision::Ignored;
+    }
+    if !trusted(&proof.public_key) {
+        return DeviceProofDecision::Rejected {
+            counts_as_failure: false,
+        };
+    }
+    if crate::aperture_device_proof::verify_proof(proof, host_id, hash, conn_type) {
+        DeviceProofDecision::Accepted
+    } else {
+        DeviceProofDecision::Rejected {
+            counts_as_failure: true,
+        }
+    }
+}
+
+/// The `ConnType` a login request asks for, as the client numbers it when signing a proof.
+fn login_request_conn_type(lr: &LoginRequest) -> i32 {
+    let conn_type = match lr.union {
+        None => ConnType::DEFAULT_CONN,
+        Some(login_request::Union::FileTransfer(_)) => ConnType::FILE_TRANSFER,
+        Some(login_request::Union::PortForward(_)) => ConnType::PORT_FORWARD,
+        Some(login_request::Union::ViewCamera(_)) => ConnType::VIEW_CAMERA,
+        Some(login_request::Union::Terminal(_)) => ConnType::TERMINAL,
+        // A login kind added later: never the value a main-connection proof was signed for.
+        Some(_) => return -1,
+    };
+    conn_type as i32
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -444,7 +538,7 @@ pub struct Connection {
     #[cfg(windows)]
     emulator_operation_generation: u64,
     #[cfg(windows)]
-    emulator_operation_replay: super::emulator::remote::HostOperationReplay,
+    emulator_host_worker: Option<super::emulator::host_worker::HostWorker>,
     clipboard: bool,
     audio: bool,
     file: bool,
@@ -522,6 +616,8 @@ pub struct Connection {
     // eg. post_conn_audit
     tx_post_seq: mpsc::UnboundedSender<(String, Value)>,
     conn_audit_primary_auth: ConnAuditPrimaryAuth,
+    // Accepted on the Aperture encrypted LAN listener (TCP 21120); gates device-key login.
+    secure_lan: bool,
     conn_audit_two_factor: ConnAuditTwoFactor,
     // Tracks read job IDs delegated to CM process.
     // When a read job is delegated to CM (via FS::ReadFile), the job id is added here.
@@ -614,6 +710,7 @@ impl Connection {
         let super::ConnectionMeta {
             control_permissions,
             controlled_context,
+            secure_lan,
         } = meta;
         // Android is not supported yet, so we always set control_permissions to None.
         #[cfg(target_os = "android")]
@@ -691,7 +788,7 @@ impl Connection {
             #[cfg(windows)]
             emulator_operation_generation: 1,
             #[cfg(windows)]
-            emulator_operation_replay: Default::default(),
+            emulator_host_worker: None,
             clipboard: Self::permission(keys::OPTION_ENABLE_CLIPBOARD, &control_permissions),
             audio: Self::permission(keys::OPTION_ENABLE_AUDIO, &control_permissions),
             // to-do: make sure is the option correct here
@@ -769,6 +866,7 @@ impl Connection {
             terminal_user_token: None,
             terminal_generic_service: None,
             conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
+            secure_lan,
             conn_audit_two_factor: ConnAuditTwoFactor::None,
         };
         let addr = hbb_common::try_into_v4(addr);
@@ -1404,6 +1502,11 @@ impl Connection {
                     }
                 },
             }
+        }
+
+        #[cfg(windows)]
+        {
+            conn.emulator_host_worker = None;
         }
 
         #[cfg(feature = "unix-file-copy-paste")]
@@ -2973,7 +3076,7 @@ impl Connection {
             self.emulator_operation_identity = uuid::Uuid::new_v4().to_string();
             self.emulator_operation_generation =
                 self.emulator_operation_generation.wrapping_add(1).max(1);
-            self.emulator_operation_replay = Default::default();
+            self.emulator_host_worker = None;
         }
     }
 
@@ -3143,6 +3246,38 @@ impl Connection {
                 return self.handle_authorized_scope_violation(message).await;
             }
         }
+        if let Some(message::Union::AperturePairDeviceRequest(request)) = msg.union.as_ref() {
+            let result = pair_decision(
+                self.conn_audit_primary_auth,
+                self.authorized,
+                self.stream.is_secured(),
+                &request.public_key,
+            );
+            let mut response = base::message_proto::AperturePairDeviceResponse {
+                request_id: request.request_id,
+                ..Default::default()
+            };
+            match result {
+                Ok(()) => {
+                    let name = normalize_pair_name(&request.name);
+                    crate::server::aperture_trusted_phones::add(
+                        &request.public_key,
+                        &name,
+                        (get_time() / 1000) as u64,
+                    );
+                    log::info!("Paired phone {:?}, ip={}", name, self.ip);
+                    response.ok = true;
+                }
+                Err(error) => {
+                    log::trace!("Refused phone pairing request: {}", error);
+                    response.error = error.to_owned();
+                }
+            }
+            let mut message = Message::new();
+            message.set_aperture_pair_device_response(response);
+            self.send(message).await;
+            return true;
+        }
         #[cfg(windows)]
         if let Some(message::Union::EmulatorRequest(request)) = msg.union.as_ref() {
             return self.on_emulator_request(request.clone()).await;
@@ -3227,6 +3362,8 @@ impl Connection {
             if !self.check_id_whitelist().await {
                 return false;
             }
+            // Taken before `lr.union` is moved below; a device proof is bound to this type.
+            let device_proof_conn_type = login_request_conn_type(&lr);
             match lr.union {
                 Some(login_request::Union::FileTransfer(ft)) => {
                     if !Self::permission(
@@ -3364,7 +3501,64 @@ impl Connection {
                         .await;
                 }
                 return true;
-            } else if self.is_recent_session(false) {
+            }
+            // Device-key login from a paired phone. A proof sent with a password is ignored
+            // here so the password path decides (the phone never sends both).
+            let device_proof = if lr.password.is_empty() {
+                lr.device_proof.as_ref()
+            } else {
+                None
+            };
+            match device_proof_decision(
+                self.secure_lan,
+                self.stream.is_secured(),
+                device_proof,
+                crate::server::aperture_trusted_phones::is_trusted,
+                &Config::get_id(),
+                &self.hash,
+                device_proof_conn_type,
+            ) {
+                DeviceProofDecision::Absent => {}
+                DeviceProofDecision::Accepted => {
+                    let public_key = device_proof
+                        .map(|proof| proof.public_key.to_vec())
+                        .unwrap_or_default();
+                    self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::DeviceKey);
+                    crate::server::aperture_trusted_phones::touch(
+                        &public_key,
+                        (get_time() / 1000) as u64,
+                    );
+                    log::info!(
+                        "Device-key login accepted from paired phone {} ({}), ip={}",
+                        crate::aperture_device_proof::public_key_b64(&public_key),
+                        lr.my_name,
+                        self.ip
+                    );
+                    if !self.send_logon_response_and_keep_alive().await {
+                        return false;
+                    }
+                    self.try_start_cm(lr.my_id, lr.my_name, self.authorized);
+                    return true;
+                }
+                DeviceProofDecision::Ignored => {
+                    self.send_login_error(crate::client::LOGIN_MSG_DEVICE_KEY_REJECTED)
+                        .await;
+                    return true;
+                }
+                DeviceProofDecision::Rejected { counts_as_failure } => {
+                    if counts_as_failure {
+                        let (failure, res) = self.check_failure(0).await;
+                        if !res {
+                            return true;
+                        }
+                        self.update_failure_with_scope(failure, false, 0, FailureScope::Default);
+                    }
+                    self.send_login_error(crate::client::LOGIN_MSG_DEVICE_KEY_REJECTED)
+                        .await;
+                    return true;
+                }
+            }
+            if self.is_recent_session(false) {
                 if !self.send_logon_response_and_keep_alive().await {
                     return false;
                 }
@@ -5711,6 +5905,10 @@ impl Connection {
             return;
         }
         self.closed = true;
+        #[cfg(windows)]
+        {
+            self.emulator_host_worker = None;
+        }
         // If voice A,B -> C, and A,B has voice call
         // B disconnects, C will reset the voice call input.
         //
@@ -8551,5 +8749,194 @@ mod test {
         // is all three fields, and either of those is someone else's screen to lock.
         assert!(!replaced_by(&conn(3, remote, key(8, "peer")), 2, &mine));
         assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
+    }
+
+    mod pair_decision {
+        use super::super::{normalize_pair_name, pair_decision, ConnAuditPrimaryAuth};
+
+        const KEY: [u8; 32] = [7; 32];
+
+        #[test]
+        fn pairing_allowed_on_password_session() {
+            for primary in [
+                ConnAuditPrimaryAuth::TemporaryPassword,
+                ConnAuditPrimaryAuth::PermanentPassword,
+            ] {
+                assert_eq!(pair_decision(primary, true, true, &KEY), Ok(()));
+            }
+        }
+
+        #[test]
+        fn pairing_refused_on_key_authenticated_session() {
+            assert_eq!(
+                pair_decision(ConnAuditPrimaryAuth::DeviceKey, true, true, &KEY),
+                Err("Pair from a password session")
+            );
+        }
+
+        #[test]
+        fn pairing_refused_when_unauthorized() {
+            assert!(pair_decision(ConnAuditPrimaryAuth::PermanentPassword, false, true, &KEY).is_err());
+        }
+
+        #[test]
+        fn pairing_refused_on_unsecured_stream() {
+            assert_eq!(
+                pair_decision(ConnAuditPrimaryAuth::PermanentPassword, true, false, &KEY),
+                Err("Pair over an encrypted connection")
+            );
+        }
+
+        #[test]
+        fn pairing_rejects_bad_key_length() {
+            for len in [0usize, 31, 33] {
+                assert_eq!(
+                    pair_decision(
+                        ConnAuditPrimaryAuth::PermanentPassword,
+                        true,
+                        true,
+                        &vec![1; len],
+                    ),
+                    Err("Invalid key")
+                );
+            }
+        }
+
+        #[test]
+        fn pairing_name_is_trimmed_capped_and_defaulted() {
+            assert_eq!(normalize_pair_name("  Pixel 8  "), "Pixel 8");
+            assert_eq!(normalize_pair_name("   "), "Phone");
+            assert_eq!(normalize_pair_name(""), "Phone");
+            let long = "é".repeat(100);
+            assert_eq!(normalize_pair_name(&long).chars().count(), 64);
+        }
+    }
+
+    mod device_proof_decision {
+        use super::super::{device_proof_decision, DeviceProofDecision};
+        use crate::aperture_device_proof::sign_proof;
+        use base::message_proto::{DeviceProof, Hash};
+        use hbb_common::sodiumoxide::crypto::sign;
+
+        const HOST: &str = "373491561";
+
+        fn hash() -> Hash {
+            Hash {
+                salt: "salt".to_owned(),
+                challenge: "challenge".to_owned(),
+                ..Default::default()
+            }
+        }
+
+        fn signed() -> (Vec<u8>, DeviceProof) {
+            let (pk, sk) = sign::gen_keypair();
+            (pk.0.to_vec(), sign_proof(&sk, HOST, &hash(), 0))
+        }
+
+        fn decide(
+            secure_lan: bool,
+            stream_secured: bool,
+            proof: Option<&DeviceProof>,
+            listed: &[u8],
+        ) -> DeviceProofDecision {
+            device_proof_decision(
+                secure_lan,
+                stream_secured,
+                proof,
+                |key: &[u8]| key == listed,
+                HOST,
+                &hash(),
+                0,
+            )
+        }
+
+        #[test]
+        fn accepted_on_secure_lan_with_listed_key() {
+            let (pk, proof) = signed();
+            assert_eq!(
+                decide(true, true, Some(&proof), &pk),
+                DeviceProofDecision::Accepted
+            );
+        }
+
+        #[test]
+        fn proof_ignored_off_secure_lan_listener() {
+            let (pk, proof) = signed();
+            assert_eq!(
+                decide(false, true, Some(&proof), &pk),
+                DeviceProofDecision::Ignored
+            );
+        }
+
+        #[test]
+        fn proof_ignored_on_unsecured_stream() {
+            let (pk, proof) = signed();
+            assert_eq!(
+                decide(true, false, Some(&proof), &pk),
+                DeviceProofDecision::Ignored
+            );
+        }
+
+        #[test]
+        fn unlisted_key_rejected_without_failure_count() {
+            let (_pk, proof) = signed();
+            assert_eq!(
+                decide(true, true, Some(&proof), b"someone else"),
+                DeviceProofDecision::Rejected {
+                    counts_as_failure: false
+                }
+            );
+        }
+
+        #[test]
+        fn listed_key_bad_signature_counts_as_failure() {
+            let (pk, mut proof) = signed();
+            let mut sig = proof.signature.to_vec();
+            sig[0] ^= 1;
+            proof.signature = sig.into();
+            assert_eq!(
+                decide(true, true, Some(&proof), &pk),
+                DeviceProofDecision::Rejected {
+                    counts_as_failure: true
+                }
+            );
+            // A proof signed for another connection type or challenge is a bad signature too.
+            let rejected = DeviceProofDecision::Rejected {
+                counts_as_failure: true,
+            };
+            let (pk, sk) = sign::gen_keypair();
+            let pk = pk.0.to_vec();
+            let file_transfer_proof = sign_proof(&sk, HOST, &hash(), 1);
+            assert_eq!(decide(true, true, Some(&file_transfer_proof), &pk), rejected);
+            let (pk, proof) = signed();
+            let mut replay = hash();
+            replay.challenge = "next connection".to_owned();
+            assert_eq!(
+                device_proof_decision(true, true, Some(&proof), |k: &[u8]| k == &pk[..], HOST, &replay, 0),
+                rejected
+            );
+            assert_eq!(
+                device_proof_decision(true, true, Some(&proof), |k: &[u8]| k == &pk[..], "other-host", &hash(), 0),
+                rejected
+            );
+        }
+
+        #[test]
+        fn proof_ignored_for_non_default_conn_type() {
+            let (pk, sk) = sign::gen_keypair();
+            let pk = pk.0.to_vec();
+            // Correctly signed for file transfer, listed key, secure LAN, secured stream.
+            let proof = sign_proof(&sk, HOST, &hash(), 1);
+            assert_eq!(
+                device_proof_decision(true, true, Some(&proof), |k: &[u8]| k == &pk[..], HOST, &hash(), 1),
+                DeviceProofDecision::Ignored
+            );
+        }
+
+        #[test]
+        fn no_proof_is_absent() {
+            assert_eq!(decide(true, true, None, b""), DeviceProofDecision::Absent);
+            assert_eq!(decide(false, false, None, b""), DeviceProofDecision::Absent);
+        }
     }
 }

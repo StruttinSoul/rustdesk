@@ -13,6 +13,7 @@ use std::{
 };
 
 const VERIFIED_IDENTITY: &str = "aperture-lan-verified-identity";
+const LAST_ADDRESS: &str = "aperture-lan-last-address";
 const CANDIDATE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CANDIDATES: usize = 3;
 const DISCOVERY_BUDGET: Duration = Duration::from_millis(750);
@@ -25,6 +26,8 @@ type StartOutcome = (
         &'static str,
     ),
     (i32, String),
+    bool,
+    // True only when the secured LAN fast path produced the connection.
     bool,
 );
 
@@ -64,25 +67,41 @@ pub(super) async fn start(
         switch_back: !interface.get_switch_code().is_empty(),
         connection_type: conn_type,
     };
+    let normal = async {
+        let (connection, relay, direct_check) = normal.await?;
+        Ok((connection, relay, direct_check, false))
+    };
     if !policy.allows_lan() || !crate::common::is_valid_untrusted_peer_id(peer) {
+        hbb_common::log::info!("Aperture LAN path skipped: connection policy or peer id");
         return normal.await;
     }
-    let cached = PeerConfig::load(peer)
+    let peer_config = PeerConfig::load(peer);
+    let cached = peer_config.options.get(VERIFIED_IDENTITY).cloned();
+    let last_address = peer_config
         .options
-        .get(VERIFIED_IDENTITY)
-        .cloned();
+        .get(LAST_ADDRESS)
+        .and_then(|value| value.parse::<SocketAddr>().ok());
     let signed = cached
         .and_then(|value| crate::decode64(value).ok())
         .filter(|value| trusted_identity(peer, value, key));
     let Some(signed) = signed else {
+        hbb_common::log::info!("Aperture LAN path skipped: no verified identity saved for this peer");
         return normal.await;
     };
     let lan = async {
         let started = Instant::now();
-        let (stream, pk) = connect_discovered(peer, &signed, key, || {
-            private_candidates(peer, &config::LanPeers::load().peers)
+        let (stream, pk, address) = connect_discovered(peer, &signed, key, || {
+            private_candidates(peer, &config::LanPeers::load().peers, last_address)
         })
-        .await?;
+        .await
+        .map_err(|err| {
+            hbb_common::log::info!(
+                "Aperture LAN path failed after {:?}: {err}",
+                started.elapsed()
+            );
+            err
+        })?;
+        remember_lan_address(peer, address);
         hbb_common::log::info!(
             "Aperture secured LAN connection ready in {:?}",
             started.elapsed()
@@ -91,6 +110,7 @@ pub(super) async fn start(
             (stream, true, Some(pk), None, "TCP"),
             (0, String::new()),
             false,
+            true,
         ))
     };
     race_lan(lan, normal).await
@@ -101,7 +121,7 @@ async fn connect_discovered(
     signed: &[u8],
     key: &str,
     mut discover: impl FnMut() -> Vec<SocketAddr>,
-) -> ResultType<(Stream, Vec<u8>)> {
+) -> ResultType<(Stream, Vec<u8>, SocketAddr)> {
     let attempt = async {
         let mut attempted = HashSet::new();
         loop {
@@ -109,21 +129,33 @@ async fn connect_discovered(
                 if attempted.len() >= 8 || !attempted.insert(candidate) {
                     continue;
                 }
-                if let Ok(Ok(connection)) = tokio::time::timeout(
+                match tokio::time::timeout(
                     CANDIDATE_TIMEOUT,
                     connect_candidate(peer, candidate, signed, key),
                 )
                 .await
                 {
-                    return Ok(connection);
+                    Ok(Ok(connection)) => return Ok((connection.0, connection.1, candidate)),
+                    // At most 8 candidates per connection, so this stays bounded.
+                    Ok(Err(err)) => {
+                        hbb_common::log::info!("Aperture LAN candidate {candidate} failed: {err}")
+                    }
+                    Err(_) => hbb_common::log::info!(
+                        "Aperture LAN candidate {candidate} timed out after {:?}",
+                        CANDIDATE_TIMEOUT
+                    ),
                 }
             }
             tokio::time::sleep(Duration::from_millis(60)).await;
         }
     };
-    tokio::time::timeout(DISCOVERY_BUDGET, attempt)
-        .await
-        .map_err(|_| anyhow!("Saved peer is not reachable over secured LAN"))?
+    match tokio::time::timeout(DISCOVERY_BUDGET, attempt).await {
+        Ok(result) => result,
+        Err(_) => bail!(
+            "Saved peer is not reachable over secured LAN ({} candidate(s) known)",
+            discover().len()
+        ),
+    }
 }
 fn trusted_identity(peer: &str, signed: &[u8], key: &str) -> bool {
     if signed.is_empty() || signed.len() > 4096 {
@@ -153,7 +185,30 @@ pub(super) fn remember_verified_peer(peer: &str, signed: &[u8], key: &str, secur
     config.store(peer);
 }
 
-fn private_candidates(peer: &str, discovered: &[DiscoveryPeer]) -> Vec<SocketAddr> {
+fn storable_address(address: SocketAddr) -> bool {
+    matches!(address, SocketAddr::V4(v4)
+        if v4.ip().is_private() && v4.port() == crate::lan::SECURE_LAN_PORT)
+}
+
+// Called only after the candidate's identity was verified and its stream secured.
+fn remember_lan_address(peer: &str, address: SocketAddr) {
+    if !storable_address(address) {
+        return;
+    }
+    let value = address.to_string();
+    let mut config = PeerConfig::load(peer);
+    if config.options.get(LAST_ADDRESS) == Some(&value) {
+        return;
+    }
+    config.options.insert(LAST_ADDRESS.to_owned(), value);
+    config.store(peer);
+}
+
+fn private_candidates(
+    peer: &str,
+    discovered: &[DiscoveryPeer],
+    last: Option<SocketAddr>,
+) -> Vec<SocketAddr> {
     let mut ips: Vec<Ipv4Addr> = discovered
         .iter()
         .filter(|candidate| candidate.id == peer)
@@ -163,10 +218,18 @@ fn private_candidates(peer: &str, discovered: &[DiscoveryPeer]) -> Vec<SocketAdd
         .collect();
     ips.sort_unstable();
     ips.dedup();
-    ips.into_iter()
+    let mut candidates: Vec<SocketAddr> = ips
+        .into_iter()
         .take(MAX_CANDIDATES)
         .map(|ip| SocketAddr::from((ip, crate::lan::SECURE_LAN_PORT)))
-        .collect()
+        .collect();
+    if let Some(last) = last.filter(|last| storable_address(*last)) {
+        if !candidates.contains(&last) {
+            candidates.push(last);
+        }
+    }
+    candidates.truncate(MAX_CANDIDATES);
+    candidates
 }
 
 async fn connect_candidate(
@@ -343,13 +406,13 @@ mod identity_tests {
             .collect::<HashMap<_, _>>(),
             ..Default::default()
         }];
-        let candidates = private_candidates(ID, &discovered);
+        let candidates = private_candidates(ID, &discovered, None);
         assert_eq!(candidates.len(), 3);
         assert!(candidates
             .iter()
             .all(|address| address.port() == crate::lan::SECURE_LAN_PORT
                 && matches!(address.ip(), std::net::IpAddr::V4(ip) if ip.is_private())));
-        assert!(private_candidates("987654321", &discovered).is_empty());
+        assert!(private_candidates("987654321", &discovered, None).is_empty());
     }
 
     #[test]
@@ -456,6 +519,78 @@ mod identity_tests {
         (address, signed, crate::encode64(root.0), rx)
     }
 
+    fn stored(text: &str) -> Option<SocketAddr> {
+        Some(text.parse().unwrap())
+    }
+
+    fn discovered_with(ips: &[&str]) -> Vec<DiscoveryPeer> {
+        vec![DiscoveryPeer {
+            id: ID.to_owned(),
+            ip_mac: ips
+                .iter()
+                .map(|ip| ((*ip).to_owned(), String::new()))
+                .collect::<HashMap<_, _>>(),
+            ..Default::default()
+        }]
+    }
+
+    #[test]
+    fn stored_address_is_tried_when_discovery_is_empty() {
+        assert_eq!(
+            private_candidates(ID, &[], stored("10.0.4.93:21120")),
+            vec!["10.0.4.93:21120".parse::<SocketAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn stored_address_not_duplicated_and_respects_cap() {
+        let one = discovered_with(&["10.0.4.93"]);
+        assert_eq!(
+            private_candidates(ID, &one, stored("10.0.4.93:21120")).len(),
+            1
+        );
+        let two = discovered_with(&["10.0.4.1", "10.0.4.2"]);
+        let with_last = private_candidates(ID, &two, stored("10.0.4.93:21120"));
+        assert_eq!(with_last.len(), 3);
+        assert_eq!(with_last[2], "10.0.4.93:21120".parse().unwrap());
+        let full = discovered_with(&["10.0.4.1", "10.0.4.2", "10.0.4.3"]);
+        let capped = private_candidates(ID, &full, stored("10.0.4.93:21120"));
+        assert_eq!(capped.len(), MAX_CANDIDATES);
+        assert!(!capped.contains(&"10.0.4.93:21120".parse().unwrap()));
+    }
+
+    #[test]
+    fn public_or_wrong_port_stored_address_ignored() {
+        assert!(private_candidates(ID, &[], stored("8.8.8.8:21120")).is_empty());
+        assert!(private_candidates(ID, &[], stored("10.0.4.93:21118")).is_empty());
+        assert!(private_candidates(ID, &[], stored("[::1]:21120")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stored_address_with_wrong_identity_is_rejected() {
+        let (address, signed, key, received) = controlled_peer(false, true).await;
+        let result = connect_discovered(ID, &signed, &key, || vec![address]).await;
+        assert!(result.is_err());
+        assert!(!received.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn successful_connection_reports_the_address_that_won() {
+        let (address, signed, key, received) = controlled_peer(false, false).await;
+        let (_, _, won) = connect_discovered(ID, &signed, &key, || vec![address])
+            .await
+            .unwrap();
+        assert_eq!(won, address);
+        drop(received);
+    }
+
+    #[test]
+    fn remembered_address_requires_private_secure_lan_port() {
+        assert!(storable_address("10.0.4.93:21120".parse().unwrap()));
+        assert!(!storable_address("8.8.8.8:21120".parse().unwrap()));
+        assert!(!storable_address("10.0.4.93:21118".parse().unwrap()));
+    }
+
     #[tokio::test]
     async fn lan_candidate_authenticates_and_encrypts_application_bytes() {
         let (address, signed, key, received) = controlled_peer(false, false).await;
@@ -493,7 +628,7 @@ mod identity_tests {
     async fn fresh_discovery_can_arrive_after_connection_starts() {
         let (address, signed, key, received) = controlled_peer(false, false).await;
         let started = Instant::now();
-        let (mut stream, _) = connect_discovered(ID, &signed, &key, || {
+        let (mut stream, _, _) = connect_discovered(ID, &signed, &key, || {
             if started.elapsed() < Duration::from_millis(30) {
                 vec![]
             } else {

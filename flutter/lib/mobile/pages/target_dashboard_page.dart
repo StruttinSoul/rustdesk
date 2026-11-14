@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
 import '../../consts.dart'
     show kKeyFlutterKey, kPeerPlatformLinux, kPeerPlatformWindows;
@@ -154,6 +155,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     _peerInfoGeneration = widget.ffi.ffiModel.peerInfoGeneration;
     _reconnectGeneration = widget.ffi.ffiModel.reconnectGeneration;
     _scroll.addListener(_scrolled);
+    widget.ffi.aperturePairResult.addListener(_pairResultChanged);
+    unawaited(_refreshPairingState());
     unawaited(model.refresh());
     _refreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       // Inventory discovery stalls older hosts' video dispatch while it runs.
@@ -176,6 +179,63 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       _subscribe();
       unawaited(_loadQualityProfile());
     });
+  }
+
+  /// 'paired' | 'can-pair' | 'unavailable' (or empty until loaded).
+  String _pairingState = '';
+
+  Future<void> _refreshPairingState() async {
+    try {
+      final state = await bind.sessionGetCommon(
+          sessionId: widget.ffi.sessionId,
+          key: 'aperture-pairing-state',
+          param: '');
+      if (!mounted) return;
+      setState(() => _pairingState = state ?? '');
+    } catch (_) {
+      if (mounted) setState(() => _pairingState = 'unavailable');
+    }
+  }
+
+  Future<String> _defaultPhoneName() async {
+    try {
+      final info = await DeviceInfoPlugin().androidInfo;
+      final model = info.model.trim();
+      if (model.isNotEmpty) return model;
+    } catch (_) {}
+    return 'Phone';
+  }
+
+  Future<void> _trustThisPhone() async {
+    final name = await _defaultPhoneName();
+    await bind.sessionSetCommon(
+        sessionId: widget.ffi.sessionId,
+        key: 'aperture-pair-device',
+        value: name);
+  }
+
+  Future<void> _forgetPairing() async {
+    await bind.sessionSetCommon(
+        sessionId: widget.ffi.sessionId,
+        key: 'aperture-forget-pairing',
+        value: '');
+    await _refreshPairingState();
+  }
+
+  void _pairResultChanged() {
+    final evt = widget.ffi.aperturePairResult.value;
+    if (evt == null || !mounted) return;
+    final okRaw = evt['ok'];
+    final ok = okRaw == true || okRaw.toString().toLowerCase() == 'true';
+    final error = (evt['error'] ?? '').toString();
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(ok
+            ? 'This phone connects without a password at home'
+            : (error.isEmpty ? 'Pairing failed' : error)),
+      ));
+    unawaited(_refreshPairingState());
   }
 
   void _qualityChanged() {
@@ -378,6 +438,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final peerInfoGeneration = widget.ffi.ffiModel.peerInfoGeneration;
     if (peerInfoGeneration != _peerInfoGeneration) {
       _peerInfoGeneration = peerInfoGeneration;
+      unawaited(_refreshPairingState());
       model.invalidatePreviewAcknowledgement();
       if (_hasStoredQualityPreference) {
         unawaited(_applyQualityProfile(_qualityProfile, persist: false));
@@ -639,6 +700,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     model.removeListener(_changed);
     widget.ffi.ffiModel.removeListener(_changed);
     widget.ffi.qualityMonitorModel.removeListener(_qualityChanged);
+    widget.ffi.aperturePairResult.removeListener(_pairResultChanged);
     _scrollDebounce?.cancel();
     _refreshTimer?.cancel();
     _healthTimer?.cancel();
@@ -839,6 +901,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                   context,
                   ffi: widget.ffi,
                 )),
+                pairingState: _pairingState,
+                onTrustPhone: () => unawaited(_trustThisPhone()),
+                onForgetPairing: () => unawaited(_forgetPairing()),
                 onSettings: _openSettings,
                 onEndSession: () =>
                     clientClose(widget.ffi.sessionId, widget.ffi),
@@ -1946,6 +2011,8 @@ class ConnectedPcTabBar extends StatelessWidget {
 enum _ConnectedPcSessionAction {
   qualityConnection,
   privacyControls,
+  trustPhone,
+  forgetPairing,
   settings,
   endSession,
 }
@@ -1955,12 +2022,18 @@ class ConnectedPcSessionMenu extends StatelessWidget {
     super.key,
     this.onQualityConnection,
     this.onPrivacyControls,
+    this.pairingState = '',
+    this.onTrustPhone,
+    this.onForgetPairing,
     required this.onSettings,
     required this.onEndSession,
   });
 
   final VoidCallback? onQualityConnection;
   final VoidCallback? onPrivacyControls;
+  final String pairingState;
+  final VoidCallback? onTrustPhone;
+  final VoidCallback? onForgetPairing;
   final VoidCallback onSettings;
   final VoidCallback onEndSession;
 
@@ -1975,6 +2048,10 @@ class ConnectedPcSessionMenu extends StatelessWidget {
               onQualityConnection?.call();
             case _ConnectedPcSessionAction.privacyControls:
               onPrivacyControls?.call();
+            case _ConnectedPcSessionAction.trustPhone:
+              onTrustPhone?.call();
+            case _ConnectedPcSessionAction.forgetPairing:
+              onForgetPairing?.call();
             case _ConnectedPcSessionAction.settings:
               onSettings();
             case _ConnectedPcSessionAction.endSession:
@@ -1997,6 +2074,25 @@ class ConnectedPcSessionMenu extends StatelessWidget {
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.privacy_tip_outlined),
                 title: Text('Privacy & host controls'),
+              ),
+            ),
+          if (pairingState == 'can-pair' && onTrustPhone != null)
+            const PopupMenuItem(
+              value: _ConnectedPcSessionAction.trustPhone,
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.phonelink_lock_outlined),
+                title: Text('Trust this phone'),
+              ),
+            ),
+          if (pairingState == 'paired' && onForgetPairing != null)
+            const PopupMenuItem(
+              value: _ConnectedPcSessionAction.forgetPairing,
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.link_off),
+                title: Text('Forget pairing'),
+                subtitle: Text('This phone connects without a password at home'),
               ),
             ),
           const PopupMenuItem(

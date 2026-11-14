@@ -2743,6 +2743,14 @@ pub fn main_get_common(key: String) -> String {
         return ui_interface::is_permanent_password_set().to_string();
     } else if key == "local-permanent-password-set" {
         return ui_interface::is_local_permanent_password_set().to_string();
+    } else if key == "aperture-trusted-phones" {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        return match crate::ipc::get_config(crate::server::aperture_trusted_phones::OPTION_KEY) {
+            Ok(Some(v)) => v,
+            _ => "[]".to_owned(),
+        };
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        return "[]".to_owned();
     } else if key == "bluestacks-inventory" {
         #[cfg(target_os = "windows")]
         return crate::server::emulator::bluestacks::management_inventory_json();
@@ -2805,6 +2813,14 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
 }
 
 pub fn main_set_common(_key: String, _value: String) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if _key == "aperture-remove-trusted-phone" {
+        if let Err(e) = crate::ipc::set_data(&crate::ipc::Data::RemoveApertureTrustedPhone(_value))
+        {
+            log::error!("Failed to remove Aperture trusted phone: {}", e);
+        }
+        return;
+    }
     #[cfg(target_os = "windows")]
     if _key == "bluestacks-action" {
         let payload = _value.clone();
@@ -2995,6 +3011,14 @@ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
             }
             return;
         }
+        if key == "aperture-pair-device" {
+            s.request_aperture_pair_device(value);
+            return;
+        }
+        if key == "aperture-forget-pairing" {
+            s.forget_aperture_pairing();
+            return;
+        }
         if key == "continue-insecure-connection" {
             s.continue_insecure_connection(value == "Y");
             return;
@@ -3018,6 +3042,8 @@ pub fn session_get_common(
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
         let v = if key == "is_screenshot_supported" {
             s.is_screenshot_supported().to_string()
+        } else if key == "aperture-pairing-state" {
+            s.aperture_pairing_state().to_owned()
         } else {
             "".to_owned()
         };

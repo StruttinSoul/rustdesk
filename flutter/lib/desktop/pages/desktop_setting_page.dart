@@ -1035,6 +1035,9 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                 permissions(context),
                 password(context),
                 _Card(title: '2FA', children: [tfa()]),
+                _Card(
+                    title: 'Trusted phones',
+                    children: [_TrustedPhones(enabled: !locked)]),
                 if (!isChangeIdDisabled())
                   _Card(title: 'ID', children: [changeId()]),
                 more(context),
@@ -4332,3 +4335,115 @@ void changeSocks5Proxy() async {
 }
 
 //#endregion
+
+/// Phones paired for passwordless LAN login (host-side list, with Remove).
+class _TrustedPhones extends StatefulWidget {
+  const _TrustedPhones({required this.enabled});
+
+  final bool enabled;
+
+  @override
+  State<_TrustedPhones> createState() => _TrustedPhonesState();
+}
+
+class _TrustedPhonesState extends State<_TrustedPhones> {
+  List<Map<String, dynamic>> _phones = const [];
+  Timer? _refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    // Keep the list current so a newly paired phone appears without reopening settings.
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    var phones = <Map<String, dynamic>>[];
+    try {
+      final raw = await bind.mainGetCommon(key: 'aperture-trusted-phones');
+      final decoded = jsonDecode(raw.isEmpty ? '[]' : raw);
+      if (decoded is List) {
+        phones = [
+          for (final e in decoded)
+            if (e is Map) Map<String, dynamic>.from(e)
+        ];
+      }
+    } catch (e) {
+      debugPrint('Failed to load trusted phones: $e');
+    }
+    if (mounted) setState(() => _phones = phones);
+  }
+
+  Future<void> _remove(String publicKey) async {
+    await bind.mainSetCommon(
+        key: 'aperture-remove-trusted-phone', value: publicKey);
+    if (mounted) {
+      setState(() => _phones = [
+            for (final p in _phones)
+              if ('${p['public_key']}' != publicKey) p
+          ]);
+    }
+    // The host applies the removal over IPC asynchronously; reload after it settled.
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (mounted) await _load();
+  }
+
+  String _date(Object? unix) {
+    final seconds = unix is num ? unix.toInt() : int.tryParse('$unix') ?? 0;
+    if (seconds <= 0) return 'Never';
+    final d = DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_phones.isEmpty) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          'No trusted phones',
+          style: TextStyle(color: disabledTextColor(context, widget.enabled)),
+        ).marginOnly(left: _kContentHMargin),
+      );
+    }
+    return Column(
+      children: [
+        for (final phone in _phones)
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${phone['name'] ?? ''}'),
+                    Text(
+                      'Added ${_date(phone['added_unix'])}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Text(
+                      'Last used ${_date(phone['last_used_unix'])}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              ElevatedButton(
+                onPressed: widget.enabled
+                    ? () => _remove('${phone['public_key'] ?? ''}')
+                    : null,
+                child: const Text('Remove'),
+              ),
+            ],
+          ).marginOnly(left: _kContentHMargin, bottom: 8),
+      ],
+    );
+  }
+}

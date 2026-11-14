@@ -536,6 +536,8 @@ pub enum Data {
     HwCodecConfig(Option<String>),
     RemoveTrustedDevices(Vec<Bytes>),
     ClearTrustedDevices,
+    /// Base64 public key of an Aperture trusted phone to remove (handled by the service).
+    RemoveApertureTrustedPhone(String),
     #[cfg(all(target_os = "windows", feature = "flutter"))]
     PrinterData(Vec<u8>),
     InstallOption(Option<(String, String)>),
@@ -1036,6 +1038,10 @@ async fn handle(data: Data, stream: &mut Connection) {
                     value = Some(Config::get_unlock_pin());
                 } else if name == "trusted-devices" {
                     value = Some(Config::get_trusted_devices_json());
+                } else if name == crate::server::aperture_trusted_phones::OPTION_KEY {
+                    value = Some(Config::get_option(
+                        crate::server::aperture_trusted_phones::OPTION_KEY,
+                    ));
                 } else {
                     value = None;
                 }
@@ -1091,7 +1097,7 @@ async fn handle(data: Data, stream: &mut Connection) {
                 if let Some(v) = value.get("privacy-mode-impl-key") {
                     crate::privacy_mode::switch(v);
                 }
-                Config::set_options(value);
+                crate::server::aperture_trusted_phones::apply_options(value);
                 allow_err!(stream.send(&Data::Options(None)).await);
             }
         },
@@ -1259,6 +1265,9 @@ async fn handle(data: Data, stream: &mut Connection) {
         }
         Data::ClearTrustedDevices => {
             Config::clear_trusted_devices();
+        }
+        Data::RemoveApertureTrustedPhone(key) => {
+            crate::server::aperture_trusted_phones::remove(&key);
         }
         Data::InstallOption(opt) => match opt {
             Some((_k, _v)) => {

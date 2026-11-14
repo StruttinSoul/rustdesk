@@ -1,5 +1,6 @@
 use super::*;
 use crate::server::emulator::{
+    host_worker::{self, HostJob, HostJobKind},
     remote::{authorize_host_operation, authorize_request, GuestEvent},
     remote_windows::{self, GuestSession},
 };
@@ -54,69 +55,12 @@ impl Connection {
                 return self.set_emulator_previews(id, previews).await;
             }
             Some(emulator_request::Union::List(_)) => {
-                let operation_identity = self.emulator_operation_identity.clone();
-                let operation_generation = self.emulator_operation_generation;
-                match hbb_common::tokio::task::spawn_blocking(move || {
-                    remote_windows::inventory(id, &operation_identity, operation_generation)
-                })
-                .await
-                {
-                    Ok(response) => response,
-                    Err(error) => remote_windows::error_response(id, error.to_string()),
-                }
+                return self.queue_emulator_host_job(id, HostJobKind::List).await;
             }
             Some(emulator_request::Union::Host(host)) => {
-                let host = host.clone();
-                if host.action == "status" {
-                    match hbb_common::tokio::task::spawn_blocking(move || {
-                        crate::server::emulator::host_management::handle_request(id, &host)
-                    })
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => remote_windows::error_response(id, error.to_string()),
-                    }
-                } else if matches!(
-                    host.action.as_str(),
-                    "windows_list" | "phone_workspace_support" | "gateway_status"
-                ) {
-                    let operation_identity = self.emulator_operation_identity.clone();
-                    let operation_generation = self.emulator_operation_generation;
-                    match hbb_common::tokio::task::spawn_blocking(move || {
-                        crate::server::emulator::host_management::handle_request_scoped(
-                            id,
-                            &host,
-                            &operation_identity,
-                            operation_generation,
-                        )
-                    })
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => remote_windows::error_response(id, error.to_string()),
-                    }
-                } else {
-                    let action_host = host.clone();
-                    let operation_identity = self.emulator_operation_identity.clone();
-                    let operation_generation = self.emulator_operation_generation;
-                    self.emulator_operation_replay
-                        .apply(&host, id, || async move {
-                            match hbb_common::tokio::task::spawn_blocking(move || {
-                                crate::server::emulator::host_management::handle_request_scoped(
-                                    id,
-                                    &action_host,
-                                    &operation_identity,
-                                    operation_generation,
-                                )
-                            })
-                            .await
-                            {
-                                Ok(response) => response,
-                                Err(error) => remote_windows::error_response(id, error.to_string()),
-                            }
-                        })
-                        .await
-                }
+                return self
+                    .queue_emulator_host_job(id, HostJobKind::Host(host.clone()))
+                    .await;
             }
             Some(emulator_request::Union::Select(_)) => {
                 self.emulator_session.take();
@@ -183,6 +127,18 @@ impl Connection {
     }
 
     pub(super) async fn handle_emulator_event(&mut self, event: GuestEvent) -> bool {
+        let event = match event {
+            GuestEvent::Host {
+                generation,
+                response,
+            } => {
+                if !host_worker::is_current(generation, self.emulator_operation_generation) {
+                    return true;
+                }
+                return self.send_emulator_response(response).await;
+            }
+            event => event,
+        };
         let preview_id = match &event {
             GuestEvent::Response(response) => match response.union.as_ref() {
                 Some(emulator_response::Union::Status(status)) if status.preview => {
@@ -222,6 +178,7 @@ impl Connection {
                     message.set_emulator_response(response);
                 }
                 GuestEvent::Frame(frame) => message.set_emulator_video_frame(frame),
+                GuestEvent::Host { .. } => return true,
             }
             return self.send_emulator_message(message).await;
         }
@@ -248,6 +205,7 @@ impl Connection {
                 }
                 message.set_emulator_video_frame(frame);
             }
+            GuestEvent::Host { .. } => return true,
         }
         self.send_emulator_message(message).await
     }
@@ -338,6 +296,19 @@ impl Connection {
             ..Default::default()
         });
         self.send_emulator_response(response).await
+    }
+
+    async fn queue_emulator_host_job(&mut self, id: u64, kind: HostJobKind) -> bool {
+        let job = HostJob {
+            request_id: id,
+            kind,
+            operation_identity: self.emulator_operation_identity.clone(),
+            generation: self.emulator_operation_generation,
+        };
+        match host_worker::queue(&mut self.emulator_host_worker, &self.emulator_tx, job) {
+            Ok(()) => true,
+            Err(response) => self.send_emulator_response(response).await,
+        }
     }
 
     async fn send_emulator_response(&mut self, response: EmulatorResponse) -> bool {

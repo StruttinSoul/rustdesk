@@ -19,13 +19,16 @@ use std::{
     net::{Shutdown, TcpStream},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, SyncSender},
         Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
 };
+
+const GUEST_INPUT_QUEUE_SIZE: usize = 256;
+const GUEST_INPUT_MOVE_SHED_THRESHOLD: usize = 24;
 
 struct LocalTarget {
     provider: Arc<dyn EmulatorProvider>,
@@ -205,6 +208,7 @@ pub struct GuestSession {
     cancel: Arc<AtomicBool>,
     sockets: Arc<Mutex<Vec<TcpStream>>>,
     input: SyncSender<GuestInputCommand>,
+    pending_requests: Arc<AtomicUsize>,
 }
 
 enum GuestInputCommand {
@@ -366,8 +370,10 @@ impl GuestSession {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(Vec::new()));
-        let (input, receiver) = mpsc::sync_channel(32);
+        let (input, receiver) = mpsc::sync_channel(GUEST_INPUT_QUEUE_SIZE);
         let capture_input = input.clone();
+        let pending_requests = Arc::new(AtomicUsize::new(0));
+        let session_pending = pending_requests.clone();
         let session = Self {
             id,
             target_id: target_id.clone(),
@@ -375,6 +381,7 @@ impl GuestSession {
             cancel: cancel.clone(),
             sockets: sockets.clone(),
             input,
+            pending_requests: session_pending,
         };
         thread::Builder::new()
             .name("emulator-guest".to_owned())
@@ -388,6 +395,7 @@ impl GuestSession {
                     &sockets,
                     receiver,
                     &capture_input,
+                    &pending_requests,
                     preview,
                 );
                 if let Err(error) = result {
@@ -418,9 +426,17 @@ impl GuestSession {
         if self.cancel.load(Ordering::Acquire) {
             bail!("Guest session is closed")
         }
+        if sheds_under_load(&request, self.pending_requests.load(Ordering::Acquire)) {
+            log::trace!("Shedding guest touch move under input load");
+            return Ok(());
+        }
+        self.pending_requests.fetch_add(1, Ordering::AcqRel);
         self.input
             .try_send(GuestInputCommand::Request(request))
-            .map_err(|_| hbb_common::anyhow::anyhow!("Guest input is busy or disconnected"))
+            .map_err(|_| {
+                decrement_pending(&self.pending_requests);
+                hbb_common::anyhow::anyhow!("Guest input is busy or disconnected")
+            })
     }
 
     pub fn release_input(&self) -> ResultType<()> {
@@ -466,6 +482,7 @@ fn run_session(
     sockets: &Arc<Mutex<Vec<TcpStream>>>,
     input: mpsc::Receiver<GuestInputCommand>,
     capture_input: &SyncSender<GuestInputCommand>,
+    pending_requests: &Arc<AtomicUsize>,
     preview: bool,
 ) -> ResultType<()> {
     let Some(emulator_request::Union::Select(selection)) = request.union.as_ref() else {
@@ -581,11 +598,18 @@ fn run_session(
     let input_geometry = geometry.clone();
     let input_stop_flag = Arc::new(AtomicBool::new(false));
     let input_cancel = input_stop_flag.clone();
+    let input_pending = pending_requests.clone();
     let input_stop = helper.cancellation_socket()?;
     let writer = thread::Builder::new()
         .name("emulator-input".to_owned())
         .spawn(move || {
-            if let Err(error) = input_loop(control, input, &input_geometry, &input_cancel) {
+            if let Err(error) = input_loop(
+                control,
+                input,
+                &input_geometry,
+                &input_cancel,
+                &input_pending,
+            ) {
                 log::warn!("Guest input stopped: {error}");
             }
             if let Err(error) = input_stop.shutdown(Shutdown::Both) {
@@ -722,11 +746,26 @@ pub fn with_preview(mut response: EmulatorResponse, preview: bool) -> EmulatorRe
     response
 }
 
+fn sheds_under_load(request: &EmulatorRequest, pending: usize) -> bool {
+    pending >= GUEST_INPUT_MOVE_SHED_THRESHOLD
+        && matches!(
+            request.union.as_ref(),
+            Some(emulator_request::Union::Touch(touch)) if touch.action == 2
+        )
+}
+
+fn decrement_pending(pending: &AtomicUsize) {
+    let _ = pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        Some(count.saturating_sub(1))
+    });
+}
+
 fn input_loop(
     mut socket: TcpStream,
     receiver: mpsc::Receiver<GuestInputCommand>,
     geometry: &Mutex<GuestGeometry>,
     cancel: &AtomicBool,
+    pending_requests: &AtomicUsize,
 ) -> ResultType<()> {
     let mut touches = BTreeMap::new();
     let mut keys = BTreeSet::new();
@@ -741,7 +780,10 @@ fn input_loop(
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            let current = geometry.lock().unwrap();
+            if matches!(command, Some(GuestInputCommand::Request(_))) {
+                decrement_pending(pending_requests);
+            }
+            let current = *geometry.lock().unwrap();
             if current.generation != observed_generation {
                 release_guest_input(&mut socket, &mut touches, &mut keys);
                 observed_generation = current.generation;
@@ -875,6 +917,69 @@ fn key_packet(keycode: u32, down: bool) -> [u8; 14] {
 mod tests {
     use super::*;
     use std::{io::Read, net::TcpListener};
+
+    fn shed_touch(action: u32) -> EmulatorRequest {
+        let mut request = EmulatorRequest::new();
+        request.set_touch(base::message_proto::EmulatorTouch {
+            action,
+            pointer_id: 1,
+            width: 1280,
+            height: 720,
+            ..Default::default()
+        });
+        request
+    }
+
+    #[test]
+    fn touch_moves_shed_only_at_or_above_threshold() {
+        let moves = shed_touch(2);
+        assert!(!sheds_under_load(&moves, 0));
+        assert!(!sheds_under_load(
+            &moves,
+            GUEST_INPUT_MOVE_SHED_THRESHOLD - 1
+        ));
+        assert!(sheds_under_load(&moves, GUEST_INPUT_MOVE_SHED_THRESHOLD));
+        assert!(sheds_under_load(&moves, GUEST_INPUT_QUEUE_SIZE));
+    }
+
+    #[test]
+    fn non_move_input_is_never_shed() {
+        let mut key = EmulatorRequest::new();
+        key.set_key(base::message_proto::EmulatorKey {
+            keycode: 29,
+            down: true,
+            ..Default::default()
+        });
+        let mut text = EmulatorRequest::new();
+        text.set_text(base::message_proto::EmulatorText {
+            text: "a".to_owned(),
+            ..Default::default()
+        });
+        let mut navigation = EmulatorRequest::new();
+        navigation.set_navigation(EmulatorNavigation::EmulatorBack);
+        let requests = [
+            shed_touch(0),
+            shed_touch(1),
+            shed_touch(3),
+            key,
+            text,
+            navigation,
+            EmulatorRequest::new(),
+        ];
+        for request in &requests {
+            for pending in [0, GUEST_INPUT_MOVE_SHED_THRESHOLD, GUEST_INPUT_QUEUE_SIZE] {
+                assert!(!sheds_under_load(request, pending));
+            }
+        }
+    }
+
+    #[test]
+    fn pending_decrement_saturates_at_zero() {
+        let pending = AtomicUsize::new(1);
+        decrement_pending(&pending);
+        decrement_pending(&pending);
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn inventory_negotiates_operation_capabilities_and_scope() {
@@ -1123,6 +1228,7 @@ mod tests {
                 receiver,
                 &Mutex::new(GuestGeometry::ready(1280, 720)),
                 &AtomicBool::new(false),
+                &AtomicUsize::new(0),
             )
         });
         let mut wire = [0; 92];
@@ -1189,6 +1295,7 @@ mod tests {
                 receiver,
                 &Mutex::new(GuestGeometry::ready(1280, 720)),
                 &AtomicBool::new(false),
+                &AtomicUsize::new(0),
             )
         });
         let mut wire = [0; 120];
@@ -1227,6 +1334,7 @@ mod tests {
                 receiver,
                 &Mutex::new(GuestGeometry::ready(1280, 720)),
                 &AtomicBool::new(false),
+                &AtomicUsize::new(0),
             )
         });
         let mut wire = [0_u8; 1];
@@ -1253,6 +1361,7 @@ mod tests {
                 receiver,
                 &worker_geometry,
                 &AtomicBool::new(false),
+                &AtomicUsize::new(0),
             )
         });
 

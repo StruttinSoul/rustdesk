@@ -395,7 +395,10 @@ pub(crate) async fn serve_secure(server: crate::server::ServerPtr) {
             tokio::spawn(async move {
                 allow_err!(crate::server::create_tcp_connection(server,
                     hbb_common::Stream::from(stream, local), peer, true,
-                    crate::server::ConnectionMeta::default()).await);
+                    crate::server::ConnectionMeta {
+                        secure_lan: true,
+                        ..Default::default()
+                    }).await);
             });
         }
     }

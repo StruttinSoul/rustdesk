@@ -906,13 +906,53 @@ pub async fn update_get_sync_displays_on_login() -> ResultType<(Vec<DisplayInfo>
     #[cfg(not(windows))]
     let displays = display_service::try_get_displays();
     #[cfg(windows)]
-    let displays = display_service::try_get_displays_add_amyuni_headless();
+    let displays = login_displays_waiting_for_vdd().await;
     let displays = displays?;
     let primary_display_idx = get_primary_2(&displays);
     let sync_displays = update_sync_displays(&displays);
     let primary_display_idx =
         normalize_primary_display_idx(primary_display_idx, sync_displays.len());
     Ok((sync_displays, primary_display_idx))
+}
+
+/// With no screen at login because atlas's virtual display (`Root\MttVDD`) has crashed, repair
+/// it (or let an in-progress repair finish) and wait briefly instead of sending an empty list.
+/// The whole wait, repair included, is bounded by `LOGIN_WAIT`.
+#[cfg(windows)]
+async fn login_displays_waiting_for_vdd() -> ResultType<Vec<Display>> {
+    use crate::headless_vdd::{login_should_wait, repair_if_allowed, wait_until, LOGIN_POLL, LOGIN_WAIT};
+    {
+        // `Display` is not `Send`: this list must not live across the awaits below.
+        let displays = try_get_displays_add_amyuni_headless()?;
+        if !displays.is_empty() {
+            return Ok(displays);
+        }
+    }
+    let deadline = std::time::Instant::now() + LOGIN_WAIT;
+    // A slow pnputil or device enumeration keeps running detached past the deadline.
+    let repair = tokio::task::spawn_blocking(|| repair_if_allowed("login"));
+    let outcome = match tokio::time::timeout(LOGIN_WAIT, repair).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(err)) => {
+            log::warn!("headless display: login repair task failed: {err}");
+            return Ok(Vec::new());
+        }
+        Err(_) => return Ok(Vec::new()),
+    };
+    if !login_should_wait(outcome) {
+        return Ok(Vec::new());
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if !wait_until(
+        || Display::all().map(|d| !d.is_empty()).unwrap_or(false),
+        remaining,
+        LOGIN_POLL,
+    )
+    .await
+    {
+        return Ok(Vec::new());
+    }
+    try_get_displays_add_amyuni_headless()
 }
 
 #[inline]

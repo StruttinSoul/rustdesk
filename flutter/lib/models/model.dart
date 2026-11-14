@@ -408,6 +408,11 @@ class FfiModel with ChangeNotifier {
                 (model.selected && !model.streaming))) {
           parent.target?.imageModel.disposeImage();
         }
+      } else if (name == 'aperture_pair_device_result') {
+        final target = parent.target;
+        if (target != null) {
+          target.aperturePairResult.value = Map<String, dynamic>.from(evt);
+        }
       } else if (name == 'manual_clipboard_response') {
         parent.target?.clipboardTransferModel.handleResponse(evt);
       } else if (name == 'file_dir') {
@@ -4291,6 +4296,9 @@ class FFI {
   late final ChatModel chatModel; // session
   late final EmulatorModel emulatorModel;
   bool _emulatorModelReady = false;
+  /// Latest `aperture_pair_device_result` event (ok/error); a new map per event.
+  final ValueNotifier<Map<String, dynamic>?> aperturePairResult =
+      ValueNotifier(null);
   late final ClipboardTransferModel clipboardTransferModel;
   bool _clipboardTransferReady = false;
   late final FileModel fileModel; // session

@@ -106,6 +106,9 @@ pub fn ensure_watchdog_started() {
                 if let Ok(mut current) = worker_state.write() {
                     *current = next;
                 }
+                // Here, not in `probe_watchdog`, so UI health queries never restart the driver.
+                #[cfg(windows)]
+                crate::headless_vdd::repair_if_allowed("watchdog");
                 thread::sleep(WATCHDOG_INTERVAL);
             })
         {

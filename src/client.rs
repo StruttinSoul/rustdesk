@@ -103,6 +103,7 @@ pub mod file_trait;
 pub mod helper;
 mod emulator_protocol;
 mod lan_fast_path;
+pub(crate) mod aperture_device_key;
 pub use emulator_protocol::emulator_request_from_json;
 pub mod io_loop;
 pub mod screenshot;
@@ -117,6 +118,7 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
 pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
 pub const LOGIN_MSG_PASSWORD_WRONG: &str = "Wrong Password";
 pub const LOGIN_MSG_2FA_WRONG: &str = "Wrong 2FA Code";
+pub const LOGIN_MSG_DEVICE_KEY_REJECTED: &str = "Device key not accepted";
 pub const REQUIRE_2FA: &'static str = "2FA Required";
 pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
 pub const LOGIN_MSG_OFFLINE: &str = "Offline";
@@ -381,6 +383,12 @@ impl Client {
         debug_assert!(peer == interface.get_id());
         interface.update_direct(None);
         interface.update_received(false);
+        {
+            let lc = interface.get_lch();
+            let mut lc = lc.write().unwrap();
+            lc.via_secure_lan = false;
+            lc.device_proof = None;
+        }
         match lan_fast_path::start(peer, key, token, conn_type, interface.clone()).await {
             Err(err) => {
                 let err_str = err.to_string();
@@ -391,6 +399,7 @@ impl Client {
                 }
             }
             Ok(x) => {
+                interface.get_lch().write().unwrap().via_secure_lan = x.3;
                 // Set x.2 to true only in the connect() function to indicate that direct_failures needs to be updated; everywhere else it should be set to false.
                 if x.2 {
                     let direct_failures = interface.get_lch().read().unwrap().direct_failures;
@@ -2893,6 +2902,11 @@ pub struct LoginConfigHandler {
     pub peer_relay: bool,
     pub direct: Option<bool>,
     pub received: bool,
+    /// True only when this connection came through the encrypted LAN fast path.
+    pub via_secure_lan: bool,
+    /// The device-key proof sent with this connection's login, if any. Cleared
+    /// when the host refuses it; still set after a successful key login.
+    pub device_proof: Option<DeviceProof>,
     switch_uuid: Option<String>,
     #[cfg(feature = "flutter")]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2928,6 +2942,44 @@ impl Deref for LoginConfigHandler {
 impl LoginConfigHandler {
     pub(crate) fn set_hash(&mut self, hash: Hash) {
         self.hash = hash;
+    }
+
+    /// Whether this phone paired its device key with this peer.
+    pub fn aperture_paired(&self) -> bool {
+        aperture_device_key::is_paired_value(&self.get_option(aperture_device_key::PAIRED_OPTION))
+    }
+
+    /// Goes through `set_option` so the cached config keeps the flag.
+    pub fn set_aperture_paired(&mut self, paired: bool) {
+        let value = if paired { "Y" } else { "" };
+        self.set_option(aperture_device_key::PAIRED_OPTION.to_owned(), value.to_owned());
+    }
+
+    /// `"paired"`, `"can-pair"` or `"unavailable"` for this session.
+    pub fn aperture_pairing_state(&self) -> &'static str {
+        aperture_device_key::pairing_state(
+            self.aperture_paired(),
+            self.peer_info.is_some(),
+            self.device_proof.is_some(),
+        )
+    }
+
+    /// The host refused the key: forget the pairing and drop the proof.
+    pub(crate) fn on_device_key_rejected(&mut self) -> aperture_device_key::RetryAction {
+        let mut paired = self.aperture_paired();
+        let mut proof = self.device_proof.take();
+        let action = aperture_device_key::on_device_key_rejected(&mut paired, &mut proof);
+        self.set_aperture_paired(paired);
+        action
+    }
+
+    /// The host id the host signs with: the pure peer id, as sent in the login.
+    fn pure_peer_id(&self) -> String {
+        if let Some((id, _, _)) = self.other_server.as_ref() {
+            id.clone()
+        } else {
+            self.id.clone()
+        }
     }
 
     /// Initialize the login config handler.
@@ -3891,6 +3943,7 @@ impl LoginConfigHandler {
         } else {
             Default::default()
         };
+        let password_is_empty = password.is_empty();
         let mut lr = LoginRequest {
             username: pure_id,
             password: password.into(),
@@ -3905,6 +3958,12 @@ impl LoginConfigHandler {
             avatar,
             ..Default::default()
         };
+        // A proof replaces the password; the host ignores it next to one.
+        if password_is_empty {
+            if let Some(proof) = self.device_proof.as_ref() {
+                lr.device_proof = Some(proof.clone()).into();
+            }
+        }
         match self.conn_type {
             ConnType::FILE_TRANSFER => lr.set_file_transfer(FileTransfer {
                 dir: self.get_remote_dir(),
@@ -4660,7 +4719,12 @@ pub async fn handle_hash(
     interface: &impl Interface,
     peer: &mut Stream,
 ) -> bool {
-    lc.write().unwrap().hash = hash.clone();
+    {
+        let mut lc = lc.write().unwrap();
+        lc.hash = hash.clone();
+        // A proof belongs to one hash; it is decided again below.
+        lc.device_proof = None;
+    }
     // Take care of password application order
 
     // switch_uuid
@@ -4700,6 +4764,28 @@ pub async fn handle_hash(
             allow_err!(peer.send(&msg).await);
             return false;
         }
+    }
+    // Device key: a paired phone on the encrypted LAN fast path signs the
+    // challenge instead of sending a password. Decided afresh for every hash.
+    let proof = {
+        let lc = lc.read().unwrap();
+        if aperture_device_key::should_send_proof(
+            lc.via_secure_lan,
+            lc.aperture_paired(),
+            lc.conn_type,
+        ) {
+            Some((lc.pure_peer_id(), lc.conn_type))
+        } else {
+            None
+        }
+    };
+    lc.write().unwrap().device_proof = proof.map(|(host_id, conn_type)| {
+        let sk = aperture_device_key::load_or_create_key();
+        crate::aperture_device_proof::sign_proof(&sk, &host_id, &hash, conn_type as i32)
+    });
+    if lc.read().unwrap().device_proof.is_some() {
+        send_login(lc.clone(), String::new(), String::new(), Vec::new(), peer).await;
+        return true;
     }
     // last password
     let mut password = lc.read().unwrap().password.clone();

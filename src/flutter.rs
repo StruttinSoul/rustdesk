@@ -1341,6 +1341,15 @@ impl InvokeUiSession for FlutterHandler {
         self.push_event_("emulator_response", &event, &[], &[]);
     }
 
+    fn handle_aperture_pair_device_result(&self, ok: bool, error: String) {
+        self.push_event_(
+            "aperture_pair_device_result",
+            &[("ok", json!(ok)), ("error", json!(error))],
+            &[],
+            &[],
+        );
+    }
+
     fn handle_manual_clipboard_response(&self, response: ManualClipboardResponse) {
         let direction = match response.direction.enum_value_or_default() {
             ManualClipboardDirection::ManualClipboardPhoneToHost => "phone_to_host",

@@ -874,6 +874,29 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(message));
     }
 
+    /// Ask the host to trust this phone's device key; the host replies with
+    /// `AperturePairDeviceResponse`.
+    pub fn request_aperture_pair_device(&self, name: String) {
+        let sk = crate::client::aperture_device_key::load_or_create_key();
+        let request = AperturePairDeviceRequest {
+            request_id: hbb_common::rand::random(),
+            public_key: sk.public_key().0.to_vec().into(),
+            name,
+            ..Default::default()
+        };
+        let mut message = Message::new();
+        message.set_aperture_pair_device_request(request);
+        self.send(Data::Message(message));
+    }
+
+    pub fn forget_aperture_pairing(&self) {
+        self.lc.write().unwrap().set_aperture_paired(false);
+    }
+
+    pub fn aperture_pairing_state(&self) -> &'static str {
+        self.lc.read().unwrap().aperture_pairing_state()
+    }
+
     pub fn capture_displays(&self, add: Vec<i32>, sub: Vec<i32>, set: Vec<i32>) {
         let mut misc = Misc::new();
         misc.set_capture_displays(CaptureDisplays {
@@ -1817,6 +1840,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn handle_terminal_response(&self, response: TerminalResponse);
     fn handle_emulator_response(&self, _response: EmulatorResponse) {}
     fn handle_manual_clipboard_response(&self, _response: ManualClipboardResponse) {}
+    fn handle_aperture_pair_device_result(&self, _ok: bool, _error: String) {}
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {

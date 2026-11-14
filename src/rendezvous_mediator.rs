@@ -46,6 +46,7 @@ fn connection_meta(
     ConnectionMeta {
         control_permissions,
         controlled_context,
+        secure_lan: false,
     }
 }
 

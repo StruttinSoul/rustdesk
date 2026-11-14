@@ -18,6 +18,8 @@ pub mod guest_runtime;
 #[cfg(windows)]
 pub mod host_management;
 #[cfg(windows)]
+pub mod host_worker;
+#[cfg(windows)]
 pub mod ldplayer;
 #[cfg(windows)]
 pub mod phone_workspace;

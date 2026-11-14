@@ -1963,6 +1963,25 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
                 Some(message::Union::LoginResponse(lr)) => match lr.union {
+                    Some(login_response::Union::Error(err))
+                        if err == client::LOGIN_MSG_DEVICE_KEY_REJECTED
+                            && self.handler.lc.read().unwrap().device_proof.is_some() =>
+                    {
+                        // The host refused the key: unpair and log in again on this
+                        // stream with the password. The proof is gone, so this runs once.
+                        let hash = {
+                            let mut lc = self.handler.lc.write().unwrap();
+                            lc.on_device_key_rejected();
+                            lc.hash.clone()
+                        };
+                        if !self
+                            .handler
+                            .handle_hash(&self.handler.password.clone(), hash, peer)
+                            .await
+                        {
+                            return false;
+                        }
+                    }
                     Some(login_response::Union::Error(err)) => {
                         if err == client::REQUIRE_2FA {
                             self.handler.lc.write().unwrap().enable_trusted_devices =
@@ -3011,6 +3030,14 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 Some(message::Union::ManualClipboardResponse(response)) => {
                     self.handler.handle_manual_clipboard_response(response);
+                }
+                Some(message::Union::AperturePairDeviceResponse(response)) => {
+                    if response.ok {
+                        self.handler.lc.write().unwrap().set_aperture_paired(true);
+                    }
+                    log::info!("Phone pairing result: ok={}", response.ok);
+                    self.handler
+                        .handle_aperture_pair_device_result(response.ok, response.error);
                 }
                 _ => {}
             }

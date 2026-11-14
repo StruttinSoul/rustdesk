@@ -71,6 +71,7 @@ pub mod input_service {
 mod connection;
 mod login_failure_check;
 pub(crate) mod port_forward_mux;
+pub mod aperture_trusted_phones;
 pub mod display_service;
 pub mod emulator;
 pub mod manual_clipboard;
@@ -92,6 +93,8 @@ type ConnMap = HashMap<i32, ConnInner>;
 pub struct ConnectionMeta {
     pub control_permissions: Option<ControlPermissions>,
     pub controlled_context: Option<ControlledContext>,
+    /// Set only by the Aperture encrypted LAN listener (`lan::serve_secure`, TCP 21120).
+    pub secure_lan: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

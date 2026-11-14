@@ -84,6 +84,25 @@ message LoginRequest {
   string my_platform = 13;
   bytes hwid = 14;
   string avatar = 17;
+  DeviceProof device_proof = 18;
+}
+
+message DeviceProof {
+  bytes public_key = 1;
+  bytes signature = 2;
+  uint32 version = 3;
+}
+
+message AperturePairDeviceRequest {
+  uint64 request_id = 1;
+  bytes public_key = 2;
+  string name = 3;
+}
+
+message AperturePairDeviceResponse {
+  uint64 request_id = 1;
+  bool ok = 2;
+  string error = 3;
 }
 
 message Terminal {
@@ -1267,5 +1286,7 @@ message Message {
     VideoStreamHeartbeat video_stream_heartbeat = 41;
     ManualClipboardRequest manual_clipboard_request = 42;
     ManualClipboardResponse manual_clipboard_response = 43;
+    AperturePairDeviceRequest aperture_pair_device_request = 44;
+    AperturePairDeviceResponse aperture_pair_device_response = 45;
   }
 }
