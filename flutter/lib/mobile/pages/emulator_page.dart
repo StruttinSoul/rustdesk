@@ -37,46 +37,145 @@ Duration? guestAutoReconnectDelay({
   return Duration(seconds: attempts == 0 ? 1 : 3);
 }
 
-/// Gives portrait video the full screen width. When the screen is tall enough,
-/// the controls occupy the black margin underneath the contained video; on
-/// shorter screens a dedicated row prevents controls covering the game.
-class PortraitGuestStage extends StatelessWidget {
-  const PortraitGuestStage({
+/// Keeps the whole guest visible, with optional controls outside its image.
+class GuestControlStage extends StatefulWidget {
+  const GuestControlStage({
     super.key,
-    required this.guestWidth,
-    required this.guestHeight,
     required this.video,
     required this.controls,
+    required this.controlsVisible,
+    required this.onToggleControls,
   });
 
-  final int guestWidth;
-  final int guestHeight;
   final Widget video;
   final Widget controls;
+  final bool controlsVisible;
+  final VoidCallback onToggleControls;
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-        builder: (context, constraints) {
-          final frame = containedGuestFrame(
-            viewportWidth: constraints.maxWidth,
-            viewportHeight: constraints.maxHeight,
-            guestWidth: guestWidth,
-            guestHeight: guestHeight,
-          );
-          final marginBelow = frame == null
-              ? 0.0
-              : constraints.maxHeight - frame.top - frame.height;
-          if (marginBelow < 64) {
-            return Column(children: [
-              Expanded(child: SizedBox.expand(child: video)),
-              controls,
+  State<GuestControlStage> createState() => _GuestControlStageState();
+}
+
+class _GuestControlStageState extends State<GuestControlStage> {
+  // Relative placement survives orientation changes and the soft keyboard.
+  Offset _buttonPosition = const Offset(1, 0.75);
+
+  @override
+  Widget build(BuildContext context) => Column(children: [
+        Expanded(
+          child: LayoutBuilder(builder: (context, constraints) {
+            final horizontalSpace = (constraints.maxWidth - 64)
+                .clamp(0.0, double.infinity)
+                .toDouble();
+            final verticalSpace = (constraints.maxHeight - 64)
+                .clamp(0.0, double.infinity)
+                .toDouble();
+            return Stack(children: [
+              Positioned.fill(child: widget.video),
+              if (constraints.maxHeight >= 64)
+                Positioned(
+                  left: 8 + horizontalSpace * _buttonPosition.dx,
+                  top: 8 + verticalSpace * _buttonPosition.dy,
+                  child: GestureDetector(
+                    onPanUpdate: (details) => setState(() {
+                      _buttonPosition = Offset(
+                        horizontalSpace == 0
+                            ? 0
+                            : (_buttonPosition.dx +
+                                    details.delta.dx / horizontalSpace)
+                                .clamp(0.0, 1.0)
+                                .toDouble(),
+                        verticalSpace == 0
+                            ? 0
+                            : (_buttonPosition.dy +
+                                    details.delta.dy / verticalSpace)
+                                .clamp(0.0, 1.0)
+                                .toDouble(),
+                      );
+                    }),
+                    child: Semantics(
+                      hint: 'Drag to move',
+                      child: SizedBox.square(
+                        dimension: 48,
+                        child: Material(
+                          color: MirpgRemoteTheme.surface.withOpacity(0.92),
+                          shape: const CircleBorder(
+                            side: BorderSide(color: MirpgRemoteTheme.outline),
+                          ),
+                          child: IconButton(
+                            tooltip: widget.controlsVisible
+                                ? 'Hide controls'
+                                : 'Show controls',
+                            color: MirpgRemoteTheme.textPrimary,
+                            onPressed: widget.onToggleControls,
+                            icon: Icon(widget.controlsVisible
+                                ? Icons.close
+                                : Icons.tune_rounded),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
             ]);
-          }
-          return Stack(children: [
-            Positioned.fill(child: video),
-            Positioned(left: 8, right: 8, bottom: 8, child: controls),
-          ]);
-        },
+          }),
+        ),
+        if (widget.controlsVisible) widget.controls,
+      ]);
+}
+
+class GuestTextComposer extends StatelessWidget {
+  const GuestTextComposer({
+    super.key,
+    required this.controller,
+    required this.focusNode,
+    required this.onSubmitted,
+    required this.onSend,
+    required this.onClose,
+  });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final ValueChanged<String> onSubmitted;
+  final VoidCallback? onSend;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: MirpgSurface(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  focusNode: focusNode,
+                  autofocus: true,
+                  maxLines: 1,
+                  textInputAction: TextInputAction.done,
+                  decoration: const InputDecoration(
+                    hintText: 'Type text to Android',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(vertical: 12),
+                    border: InputBorder.none,
+                  ),
+                  onSubmitted: onSubmitted,
+                ),
+              ),
+              IconButton(
+                tooltip: 'Send text',
+                onPressed: onSend,
+                icon: const Icon(Icons.send_rounded),
+              ),
+              IconButton(
+                tooltip: 'Close keyboard',
+                onPressed: onClose,
+                icon: const Icon(Icons.close),
+              ),
+            ],
+          ),
+        ),
       );
 }
 
@@ -104,6 +203,7 @@ class _EmulatorPageState extends State<EmulatorPage>
   final _pointers = <int, (int, int, int, int)>{};
   final _heldKeys = <int>{};
   bool _textComposerVisible = false;
+  bool _guestControlsVisible = false;
   bool _sendingText = false;
   int _textSendGeneration = 0;
   bool _returning = false;
@@ -300,13 +400,17 @@ class _EmulatorPageState extends State<EmulatorPage>
     WidgetsBinding.instance.removeObserver(this);
     _cancelGuestRecovery();
     _cancelGuestInput();
-    if (_textComposerVisible) unawaited(_hideGuestSoftKeyboard());
+    if (_textComposerVisible) {
+      _cancelGuestInput();
+      unawaited(_hideGuestSoftKeyboard());
+    }
     model.removeListener(_changed);
     widget.ffi.ffiModel.removeListener(_permissionChanged);
     if (_guestPresentation) unawaited(_restoreRemotePresentation());
     _keyboardFocus.dispose();
     _textFocus.dispose();
     _textController.dispose();
+    if (!widget.dashboardMode) model.framePacer.focused = true;
     super.dispose();
   }
 
@@ -317,6 +421,7 @@ class _EmulatorPageState extends State<EmulatorPage>
         _returning) {
       return;
     }
+    _cancelGuestInput();
     setState(() => _textComposerVisible = true);
     unawaited(_showGuestSoftKeyboard());
   }
@@ -349,7 +454,10 @@ class _EmulatorPageState extends State<EmulatorPage>
   }
 
   void _discardTextComposer({bool restoreKeyboardFocus = true}) {
-    if (_textComposerVisible) unawaited(_hideGuestSoftKeyboard());
+    if (_textComposerVisible) {
+      _cancelGuestInput();
+      unawaited(_hideGuestSoftKeyboard());
+    }
     _textSendGeneration++;
     _sendingText = false;
     _textController.value = TextEditingValue.empty;
@@ -425,6 +533,9 @@ class _EmulatorPageState extends State<EmulatorPage>
       _discardTextComposer(restoreKeyboardFocus: false);
     }
     _background = background;
+    if (!widget.dashboardMode) {
+      model.framePacer.focused = !_background && _viewFocused;
+    }
     _updateGuestRecovery();
     if (mounted) setState(() {});
   }
@@ -438,6 +549,9 @@ class _EmulatorPageState extends State<EmulatorPage>
       _discardTextComposer(restoreKeyboardFocus: false);
     }
     _viewFocused = focused;
+    if (!widget.dashboardMode) {
+      model.framePacer.focused = !_background && _viewFocused;
+    }
     _updateGuestRecovery();
     setState(() {});
   }
@@ -583,14 +697,14 @@ class _EmulatorPageState extends State<EmulatorPage>
                   children: [
                     DecoratedBox(
                       decoration: BoxDecoration(
-                        color: MirpgRemoteTheme.raised,
+                        color: MirpgStudioPalette.of(context).raised,
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: const SizedBox(
+                        child: SizedBox(
                         width: 48,
                         height: 48,
                         child: Icon(Icons.android_outlined,
-                            color: MirpgRemoteTheme.accent),
+                            color: MirpgStudioPalette.of(context).accent),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -619,7 +733,7 @@ class _EmulatorPageState extends State<EmulatorPage>
                                 style: Theme.of(context)
                                     .textTheme
                                     .bodySmall
-                                    ?.copyWith(color: MirpgRemoteTheme.error)),
+                                    ?.copyWith(color: MirpgStudioPalette.of(context).error)),
                           ],
                           const SizedBox(height: 8),
                           Wrap(
@@ -683,13 +797,13 @@ class _EmulatorPageState extends State<EmulatorPage>
   Widget _error() => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: MirpgSurface(
-          color: MirpgRemoteTheme.error.withOpacity(0.08),
-          borderColor: MirpgRemoteTheme.error.withOpacity(0.45),
+          color: MirpgStudioPalette.of(context).error.withOpacity(0.08),
+          borderColor: MirpgStudioPalette.of(context).error.withOpacity(0.45),
           child: Text(model.error,
               style: Theme.of(context)
                   .textTheme
                   .bodyMedium
-                  ?.copyWith(color: MirpgRemoteTheme.error)),
+                  ?.copyWith(color: MirpgStudioPalette.of(context).error)),
         ),
       );
 
@@ -744,62 +858,18 @@ class _EmulatorPageState extends State<EmulatorPage>
         child: SafeArea(
           child: Stack(
             children: [
-              if (model.height > model.width)
-                PortraitGuestStage(
-                  guestWidth: model.width,
-                  guestHeight: model.height,
-                  video: _guestCanvas(),
-                  controls: _portraitControls(),
-                )
-              else
-                Row(children: [
-                  SizedBox(
-                      width: 56,
-                      child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            _overlayButton(
-                                tooltip: widget.onSwitch == null
-                                    ? 'Return to Windows desktop'
-                                    : 'Switch view',
-                                icon: widget.onSwitch == null
-                                    ? Icons.desktop_windows_outlined
-                                    : Icons.view_agenda_outlined,
-                                onPressed: () => unawaited(_switchView())),
-                            if (widget.onReturn != null)
-                              _overlayButton(
-                                  tooltip: 'Dashboard',
-                                  icon: Icons.grid_view_outlined,
-                                  onPressed: () => unawaited(_back())),
-                          ])),
-                  Expanded(child: _guestCanvas()),
-                  SizedBox(
-                      width: 56,
-                      child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            _overlayButton(
-                                tooltip: model.guestTextSupported
-                                    ? 'Type text'
-                                    : 'Text input unavailable on this host',
-                                icon: Icons.keyboard_outlined,
-                                onPressed: canGuestControl &&
-                                        model.streaming &&
-                                        model.guestTextSupported &&
-                                        !_returning
-                                    ? _openTextComposer
-                                    : null),
-                            const SizedBox(height: 8),
-                            _overlayNavigation(
-                                Icons.arrow_back, 'Back', 'back'),
-                            const SizedBox(height: 8),
-                            _overlayNavigation(
-                                Icons.home_outlined, 'Home', 'home'),
-                            const SizedBox(height: 8),
-                            _overlayNavigation(
-                                Icons.crop_square, 'Recents', 'recents'),
-                          ])),
-                ]),
+              GuestControlStage(
+                video: _guestCanvas(),
+                controlsVisible: _guestControlsVisible,
+                onToggleControls: _toggleGuestControls,
+                controls: ColoredBox(
+                  color: Colors.black,
+                  child: _textComposerVisible
+                      ? _guestTextComposer()
+                      : _guestControls(),
+                ),
+              ),
+              if (!canControl || !model.guestFrameFresh)
               Positioned(
                 top: 8,
                 left: model.height > model.width ? 8 : 64,
@@ -822,54 +892,32 @@ class _EmulatorPageState extends State<EmulatorPage>
                   ),
                 ),
               ),
-              if (_textComposerVisible)
-                Positioned(
-                  left: model.height > model.width ? 16 : 64,
-                  right: model.height > model.width ? 16 : 64,
-                  bottom: model.height > model.width ? 76 : 12,
-                  child: MirpgSurface(
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _textController,
-                            focusNode: _textFocus,
-                            autofocus: true,
-                            maxLines: 1,
-                            textInputAction: TextInputAction.done,
-                            decoration: const InputDecoration(
-                              hintText: 'Type text to Android',
-                              border: InputBorder.none,
-                            ),
-                            onSubmitted: (_) {
-                              if (mounted && _textComposerVisible) {
-                                _textFocus.requestFocus();
-                              }
-                            },
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: 'Send text',
-                          onPressed: canGuestControl && !_sendingText
-                              ? () => unawaited(_sendTextDraft())
-                              : null,
-                          icon: const Icon(Icons.send_rounded),
-                        ),
-                        IconButton(
-                          tooltip: 'Close keyboard',
-                          onPressed: () => setState(_discardTextComposer),
-                          icon: const Icon(Icons.close),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
             ],
           ),
         ),
       ),
     );
   }
+
+  void _toggleGuestControls() {
+    _cancelGuestInput();
+    setState(() {
+      _guestControlsVisible = !_guestControlsVisible;
+      if (!_guestControlsVisible) _discardTextComposer();
+    });
+  }
+
+  Widget _guestTextComposer() => GuestTextComposer(
+        controller: _textController,
+        focusNode: _textFocus,
+        onSubmitted: (_) {
+          if (mounted && _textComposerVisible) _textFocus.requestFocus();
+        },
+        onSend: canGuestControl && !_sendingText
+            ? () => unawaited(_sendTextDraft())
+            : null,
+        onClose: () => setState(_discardTextComposer),
+      );
 
   Future<void> _switchView() async {
     _cancelGuestInput();
@@ -905,7 +953,7 @@ class _EmulatorPageState extends State<EmulatorPage>
         ),
       );
 
-  Widget _portraitControls() => SizedBox(
+  Widget _guestControls() => SizedBox(
         height: 56,
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -945,7 +993,26 @@ class _EmulatorPageState extends State<EmulatorPage>
         ),
       );
 
+  void _restoreGuestCanvasFocus() {
+    // A delivered touch proves view focus even if Android missed its focus event.
+    if (_textComposerVisible ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed ||
+        !_hostCanControl ||
+        !model.guestFrameFresh) return;
+    final changed = _background || !_viewFocused;
+    if (changed) _cancelGuestInput();
+    _background = false;
+    _viewFocused = true;
+    if (!_keyboardFocus.hasFocus) _keyboardFocus.requestFocus();
+    if (changed) {
+      if (!widget.dashboardMode) model.framePacer.focused = true;
+      _updateGuestRecovery();
+      setState(() {});
+    }
+  }
+
   void _touch(int action, PointerEvent event, BoxConstraints box) {
+    if (action == 0) _restoreGuestCanvasFocus();
     if (!canGuestControl ||
         !model.streaming ||
         box.maxWidth <= 0 ||

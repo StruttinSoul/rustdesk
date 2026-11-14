@@ -97,7 +97,7 @@ impl GuestHelper {
                     } else {
                         "max_size=1280"
                     },
-                    if preview { "max_fps=6" } else { "max_fps=30" },
+                    "max_fps=30",
                     if preview {
                         "video_bit_rate=350000"
                     } else {

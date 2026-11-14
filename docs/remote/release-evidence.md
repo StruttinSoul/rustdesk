@@ -35,7 +35,6 @@ For each ledger row moving toward complete, record exact source commit and dirty
 - BlueStacks live preview, direct touch, Resume/Boot/Launch-game separation, Back/Home/Recents, rotation and decoder continuity.
 - Actual LAN route preference and session-health readings without application-queue inflation.
 - IME/Unicode text and multiline safe paste with no implicit Enter/execute.
-- Codex runtime ownership, acknowledgment/draft behavior and exact approvals.
 - Files/System/Shell error and recovery states.
 - Privacy/input lock/lock-on-disconnect and Phone Workspace owned lifecycle.
 - Gateway status/setup/IMDb/restart against the real supervisor.
@@ -90,56 +89,9 @@ Fresh focused evidence on 2026-10-05:
 
 Remaining WP2 runtime evidence gap: source/unit/widget checks cannot prove real-device latency, packet-loss behavior, actual decoder recovery, focus/background delivery timing, or that a physically held Ctrl/mouse/touch is released on the real Windows + Galaxy S25 Ultra path during network loss. Those checks remain in the physical/runtime matrix and WP14 release gate.
 
-## WP3 Codex submission, ownership, and approval gate
+## Retired integration work
 
-WP3 now has source/unit/widget coverage for draft preservation, exact-operation reconciliation, bridge-owned task identity, and approval routing. Physical airplane-mode/restart behavior is still a WP14 matched-binary runtime requirement.
-
-- Submitted Codex text remains in the composer until the exact host operation is positively acknowledged. An acknowledgment clears only the submitted snapshot; edits typed while that operation is pending remain in the composer.
-- A lost mutation acknowledgment becomes an unknown outcome. The client performs one reconciliation attempt with the same operation ID and permits only an exact-snapshot retry with that same ID; a different instruction is blocked until the uncertain operation is reconciled.
-- Consequential Codex mutations use the WP1 session identity/generation and exact target identity. The host keeps a bounded replay cache so an exact duplicate can return its recorded result without creating a second turn, while operation-ID reuse for another action/target is rejected.
-- MIRPG task ownership is connection scoped. Persisted Codex Desktop threads are presented as `History` on Android and stay read-only when opened. Only an explicit `Resume` claims the task; subscription and approval reads happen after the exact resume acknowledgment succeeds.
-- Pending approvals are bound on first delivery to the owning connection, operation session identity, session generation, task, turn, item, and approval kind. A reconnect/generation change cannot rebind the old approval. Listing and responding both enforce that binding, and successful resolution/turn completion/bridge reset removes it.
-- Command approvals expose the bounded command, working directory, and reason where available. File-change approvals expose the bounded grant scope without forwarding raw diff/policy material.
-- Unsupported permission approvals remain visible and non-actionable with the exact copy: `This request needs a compatible MIRPG bridge action. Opening Windows Codex does not transfer this approval.` Opening the Windows app is a separate action and does not transfer approval authority.
-
-Fresh focused evidence on 2026-10-05:
-
-- `C:\flutter-3.24.5\bin\flutter.bat test --no-pub test\codex_model_test.dart test\codex_page_test.dart` → 26 passed, 0 failed. This includes history staying read-only until explicit resume, draft preservation, exact submitted-snapshot clearing, lost-ack reconciliation, exact-snapshot unknown-outcome retry, stale approval reconciliation, and the unsupported-approval no-fake-handoff UI.
-- `cargo test --lib codex -- --nocapture` with `VCPKG_ROOT=C:\vcpkg` and `LIBCLANG_PATH=C:\vcpkg\downloads\tools\clang\clang-15.0.6\bin` → 60 passed, 0 failed, 4 ignored. The ignored tests require a live local Codex installation/session or foregrounding the Windows Codex app.
-- New host tests `approval_wrong_runtime_rejected` and `expired_approval_not_replayed` pass and cover the immutable approval runtime/session-generation binding.
-- Existing Codex tests cover exact duplicate operation replay, operation-ID conflict rejection, connection-scoped thread ownership, action/target binding, one-shot approval responses, unsupported permissions visibility, and persisted threads requiring explicit native ownership before control.
-- Rust verification continues to emit the repository's existing 44-warning set; WP3 does not claim a warning-free build.
-
-Remaining WP3 runtime evidence gap: the real Windows host + Galaxy S25 Ultra still must prove airplane-mode/lost-ack behavior, process/runtime restart, reconnect generation changes, live resume/send/steer/stop, and approval handling against matched artifacts. Those checks remain in WP14 and are not inferred from source/unit/widget tests.
-
-## WP4 Codex workspace, queue, review, and artifact gate
-
-WP4 now has source/unit/widget coverage for host-approved workspace selection, exact Queue/Steer/Stop targeting, structured bounded review paging, and reconnect-safe queue state. The live disposable-task gate is still pending and is not inferred from these tests.
-
-- New tasks use host-issued opaque workspace IDs. Arbitrary client paths are rejected, inaccessible/deleted roots cannot be started, workspace paging is snapshot-bound, and roots removed from the current host inventory invalidate their old start IDs.
-- Queue/Steer/Stop remain bound to the owning remote runtime, current session generation, exact task, and expected active turn. Queue entries carry the exact operation ID; a host `queuedStart` event removes that operation even when it arrives before the original queue acknowledgment.
-- A late queue acknowledgment cannot roll a task that already completed back to `working`. Resume negotiates `codex.queue.reconcile.v1` and reconciles against the host's authoritative pending operation IDs. If the phone no longer has the original queue text after reconnect, the pending operation remains visible as `Queued instruction on PC · details unavailable` instead of disappearing or inventing text.
-- Review negotiates `codex.review.v1`. Host-issued change/artifact IDs are task scoped; arbitrary mobile paths are never accepted. Public list pages are capped at 100 entries, one request processes at most 1000 raw file changes, diff pages are capped at 32 KiB with a 4 MiB accumulated client limit, and artifact previews are capped at 32 KiB pages with a 1 MiB accumulated client limit.
-- Review continuation cursors are opaque, task/root/view scoped, bounded to 128 entries, item-fingerprint checked, and retryable after a lost page response. The active cursor is refreshed in the LRU before allocating its continuation so response retry still works at full cursor capacity.
-- Host review records use bounded FIFO eviction instead of clearing the whole registry. Cached diff content is capped, unavailable artifact IDs cannot become readable later, and artifact reads remain bound to the file snapshot recorded when the artifact ID was issued.
-- Windows artifact reads reject symlink/reparse components, canonicalize the resolved file under the approved workspace, and recheck the opened handle path before reading. Binary/invalid UTF-8 and oversized content return safe fallback states instead of being rendered as text.
-- Mobile review memory is bounded across long sessions: at most four stored task-diff previews and eight stored artifact previews are retained at once, including partially loaded previews; the change/artifact lists are separately capped per task.
-
-Fresh focused evidence on 2026-10-05 at HEAD `59221185a99cf555fcee552114fb5589c66a15b8` with the existing dirty feature tree preserved:
-
-- `C:\flutter-3.24.5\bin\flutter.bat test --no-pub test\codex_model_test.dart test\codex_page_test.dart` → 54 passed, 0 failed. New coverage includes queue-start-before-ack, late queue-ack state regression, authoritative resume reconciliation, host-only queued-operation visibility, bounded diff/artifact preview caches, malformed/stale review responses, UTF-8 byte offsets, and retryable review requests.
-- `cargo test --lib codex -- --nocapture` with `VCPKG_ROOT=C:\vcpkg` and `LIBCLANG_PATH=C:\vcpkg\downloads\tools\clang\clang-15.0.6\bin` → 93 passed, 0 failed, 4 ignored. The ignored tests require a live local Codex installation/authenticated session or foregrounding the Windows Codex app.
-- TDD evidence for retryable review paging: `review_cursor_can_be_replayed_after_response_loss` first failed with `Codex review cursor is invalid or stale`, then passed after consumed cursors became replayable. `active_review_cursor_survives_capacity_pressure_for_response_retry` first failed at the 128-cursor boundary, then passed after the active cursor was refreshed before continuation allocation.
-- TDD evidence for client state safety: `diff preview cache evicts the oldest completed preview`, `artifact preview cache evicts the oldest completed preview`, `late queue ack cannot roll a completed queued turn back to working`, and `resume keeps host-only queued operations visible after reconnect` each failed against the prior behavior and passed after the bounded/reconciled implementation.
-- `flutter analyze --no-pub lib\models\codex_model.dart test\codex_model_test.dart` → no issues found. A separate analyzer pass over `codex_page.dart`, `codex_review_panel.dart`, and `codex_page_test.dart` also reported no issues.
-- `git diff --check` → no whitespace errors; only the repository's existing LF/CRLF conversion warnings were emitted.
-- Rust verification continues to emit the repository's existing 44-warning set; WP4 does not claim a warning-free build.
-
-Remaining WP4 evidence gaps and limits:
-
-- The plan's real disposable-task gate still needs a live tested-host run covering create, follow, steer, queue, stop, and structured review while native approval boundaries remain intact.
-- The command runner rejected the attempted temporary Windows symlink creation probe before execution, so no physical reparse-point fixture was created in this pass. The Windows source path contains the reparse checks, but runtime filesystem proof remains pending.
-- Artifact enumeration currently represents file-change-backed outputs. It does not yet constitute comprehensive enumeration of every possible Codex-generated media/output artifact, so no such claim is made.
+WP3/WP4 (coding assistant control/review) and WP13 (task notifications) were removed from the product at the user's request on 2026-10-20. Their old acceptance gates no longer apply. See [removal report](2026-10-20-codex-removal.md).
 
 ## WP5 BlueStacks text, rotation recovery, and startup-state gate
 
@@ -340,8 +292,7 @@ Remaining WP11 runtime/protocol evidence gap:
 WP12 is partial at source/widget/accessibility scope. The supplied visual kit is now represented by a shared graphite/mint theme and the connected workspace is moving toward the reference hierarchy without claiming screenshot parity. Physical-device and complete 40-state visual evidence remain open.
 
 - The shared theme uses the visual-kit typography hierarchy explicitly: 24sp titles, 18sp sections, 16sp body, 14sp secondary/labels, and 12sp metadata. Shared controls retain a 48dp minimum interactive target.
-- Overview ordering is Windows monitors first, BlueStacks instances second, followed by an Ongoing work card when Codex is available. That card reads the existing Codex model and uses the visual-kit `Needs you`, `Running`, and `Review` state vocabulary; it does not create a second task state source.
-- The Codex summary has a dedicated 200% text layout that reduces secondary detail while preserving the active task state and `Open Codex` action. Desktop-history-only resumable tasks are excluded from the ongoing-work summary.
+- Overview ordering is Windows monitors first and BlueStacks instances second. The former coding-task summary was removed on 2026-10-20.
 - Windows floating mouse controls expose Held/Released semantics. Their drag handle has semantic reposition actions, the thumbwheel exposes accessibility increase/decrease actions, and the minimap exposes local viewport movement actions.
 - The minimap keeps at least a 48dp interaction target even when the rendered desktop miniature is shorter. Tap/drag and accessibility panning modify only the local viewport; the existing regression confirms they do not emit remote pointer clicks.
 - The earlier visual-system pass also moved Windows monitor cards before BlueStacks cards, normalized the connected-workspace theme, and retained the existing 48dp toolbar/control sizing.
@@ -352,7 +303,7 @@ WP12 is partial at source/widget/accessibility scope. The supplied visual kit is
 Fresh focused evidence on 2026-10-06 with the existing dirty feature tree preserved:
 
 - `C:\flutter-3.24.5\bin\cache\dart-sdk\bin\dart.exe analyze lib\mobile\pages\target_dashboard_page.dart lib\mobile\widgets\monitor_control_view.dart lib\mobile\widgets\privacy_controls_sheet.dart test\target_dashboard_test.dart test\monitor_control_view_test.dart` → no issues found.
-- `C:\flutter-3.24.5\bin\flutter.bat test --no-pub test\mirpg_remote_theme_test.dart test\monitor_control_view_test.dart test\target_dashboard_test.dart` → 56 passed, 0 failed. This includes the 200% Codex-summary layout and 48dp minimap-target regressions.
+- `C:\flutter-3.24.5\bin\flutter.bat test --no-pub test\mirpg_remote_theme_test.dart test\monitor_control_view_test.dart test\target_dashboard_test.dart` → 56 passed, 0 failed. This historical run predates the integration removal and included the former task-summary layout and 48dp minimap-target regressions.
 - `git diff --check` over the focused WP11/WP12 source/test surface → no whitespace errors; only the repository's existing LF/CRLF conversion warnings were emitted.
 - Latest UI/control regression run: `C:\flutter-3.24.5\bin\flutter.bat test --no-pub test/mirpg_remote_theme_test.dart test/monitor_control_view_test.dart test/target_dashboard_test.dart test/remote_conformance/host_capability_ui_test.dart` → 66 passed, 0 failed. New regressions cover 360dp remote chrome/touch targets, Precision duplicate-control suppression, and explicit Open/Resume target actions.
 - Latest focused Dart analysis over the Windows controls, grouped Overview, System/Gateway page, and related tests → no issues found.
@@ -360,30 +311,8 @@ Fresh focused evidence on 2026-10-06 with the existing dirty feature tree preser
 Remaining WP12 visual/runtime evidence gap:
 
 - The supplied HTML/vector reference still needs browser rendering and side-by-side capture; source token alignment is not claimed as screenshot parity.
-- The complete 40-state visual inventory still needs deterministic fixture/golden or equivalent capture coverage. Current focused widgets do not prove every Files, Shell, System, Codex, emulator, reconnect, notification, and Gateway state.
+- The remaining visual inventory still needs deterministic fixture/golden or equivalent capture coverage. Current focused widgets do not prove every Files, Shell, System, emulator, reconnect, and Gateway state. Removed task and notification views are no longer acceptance requirements.
 - A matched Galaxy S25 Ultra run still needs screenshots and interaction checks for normal and large text, portrait/landscape remote sessions, IME-open states, long labels, display cutouts/insets, and the final Overview ordering on the physical phone.
-
-## WP13 Opt-in Codex task notifications
-
-WP13 is implemented and verified at source/unit/Android-compile scope. The in-app Codex workflow remains fully usable with task notifications disabled. Enabling alerts is an explicit action in the Codex header and, on Android 13+, is the point at which `POST_NOTIFICATIONS` is checked/requested.
-
-- The notification policy accepts only actionable approval, review-ready turn completion, and failed-turn events. Event IDs are bounded and persisted so reconnect/history refresh does not re-alert old work. An authoritative approval-list refresh seeds existing approvals as history without generating a notification.
-- Notification payloads contain the current Windows runtime ID plus Codex thread ID. A tap reconnects through the existing `rustdesk://` flow and opens Codex for that task when it still exists; a stale task falls back to the Codex task list instead of inventing state or failing the connection.
-- Lockscreen content is private and task titles are redacted by default. The user can explicitly allow task names in alerts. A generic public notification version is supplied for the private setting.
-- Android delivery uses the existing app method channel and permission machinery; no second notification dependency/service was introduced. If permission is revoked or delivery fails, alerts are paused and require explicit re-enable rather than repeatedly prompting.
-- The app describes the actual background limitation: these alerts are produced while the connected remote session/app process receives Codex events. Always-on monitoring after Android kills the process is not claimed.
-
-Fresh focused evidence on 2026-10-06 with the existing dirty feature tree preserved:
-
-- `C:\flutter-3.24.5\bin\flutter.bat test --no-pub test\remote_conformance\task_notification_test.dart test\codex_model_test.dart` → 44 passed, 0 failed. This includes all five named WP13 policy tests plus live actionable-approval delivery and reconnect/history suppression at the CodexModel boundary.
-- Earlier combined verification after the production integration: `flutter test --no-pub test\remote_conformance\task_notification_test.dart test\codex_model_test.dart test\codex_page_test.dart test\target_dashboard_test.dart` → 76 passed, 0 failed.
-- `C:\Programming Projects\MIRPG\rustdesk-emulator-remote\flutter\android\gradlew.bat app:compileDebugKotlin` → BUILD SUCCESSFUL. Existing dependency/deprecation warnings remain; no WP13 Kotlin compile error was present.
-- Targeted Dart analysis found no new compile error in the WP13 surface. The broad command still returns the repository's pre-existing warnings/information from large legacy files, so a warning-free global analysis is not claimed.
-
-Remaining WP13 runtime evidence gap:
-
-- A matched Galaxy S25 Ultra must verify first-enable permission grant/denial, later revocation, foreground and background delivery while the process survives, behavior after process recreation, lockscreen redaction, notification-channel settings, and notification taps into both a live task and a task that disappeared before opening.
-- Android may suppress or delay background notifications according to process/lifecycle restrictions. No push service or independent background Codex monitor has been added, so the app does not promise alerts after its connected process has been killed.
 
 ## WP14 Matched package and physical-runtime gate
 

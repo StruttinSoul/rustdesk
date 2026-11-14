@@ -22,10 +22,12 @@ import '../../models/platform_model.dart';
 import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
 
 class OnlineStatusWidget extends StatefulWidget {
-  const OnlineStatusWidget({Key? key, this.onSvcStatusChanged})
+  const OnlineStatusWidget(
+      {Key? key, this.onSvcStatusChanged, this.compact = false})
       : super(key: key);
 
   final VoidCallback? onSvcStatusChanged;
+  final bool compact;
 
   @override
   State<OnlineStatusWidget> createState() => _OnlineStatusWidgetState();
@@ -38,7 +40,8 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   Timer? _updateTimer;
 
   double get em => 14.0;
-  double? get height => bind.isIncomingOnly() ? null : em * 3;
+  double? get height =>
+      widget.compact ? null : (bind.isIncomingOnly() ? null : em * 3);
 
   void onUsePublicServerGuide() {
     const url = "https://rustdesk.com/pricing";
@@ -124,22 +127,25 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
                         ? Color.fromARGB(255, 50, 190, 166)
                         : Color.fromARGB(255, 224, 79, 95)),
               ),
-            ).marginSymmetric(horizontal: em),
-            Container(
-              width: isIncomingOnly ? 226 : null,
-              child: _buildConnStatusMsg(),
-            ),
+            ).marginOnly(left: widget.compact ? 0 : em, right: em),
+            if (widget.compact)
+              Expanded(child: _buildConnStatusMsg())
+            else
+              Container(
+                width: isIncomingOnly ? 226 : null,
+                child: _buildConnStatusMsg(),
+              ),
             // stop
-            if (!isIncomingOnly) startServiceWidget(),
+            if (!isIncomingOnly && !widget.compact) startServiceWidget(),
             // ready && public
             // No need to show the guide if is custom client.
-            if (!isIncomingOnly) setupServerWidget(),
+            if (!isIncomingOnly && !widget.compact) setupServerWidget(),
           ],
         );
 
     return Container(
       height: height,
-      child: Obx(() => isIncomingOnly
+      child: Obx(() => isIncomingOnly || widget.compact
           ? Column(
               children: [
                 basicWidget(),

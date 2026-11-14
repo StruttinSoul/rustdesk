@@ -1,21 +1,85 @@
 import 'package:flutter/material.dart';
 
+/// Studio V4's semantic palette. Resolve it from the inherited theme so the
+/// existing saved System / Light / Dark preference works for connected pages.
+@immutable
+class MirpgStudioPalette {
+  const MirpgStudioPalette({
+    required this.background,
+    required this.surface,
+    required this.raised,
+    required this.textPrimary,
+    required this.textSecondary,
+    required this.accent,
+    required this.good,
+    required this.outline,
+    required this.divider,
+    required this.error,
+    required this.warning,
+  });
+
+  final Color background;
+  final Color surface;
+  final Color raised;
+  final Color textPrimary;
+  final Color textSecondary;
+  final Color accent;
+  final Color good;
+  final Color outline;
+  final Color divider;
+  final Color error;
+  final Color warning;
+
+  static const light = MirpgStudioPalette(
+    background: Color(0xFFF5F7FA),
+    surface: Colors.white,
+    raised: Colors.white,
+    textPrimary: Color(0xFF192431),
+    textSecondary: Color(0xFF5E6D7F),
+    accent: Color(0xFF2855CC),
+    good: Color(0xFF0C795D),
+    outline: Color(0xFFDCE3EA),
+    divider: Color(0xFFDCE3EA),
+    error: Color(0xFFB43E43),
+    warning: Color(0xFF835314),
+  );
+
+  static const dark = MirpgStudioPalette(
+    background: Color(0xFF101923),
+    surface: Color(0xFF1C2938),
+    raised: Color(0xFF26374A),
+    textPrimary: Color(0xFFF0F5FC),
+    textSecondary: Color(0xFFBBC8D8),
+    accent: Color(0xFFA4BCFF),
+    good: Color(0xFF70D8B0),
+    outline: Color(0xFF36475B),
+    divider: Color(0xFF36475B),
+    error: Color(0xFFFFB4AB),
+    warning: Color(0xFFFFE0A6),
+  );
+
+  static MirpgStudioPalette of(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark ? dark : light;
+}
+
 /// Visual authority for the MIRPG Remote Android client.
 ///
 /// Keep these values aligned with the supplied MIRPG Remote visual kit. The
 /// mobile client should prefer theme values and the shared widgets below over
 /// page-local colors and radii.
 abstract final class MirpgRemoteTheme {
-  static const background = Color(0xFF101416);
-  static const surface = Color(0xFF191F22);
-  static const raised = Color(0xFF242C30);
-  static const textPrimary = Color(0xFFF1F4F5);
-  static const textSecondary = Color(0xFFAEBAC0);
-  static const accent = Color(0xFF70D8C1);
-  static const outline = Color(0xFF3E494E);
-  static const divider = Color(0xFF303A3E);
+  // Legacy constants retained for older overlay code. New UI should use
+  // MirpgStudioPalette.of(context) to support both appearance modes.
+  static const background = Color(0xFF101923);
+  static const surface = Color(0xFF1C2938);
+  static const raised = Color(0xFF26374A);
+  static const textPrimary = Color(0xFFF0F5FC);
+  static const textSecondary = Color(0xFFBBC8D8);
+  static const accent = Color(0xFFA4BCFF);
+  static const outline = Color(0xFF36475B);
+  static const divider = Color(0xFF36475B);
   static const error = Color(0xFFFFB4AB);
-  static const warning = Color(0xFFEAC98B);
+  static const warning = Color(0xFFFFE0A6);
 
   static const double pageMargin = 16;
   static const double rhythm = 8;
@@ -25,10 +89,24 @@ abstract final class MirpgRemoteTheme {
   static const double minTouchTarget = 48;
 
   static ThemeData build(ThemeData base) {
-    final scheme = const ColorScheme.dark(
+    final isDark = base.brightness == Brightness.dark;
+    final palette = isDark ? MirpgStudioPalette.dark : MirpgStudioPalette.light;
+    final background = palette.background;
+    final surface = palette.surface;
+    final raised = palette.raised;
+    final textPrimary = palette.textPrimary;
+    final textSecondary = palette.textSecondary;
+    final accent = palette.accent;
+    final outline = palette.outline;
+    final divider = palette.divider;
+    final error = palette.error;
+    final scheme = ColorScheme.fromSeed(
+      seedColor: accent,
+      brightness: base.brightness,
+    ).copyWith(
       primary: accent,
       secondary: accent,
-      tertiary: warning,
+      tertiary: palette.good,
       surface: surface,
       surfaceDim: background,
       surfaceBright: raised,
@@ -37,12 +115,12 @@ abstract final class MirpgRemoteTheme {
       surfaceContainer: surface,
       surfaceContainerHigh: raised,
       surfaceContainerHighest: raised,
-      onPrimary: background,
-      onSecondary: background,
+      onPrimary: isDark ? background : Colors.white,
+      onSecondary: isDark ? background : Colors.white,
       onSurface: textPrimary,
       onSurfaceVariant: textSecondary,
       error: error,
-      onError: Color(0xFF690005),
+      onError: isDark ? const Color(0xFF690005) : Colors.white,
       outline: outline,
       outlineVariant: divider,
     );
@@ -115,7 +193,7 @@ abstract final class MirpgRemoteTheme {
 
     return ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: base.brightness,
       // Preserve RustDesk's custom theme extensions (notably TabbarTheme and
       // ColorThemeExtension). PeerTabPage and other shared widgets read these
       // through MyTheme and expect them to remain available under this nested
@@ -146,8 +224,8 @@ abstract final class MirpgRemoteTheme {
         centerTitle: false,
         toolbarHeight: 64,
         titleSpacing: pageMargin,
-        iconTheme: const IconThemeData(color: textPrimary, size: 24),
-        actionsIconTheme: const IconThemeData(color: textPrimary, size: 24),
+        iconTheme: IconThemeData(color: textPrimary, size: 24),
+        actionsIconTheme: IconThemeData(color: textPrimary, size: 24),
         titleTextStyle: textTheme.titleLarge,
       ),
       cardTheme: CardTheme(
@@ -158,7 +236,7 @@ abstract final class MirpgRemoteTheme {
         clipBehavior: Clip.antiAlias,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(surfaceRadius),
-          side: const BorderSide(color: outline),
+          side: BorderSide(color: outline),
         ),
       ),
       navigationBarTheme: NavigationBarThemeData(
@@ -200,7 +278,7 @@ abstract final class MirpgRemoteTheme {
           minimumSize: const Size(0, minTouchTarget),
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
           foregroundColor: textPrimary,
-          side: const BorderSide(color: outline),
+          side: BorderSide(color: outline),
           shape: controlShape,
           textStyle: textTheme.labelLarge,
         ),
@@ -212,7 +290,7 @@ abstract final class MirpgRemoteTheme {
           foregroundColor: textPrimary,
           backgroundColor: raised,
           elevation: 0,
-          side: const BorderSide(color: outline),
+          side: BorderSide(color: outline),
           shape: controlShape,
           textStyle: textTheme.labelLarge,
         ),
@@ -244,30 +322,30 @@ abstract final class MirpgRemoteTheme {
             const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(controlRadius),
-          borderSide: const BorderSide(color: outline),
+          borderSide: BorderSide(color: outline),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(controlRadius),
-          borderSide: const BorderSide(color: outline),
+          borderSide: BorderSide(color: outline),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(controlRadius),
-          borderSide: const BorderSide(color: accent, width: 1.5),
+          borderSide: BorderSide(color: accent, width: 1.5),
         ),
         errorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(controlRadius),
-          borderSide: const BorderSide(color: error),
+          borderSide: BorderSide(color: error),
         ),
         focusedErrorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(controlRadius),
-          borderSide: const BorderSide(color: error, width: 1.5),
+          borderSide: BorderSide(color: error, width: 1.5),
         ),
       ),
       chipTheme: ChipThemeData(
         backgroundColor: surface,
         selectedColor: accent.withOpacity(0.14),
         disabledColor: surface,
-        side: const BorderSide(color: outline),
+        side: BorderSide(color: outline),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(controlRadius),
         ),
@@ -275,20 +353,20 @@ abstract final class MirpgRemoteTheme {
         secondaryLabelStyle: textTheme.labelMedium?.copyWith(color: accent),
         padding: const EdgeInsets.symmetric(horizontal: 8),
       ),
-      listTileTheme: const ListTileThemeData(
+      listTileTheme: ListTileThemeData(
         textColor: textPrimary,
         iconColor: textSecondary,
         selectedColor: accent,
-        selectedTileColor: Color(0x1870D8C1),
+        selectedTileColor: accent.withOpacity(0.14),
         minVerticalPadding: 10,
         contentPadding: EdgeInsets.symmetric(horizontal: pageMargin),
       ),
-      dividerTheme: const DividerThemeData(
+      dividerTheme: DividerThemeData(
         color: divider,
         thickness: 1,
         space: 1,
       ),
-      bottomSheetTheme: const BottomSheetThemeData(
+      bottomSheetTheme: BottomSheetThemeData(
         backgroundColor: raised,
         modalBackgroundColor: raised,
         surfaceTintColor: Colors.transparent,
@@ -304,7 +382,7 @@ abstract final class MirpgRemoteTheme {
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(surfaceRadius),
-          side: const BorderSide(color: outline),
+          side: BorderSide(color: outline),
         ),
       ),
       popupMenuTheme: PopupMenuThemeData(
@@ -313,7 +391,7 @@ abstract final class MirpgRemoteTheme {
         elevation: 4,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(controlRadius),
-          side: const BorderSide(color: outline),
+          side: BorderSide(color: outline),
         ),
       ),
       snackBarTheme: SnackBarThemeData(
@@ -323,10 +401,10 @@ abstract final class MirpgRemoteTheme {
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(controlRadius),
-          side: const BorderSide(color: outline),
+          side: BorderSide(color: outline),
         ),
       ),
-      progressIndicatorTheme: const ProgressIndicatorThemeData(color: accent),
+      progressIndicatorTheme: ProgressIndicatorThemeData(color: accent),
     );
   }
 }
@@ -336,23 +414,24 @@ class MirpgSurface extends StatelessWidget {
     super.key,
     required this.child,
     this.padding = const EdgeInsets.all(16),
-    this.color = MirpgRemoteTheme.surface,
-    this.borderColor = MirpgRemoteTheme.divider,
+    this.color,
+    this.borderColor,
     this.radius = MirpgRemoteTheme.surfaceRadius,
   });
 
   final Widget child;
   final EdgeInsetsGeometry padding;
-  final Color color;
-  final Color borderColor;
+  final Color? color;
+  final Color? borderColor;
   final double radius;
 
   @override
   Widget build(BuildContext context) => DecoratedBox(
         decoration: BoxDecoration(
-          color: color,
+          color: color ?? MirpgStudioPalette.of(context).surface,
           borderRadius: BorderRadius.circular(radius),
-          border: Border.all(color: borderColor),
+          border: Border.all(
+              color: borderColor ?? MirpgStudioPalette.of(context).outline),
         ),
         child: Padding(padding: padding, child: child),
       );
@@ -400,27 +479,34 @@ class MirpgStatusChip extends StatelessWidget {
     required this.label,
     this.icon,
     this.tone = MirpgStatusTone.neutral,
+    this.onDarkSurface = false,
   });
 
   final String label;
   final IconData? icon;
   final MirpgStatusTone tone;
+  /// Use a dark backdrop and bright labels over live video previews.
+  final bool onDarkSurface;
 
-  Color _foreground() => switch (tone) {
-        MirpgStatusTone.good => MirpgRemoteTheme.accent,
-        MirpgStatusTone.warning => MirpgRemoteTheme.warning,
-        MirpgStatusTone.error => MirpgRemoteTheme.error,
-        MirpgStatusTone.neutral => MirpgRemoteTheme.textSecondary,
+  Color _foreground(MirpgStudioPalette palette) => switch (tone) {
+        MirpgStatusTone.good => palette.good,
+        MirpgStatusTone.warning => palette.warning,
+        MirpgStatusTone.error => palette.error,
+        MirpgStatusTone.neutral => palette.textSecondary,
       };
 
   @override
   Widget build(BuildContext context) {
-    final foreground = _foreground();
+    final foreground = _foreground(onDarkSurface
+        ? MirpgStudioPalette.dark
+        : MirpgStudioPalette.of(context));
     return Container(
       constraints: const BoxConstraints(minHeight: 32),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: foreground.withOpacity(0.08),
+        color: onDarkSurface
+            ? const Color(0xE6101923)
+            : foreground.withOpacity(0.08),
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: foreground.withOpacity(0.45)),
       ),

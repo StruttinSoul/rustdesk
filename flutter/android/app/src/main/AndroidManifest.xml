@@ -28,9 +28,9 @@
 
     <application
         android:name=".MainApplication"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="${rustdeskAppIcon}"
         android:label="${rustdeskAppLabel}"
-        android:roundIcon="@mipmap/ic_launcher"
+        android:roundIcon="${rustdeskAppIcon}"
         android:supportsRtl="true">
 
         <receiver

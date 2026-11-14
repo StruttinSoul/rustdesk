@@ -1,3 +1,5 @@
+> Historical snapshot: the Codex integration was removed from Aperture on 2026-10-20. References below describe prior work, not current features or acceptance requirements. See [removal report](../../remote/2026-10-20-codex-removal.md).
+
 # MIRPG Remote P1 Application Shell Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Execution remains inline without agents at the user's explicit request. Steps use checkbox (`- [ ]`) syntax for tracking.

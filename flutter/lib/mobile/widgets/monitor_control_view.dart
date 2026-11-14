@@ -5,15 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'mirpg_remote_theme.dart';
+import 'monitor_live_keyboard.dart';
 
 enum MonitorViewPreference { fit, readable }
 
 enum MonitorOrientationPreference { auto, portrait, landscape }
 
 enum MonitorToolbarDock { left, right }
-
-/// Mouse moves a relative cursor; Touch sends events at the finger's position.
-enum MonitorInputMode { mouse, touch }
 
 const List<String> _monitorShortcutModifierOrder = <String>[
   'ctrl',
@@ -194,91 +192,55 @@ bool _shortcutListsEqual(
 class MonitorControlPreferences {
   const MonitorControlPreferences({
     this.preferredView = MonitorViewPreference.fit,
-    this.inputMode = MonitorInputMode.mouse,
-    this.precision = false,
-    this.precisionGain = 0.35,
     this.toolbarDock = MonitorToolbarDock.right,
     this.toolbarVisible = true,
     this.thumbwheelVisible = false,
-    this.mouseButtonsVisible = false,
-    this.mouseButtonsPosition = const Offset(0.78, 0.58),
-    this.cursorOffset = false,
     this.shortcuts = kDefaultMonitorShortcuts,
     this.orientation = MonitorOrientationPreference.auto,
   });
 
   final MonitorViewPreference preferredView;
-  final MonitorInputMode inputMode;
-  final bool precision;
-  final double precisionGain;
   final MonitorToolbarDock toolbarDock;
   final bool toolbarVisible;
+
+  /// Show an on-screen scroll wheel as well as two-finger scrolling.
   final bool thumbwheelVisible;
-  final bool mouseButtonsVisible;
-  final Offset mouseButtonsPosition;
-  final bool cursorOffset;
   final List<MonitorShortcutPreset> shortcuts;
   final MonitorOrientationPreference orientation;
 
   MonitorControlPreferences copyWith({
     MonitorViewPreference? preferredView,
-    MonitorInputMode? inputMode,
-    bool? precision,
-    double? precisionGain,
     MonitorToolbarDock? toolbarDock,
     bool? toolbarVisible,
     bool? thumbwheelVisible,
-    bool? mouseButtonsVisible,
-    Offset? mouseButtonsPosition,
-    bool? cursorOffset,
     List<MonitorShortcutPreset>? shortcuts,
     MonitorOrientationPreference? orientation,
   }) =>
       MonitorControlPreferences(
         preferredView: preferredView ?? this.preferredView,
-        inputMode: inputMode ?? this.inputMode,
-        precision: precision ?? this.precision,
-        precisionGain: precisionGain ?? this.precisionGain,
         toolbarDock: toolbarDock ?? this.toolbarDock,
         toolbarVisible: toolbarVisible ?? this.toolbarVisible,
         thumbwheelVisible: thumbwheelVisible ?? this.thumbwheelVisible,
-        mouseButtonsVisible: mouseButtonsVisible ?? this.mouseButtonsVisible,
-        mouseButtonsPosition: mouseButtonsPosition ?? this.mouseButtonsPosition,
-        cursorOffset: cursorOffset ?? this.cursorOffset,
         shortcuts: shortcuts ?? this.shortcuts,
         orientation: orientation ?? this.orientation,
       );
 
   Map<String, dynamic> toJson() => {
         'view': preferredView.name,
-        'inputMode': inputMode.name,
-        'precision': precision,
-        'precisionGain': precisionGain,
         'dock': toolbarDock.name,
         'toolbar': toolbarVisible,
         'thumbwheel': thumbwheelVisible,
-        'mouseButtons': mouseButtonsVisible,
-        'mouseX': mouseButtonsPosition.dx,
-        'mouseY': mouseButtonsPosition.dy,
-        'cursorOffset': cursorOffset,
         'shortcuts': shortcuts.map((shortcut) => shortcut.toJson()).toList(),
         'orientation': orientation.name,
       };
 
+  /// Settings saved by older builds (mouse mode, precision, cursor offset,
+  /// floating mouse buttons) are ignored.
   factory MonitorControlPreferences.fromJson(Map<String, dynamic> json) {
     T enumValue<T extends Enum>(Iterable<T> values, dynamic raw, T fallback) =>
         values.cast<T?>().firstWhere((value) => value?.name == raw,
             orElse: () => fallback) ??
         fallback;
-    double normalized(dynamic value, double fallback) {
-      final parsed = value is num ? value.toDouble() : fallback;
-      return parsed.clamp(0.0, 1.0).toDouble();
-    }
-
-    double precisionGain(dynamic value) {
-      final parsed = value is num ? value.toDouble() : 0.35;
-      return parsed.clamp(0.1, 1.0).toDouble();
-    }
 
     List<MonitorShortcutPreset> shortcuts(dynamic value) {
       if (value is! List) return kDefaultMonitorShortcuts;
@@ -296,20 +258,10 @@ class MonitorControlPreferences {
     return MonitorControlPreferences(
       preferredView: enumValue(MonitorViewPreference.values, json['view'],
           MonitorViewPreference.fit),
-      inputMode: enumValue(
-          MonitorInputMode.values, json['inputMode'], MonitorInputMode.mouse),
-      precision: json['precision'] == true,
-      precisionGain: precisionGain(json['precisionGain']),
       toolbarDock: enumValue(
           MonitorToolbarDock.values, json['dock'], MonitorToolbarDock.right),
       toolbarVisible: json['toolbar'] != false,
       thumbwheelVisible: json['thumbwheel'] == true,
-      mouseButtonsVisible: json['mouseButtons'] == true,
-      mouseButtonsPosition: Offset(
-        normalized(json['mouseX'], 0.78),
-        normalized(json['mouseY'], 0.58),
-      ),
-      cursorOffset: json['cursorOffset'] == true,
       shortcuts: shortcuts(json['shortcuts']),
       orientation: enumValue(MonitorOrientationPreference.values,
           json['orientation'], MonitorOrientationPreference.auto),
@@ -320,32 +272,15 @@ class MonitorControlPreferences {
   bool operator ==(Object other) =>
       other is MonitorControlPreferences &&
       preferredView == other.preferredView &&
-      inputMode == other.inputMode &&
-      precision == other.precision &&
-      precisionGain == other.precisionGain &&
       toolbarDock == other.toolbarDock &&
       toolbarVisible == other.toolbarVisible &&
       thumbwheelVisible == other.thumbwheelVisible &&
-      mouseButtonsVisible == other.mouseButtonsVisible &&
-      mouseButtonsPosition == other.mouseButtonsPosition &&
-      cursorOffset == other.cursorOffset &&
       _shortcutListsEqual(shortcuts, other.shortcuts) &&
       orientation == other.orientation;
 
   @override
-  int get hashCode => Object.hash(
-      preferredView,
-      inputMode,
-      precision,
-      precisionGain,
-      toolbarDock,
-      toolbarVisible,
-      thumbwheelVisible,
-      mouseButtonsVisible,
-      mouseButtonsPosition,
-      cursorOffset,
-      Object.hashAll(shortcuts),
-      orientation);
+  int get hashCode => Object.hash(preferredView, toolbarDock, toolbarVisible,
+      thumbwheelVisible, Object.hashAll(shortcuts), orientation);
 }
 
 bool monitorUsesLandscape(
@@ -360,6 +295,16 @@ bool monitorUsesLandscape(
   }
 }
 
+/// The phone's view of a Windows monitor. There is no on-screen pointer:
+/// Windows is clicked exactly where you touch, like a touchscreen.
+///
+/// * Tap to click; tap twice to double-click.
+/// * Drag with one finger to move the zoomed view around.
+/// * Touch and hold, then drag, to hold the left button (select, move
+///   windows). Touch and hold, then lift, to right-click.
+/// * Tap with two fingers to right-click.
+/// * Pinch to zoom the local view; the view follows your fingers.
+/// * Drag with two fingers to scroll Windows.
 class MonitorControlView extends StatefulWidget {
   const MonitorControlView(
       {super.key,
@@ -372,7 +317,12 @@ class MonitorControlView extends StatefulWidget {
       this.onLocalViewOnlyChanged,
       required this.onPointer,
       required this.onScroll,
+      this.onSmoothScroll,
       required this.onKeyboard,
+      this.onTextInput,
+      this.onKeyTap,
+      this.onKeyState,
+      this.onSoftKeyboard,
       this.onClipboard,
       this.onWindows,
       this.onSwitchView,
@@ -389,9 +339,30 @@ class MonitorControlView extends StatefulWidget {
   final ValueChanged<MonitorControlPreferences>? onPreferencesChanged;
   final bool localViewOnly;
   final ValueChanged<bool>? onLocalViewOnlyChanged;
+
+  /// Pointer actions in desktop pixels: 0 left down, 1 left up, 2 move,
+  /// 3 right click, 4 middle click, 5 right down, 6 right up.
   final void Function(int action, Offset point) onPointer;
+
+  /// Whole wheel notches; positive follows a finger moving down.
   final void Function(int steps) onScroll;
+
+  /// Smooth wheel units (120 per notch) that follow the fingers. When null,
+  /// scrolling falls back to whole notches through [onScroll].
+  final ValueChanged<Offset>? onSmoothScroll;
+
+  /// Opens the compose sheet: type a block of text, then Send.
   final VoidCallback onKeyboard;
+
+  /// Live typing. When all three are provided, Keyboard opens the phone
+  /// keyboard and types straight into Windows; otherwise it opens
+  /// [onKeyboard].
+  final ValueChanged<String>? onTextInput;
+  final ValueChanged<PhysicalKeyboardKey>? onKeyTap;
+  final void Function(PhysicalKeyboardKey key, bool down)? onKeyState;
+
+  /// Called when the live keyboard opens (true) or closes (false).
+  final ValueChanged<bool>? onSoftKeyboard;
   final VoidCallback? onClipboard;
   final VoidCallback? onWindows;
   final VoidCallback? onSwitchView;
@@ -847,58 +818,84 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
 }
 
 class _MonitorControlViewState extends State<MonitorControlView> {
-  static const Size _floatingMouseSize = Size(144, 52);
-  static const Offset _cursorFingerOffset = Offset(0, -56);
-  late Offset _cursor = widget.desktopSize.center(Offset.zero);
+  static const double _dragSlop = 10;
+  static const double _twoFingerTapSlop = 16;
+  static const double _twoFingerDecideDistance = 8;
+  static const double _pinchThreshold = 0.06;
+  static const Duration _longPressTimeout = Duration(milliseconds: 500);
+  static const Duration _twoFingerTapTimeout = Duration(milliseconds: 350);
+  static const Duration _doubleTapTimeout = Duration(milliseconds: 450);
+  static const double _doubleTapDistance = 28;
+  static const double _wheelUnitsPerDesktopPixel = 1.5;
+  static const double _wheelStepPixels = 18;
+  static const double _thumbwheelUnitsPerPixel = 4;
+  static const double _momentumMinSpeed = 250;
+  static const double _momentumMaxSpeed = 6000;
+
+  late Offset _pointer = widget.desktopSize.center(Offset.zero);
   Size _viewport = Size.zero;
   Offset _offset = Offset.zero;
   double _fit = 1;
   double? _zoom;
   late _MonitorViewPreset _viewPreset;
   late MonitorViewPreference _preferredView;
-  late MonitorInputMode _inputMode;
-  bool _panMode = false;
-  late bool _precision;
-  late double _precisionGain;
-  bool _dragLocked = false;
-  bool _gestureDragHeld = false;
-  bool _directDragHeld = false;
-  bool _directLongPressed = false;
-  Offset? _directDownPosition;
-  bool _doubleTapArmed = false;
-  bool _doubleTapCandidate = false;
-  Timer? _doubleTapHoldTimer;
-  Timer? _doubleTapWindowTimer;
-  Offset? _doubleTapLocalPosition;
-  double _doubleTapPendingTravel = 0;
   late MonitorToolbarDock _toolbarDock;
   late bool _toolbarVisible;
   late bool _thumbwheelVisible;
-  late bool _mouseButtonsVisible;
-  late Offset _mouseButtonsPosition;
-  late bool _cursorOffset;
   late List<MonitorShortcutPreset> _shortcuts;
   late MonitorOrientationPreference _orientationPreference;
-  bool _floatingLeftPressed = false;
-  bool _floatingRightPressed = false;
-  double _thumbwheelDelta = 0;
-  double _gestureScale = 1;
-  double _wheel = 0;
-  int _fingers = 0;
-  int _maxFingers = 0;
-  final Set<int> _rawPointers = <int>{};
-  int _rawMaxFingers = 0;
-  bool _suppressTap = false;
-  Offset? _tapLocalPosition;
-  Offset _lastFocal = Offset.zero;
-  _TwoFingerMode _twoFingerMode = _TwoFingerMode.undecided;
-  int _twoFingerUpdates = 0;
-  double _twoFingerStartScale = 1;
-  Offset _twoFingerPendingDelta = Offset.zero;
   _MonitorPanel _panel = _MonitorPanel.none;
+  _ArmedButton _armed = _ArmedButton.none;
+  bool _liveKeyboard = false;
+  final GlobalKey<MonitorLiveKeyboardBarState> _keyboardBarKey =
+      GlobalKey<MonitorLiveKeyboardBarState>();
+
+  final Stopwatch _clock = Stopwatch()..start();
+  final Map<int, Offset> _contacts = <int, Offset>{};
+  final Map<int, Offset> _contactStarts = <int, Offset>{};
+  int _maxContacts = 0;
+  double _travel = 0;
+  Duration _gestureStart = Duration.zero;
+  _TouchGesture _gesture = _TouchGesture.none;
+  Offset? _pressLocal;
+  Offset? _lastLocal;
+  Offset? _touchMarker;
+  Timer? _longPressTimer;
+
+  /// The button-down action (0 left, 5 right) held by a one-finger drag.
+  int? _heldButton;
+  Offset? _lastTapLocal;
+  Offset? _lastTapPoint;
+  Duration _lastTapAt = Duration.zero;
+
+  double _startSpan = 0;
+  double _lastSpan = 0;
+  Offset _lastFocal = Offset.zero;
+  Offset _twoFingerStartFocal = Offset.zero;
+  Offset _twoFingerPending = Offset.zero;
+  final Map<int, Offset> _twoFingerStarts = <int, Offset>{};
+  Offset _focalVelocity = Offset.zero;
+  Duration _lastFocalAt = Duration.zero;
+
+  double _wheel = 0;
+  Offset _smoothRemainder = Offset.zero;
+  double _thumbwheelDelta = 0;
+  Timer? _momentum;
+  Offset _momentumVelocity = Offset.zero;
+
   double get _scale => _fit * (_zoom ?? 1);
+  bool get _isZoomed => (_zoom ?? 1) > 1.01;
   bool get _canSendInput => widget.canControl && !widget.localViewOnly;
-  bool get _directTouch => _inputMode == MonitorInputMode.touch;
+  bool get _liveKeyboardSupported =>
+      widget.onTextInput != null &&
+      widget.onKeyTap != null &&
+      widget.onKeyState != null;
+  bool get _showThumbwheel => widget.canControl && _thumbwheelVisible;
+  bool get _twoFingerActive =>
+      _gesture == _TouchGesture.twoFinger ||
+      _gesture == _TouchGesture.pinch ||
+      _gesture == _TouchGesture.pan ||
+      _gesture == _TouchGesture.scroll;
 
   @override
   void initState() {
@@ -919,59 +916,40 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         widget.focusRect != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _revealFocusRect());
     }
-    if ((_dragLocked || _gestureDragHeld || _directDragHeld) &&
-        !_canSendInput) {
-      final shouldRelease = oldWidget.canControl && !oldWidget.localViewOnly;
-      _dragLocked = false;
-      _gestureDragHeld = false;
-      _directDragHeld = false;
-      _directDownPosition = null;
-      _doubleTapHoldTimer?.cancel();
-      _doubleTapHoldTimer = null;
-      if (shouldRelease) {
-        widget.onPointer(1, _cursor);
-      }
-    }
+    final couldSend = oldWidget.canControl && !oldWidget.localViewOnly;
     if (!_canSendInput) {
-      _doubleTapHoldTimer?.cancel();
-      _doubleTapWindowTimer?.cancel();
-      _doubleTapHoldTimer = null;
-      _doubleTapWindowTimer = null;
-      _doubleTapArmed = false;
-      _doubleTapCandidate = false;
-      _floatingLeftPressed = false;
-      _floatingRightPressed = false;
+      _stopMomentum();
+      _armed = _ArmedButton.none;
+      if (_heldButton != null || _longPressTimer != null) {
+        _cancelContacts(release: couldSend);
+      }
     }
   }
 
   @override
   void dispose() {
-    _doubleTapHoldTimer?.cancel();
-    _doubleTapWindowTimer?.cancel();
-    if ((_dragLocked || _gestureDragHeld || _directDragHeld) && _canSendInput) {
-      widget.onPointer(1, _cursor);
+    _longPressTimer?.cancel();
+    _momentum?.cancel();
+    final held = _heldButton;
+    if (held != null && _canSendInput) {
+      widget.onPointer(held == 0 ? 1 : 6, _pointer);
     }
+    if (_liveKeyboard) widget.onSoftKeyboard?.call(false);
     super.dispose();
   }
 
   void _loadPreferences(MonitorControlPreferences preferences,
       {bool keepCustomZoom = false}) {
     _preferredView = preferences.preferredView;
-    _inputMode = preferences.inputMode;
     if (!keepCustomZoom || _viewPreset != _MonitorViewPreset.custom) {
       _viewPreset = preferences.preferredView == MonitorViewPreference.readable
           ? _MonitorViewPreset.readable
           : _MonitorViewPreset.fit;
       _zoom = null;
     }
-    _precision = preferences.precision;
-    _precisionGain = preferences.precisionGain;
     _toolbarDock = preferences.toolbarDock;
     _toolbarVisible = preferences.toolbarVisible;
     _thumbwheelVisible = preferences.thumbwheelVisible;
-    _mouseButtonsVisible = preferences.mouseButtonsVisible;
-    _mouseButtonsPosition = preferences.mouseButtonsPosition;
-    _cursorOffset = preferences.cursorOffset;
     _shortcuts = List.of(preferences.shortcuts);
     _orientationPreference = preferences.orientation;
   }
@@ -979,19 +957,16 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   void _emitPreferences() {
     widget.onPreferencesChanged?.call(MonitorControlPreferences(
       preferredView: _preferredView,
-      inputMode: _inputMode,
-      precision: _precision,
-      precisionGain: _precisionGain,
       toolbarDock: _toolbarDock,
       toolbarVisible: _toolbarVisible,
       thumbwheelVisible: _thumbwheelVisible,
-      mouseButtonsVisible: _mouseButtonsVisible,
-      mouseButtonsPosition: _mouseButtonsPosition,
-      cursorOffset: _cursorOffset,
       shortcuts: List.unmodifiable(_shortcuts),
       orientation: _orientationPreference,
     ));
   }
+
+  // ---------------------------------------------------------------------
+  // Viewport
 
   void _limitOffset() {
     final width = widget.desktopSize.width * _scale;
@@ -1013,7 +988,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       rect.center.dy.clamp(0, widget.desktopSize.height - 1).toDouble(),
     );
     setState(() {
-      _cursor = point;
+      _pointer = point;
       _offset = _viewport.center(Offset.zero) - point * _scale;
       _limitOffset();
     });
@@ -1023,10 +998,11 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       {_MonitorViewPreset preset = _MonitorViewPreset.custom}) {
     final point = (focus - _offset) / _scale;
     _zoom = zoom.clamp(1, 6).toDouble();
-    _viewPreset = preset;
+    _viewPreset = preset == _MonitorViewPreset.custom && _zoom! <= 1.001
+        ? _MonitorViewPreset.fit
+        : preset;
     _offset = focus - point * _scale;
     _limitOffset();
-    if (_canSendInput && !_panMode) _followCursor();
   }
 
   void _applyPreset(_MonitorViewPreset preset) {
@@ -1044,8 +1020,11 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _emitPreferences();
   }
 
+  void _zoomBy(double factor) =>
+      setState(() => _setZoom((_zoom ?? 1) * factor, _viewport.center(Offset.zero)));
+
   void _cycleOrientation() {
-    _cancelContactsForLayoutChange();
+    _cancelContacts();
     setState(() {
       _orientationPreference = switch (_orientationPreference) {
         MonitorOrientationPreference.auto =>
@@ -1057,52 +1036,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       };
     });
     _emitPreferences();
-  }
-
-  void _toggleInputMode() {
-    _cancelContactsForLayoutChange();
-    setState(() {
-      _inputMode =
-          _directTouch ? MonitorInputMode.mouse : MonitorInputMode.touch;
-      _panMode = false;
-      _panel = _MonitorPanel.none;
-    });
-    _emitPreferences();
-  }
-
-  void _cancelContactsForLayoutChange() {
-    final releaseLeft = _dragLocked ||
-        _gestureDragHeld ||
-        _directDragHeld ||
-        _floatingLeftPressed;
-    final releaseRight = _floatingRightPressed;
-    _doubleTapHoldTimer?.cancel();
-    _doubleTapWindowTimer?.cancel();
-    _doubleTapHoldTimer = null;
-    _doubleTapWindowTimer = null;
-    _doubleTapArmed = false;
-    _doubleTapCandidate = false;
-    _doubleTapPendingTravel = 0;
-    _dragLocked = false;
-    _gestureDragHeld = false;
-    _directDragHeld = false;
-    _directLongPressed = false;
-    _directDownPosition = null;
-    _floatingLeftPressed = false;
-    _floatingRightPressed = false;
-    _rawPointers.clear();
-    _rawMaxFingers = 0;
-    _fingers = 0;
-    _maxFingers = 0;
-    _wheel = 0;
-    _thumbwheelDelta = 0;
-    _twoFingerMode = _TwoFingerMode.undecided;
-    _twoFingerUpdates = 0;
-    _twoFingerPendingDelta = Offset.zero;
-    if (_canSendInput) {
-      if (releaseLeft) widget.onPointer(1, _cursor);
-      if (releaseRight) widget.onPointer(6, _cursor);
-    }
   }
 
   String get _orientationLabel => switch (_orientationPreference) {
@@ -1124,51 +1057,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     }
   }
 
-  void _followCursor() {
-    final point = _offset + _cursor * _scale;
-    final margin = math.min(48.0, _viewport.shortestSide / 4);
-    _offset += Offset(
-        point.dx < margin
-            ? margin - point.dx
-            : point.dx > _viewport.width - margin
-                ? _viewport.width - margin - point.dx
-                : 0,
-        point.dy < margin
-            ? margin - point.dy
-            : point.dy > _viewport.height - margin
-                ? _viewport.height - margin - point.dy
-                : 0);
-    _limitOffset();
-  }
-
-  void _move(Offset delta) {
-    if (!_canSendInput) return;
-    final gain = _precision ? _precisionGain : 1.0;
-    final point = _cursor + delta / _scale * gain;
-    _cursor = Offset(point.dx.clamp(0, widget.desktopSize.width - 1).toDouble(),
-        point.dy.clamp(0, widget.desktopSize.height - 1).toDouble());
-    _followCursor();
-    widget.onPointer(2, _cursor);
-  }
-
-  Offset _sourcePointForLocal(Offset localPosition) {
-    final viewportPoint = localPosition + _cursorFingerOffset;
-    final point = (viewportPoint - _offset) / _scale;
-    return Offset(
-      point.dx.clamp(0, widget.desktopSize.width - 1).toDouble(),
-      point.dy.clamp(0, widget.desktopSize.height - 1).toDouble(),
-    );
-  }
-
-  void _moveToLocal(Offset localPosition) {
-    if (!_canSendInput) return;
-    _cursor = _sourcePointForLocal(localPosition);
-    widget.onPointer(2, _cursor);
-  }
-
-  /// Ignore taps in the black bars. Once a drag starts, clamp movements to
-  /// the remote desktop so button-up is always delivered at a valid position.
-  Offset? _directDesktopPoint(Offset local, {bool clamp = false}) {
+  /// Desktop pixel under a viewport position, or null in the black bars.
+  /// With [clamp], positions outside the desktop snap to its nearest edge so
+  /// a drag always ends at a valid position.
+  Offset? _desktopPoint(Offset local, {bool clamp = false}) {
     final frame = Rect.fromLTWH(_offset.dx, _offset.dy,
         widget.desktopSize.width * _scale, widget.desktopSize.height * _scale);
     if (frame.isEmpty || (!clamp && !frame.contains(local))) return null;
@@ -1179,461 +1071,647 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     );
   }
 
-  void _moveToDirectLocal(Offset local, {bool clamp = false}) {
-    if (!_canSendInput) return;
-    final point = _directDesktopPoint(local, clamp: clamp);
+  Rect _visibleSourceRect() {
+    final left =
+        (-_offset.dx / _scale).clamp(0.0, widget.desktopSize.width).toDouble();
+    final top =
+        (-_offset.dy / _scale).clamp(0.0, widget.desktopSize.height).toDouble();
+    final right = ((_viewport.width - _offset.dx) / _scale)
+        .clamp(0.0, widget.desktopSize.width)
+        .toDouble();
+    final bottom = ((_viewport.height - _offset.dy) / _scale)
+        .clamp(0.0, widget.desktopSize.height)
+        .toDouble();
+    return Rect.fromLTRB(
+        left, top, math.max(left, right), math.max(top, bottom));
+  }
+
+  void _panLocalViewport(Offset fraction) {
+    setState(() {
+      _offset += Offset(
+        _viewport.width * fraction.dx,
+        _viewport.height * fraction.dy,
+      );
+      _limitOffset();
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Touch input
+
+  void _sendMove(Offset point) {
+    _pointer = point;
+    widget.onPointer(2, point);
+  }
+
+  void _releaseHeld() {
+    final held = _heldButton;
+    if (held == null) return;
+    _heldButton = null;
+    widget.onPointer(held == 0 ? 1 : 6, _pointer);
+  }
+
+  /// Forgets every finger, for example when the layout rotates under them.
+  /// Does not call setState.
+  void _cancelContacts({bool release = true}) {
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
+    final held = _heldButton;
+    _heldButton = null;
+    _contacts.clear();
+    _contactStarts.clear();
+    _maxContacts = 0;
+    _travel = 0;
+    _gesture = _TouchGesture.none;
+    _touchMarker = null;
+    _wheel = 0;
+    _smoothRemainder = Offset.zero;
+    _thumbwheelDelta = 0;
+    if (release && held != null) {
+      widget.onPointer(held == 0 ? 1 : 6, _pointer);
+    }
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    _stopMomentum();
+    final first = _contacts.isEmpty;
+    _contacts[event.pointer] = event.localPosition;
+    _contactStarts[event.pointer] = event.localPosition;
+    if (first) {
+      _maxContacts = 1;
+      _travel = 0;
+      _gestureStart = _clock.elapsed;
+      _pressLocal = event.localPosition;
+      _lastLocal = event.localPosition;
+      _gesture = _TouchGesture.pending;
+      _longPressTimer?.cancel();
+      _longPressTimer =
+          _canSendInput && _desktopPoint(event.localPosition) != null
+              ? Timer(_longPressTimeout, _onLongPress)
+              : null;
+      setState(() => _touchMarker = event.localPosition);
+      return;
+    }
+    _maxContacts = math.max(_maxContacts, _contacts.length);
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
+    if (_contacts.length == 2) {
+      _releaseHeld();
+      _beginTwoFinger();
+    }
+    setState(() => _touchMarker = null);
+  }
+
+  void _beginTwoFinger() {
+    final points = _contacts.values.take(2).toList(growable: false);
+    _startSpan = (points[0] - points[1]).distance;
+    _lastSpan = _startSpan;
+    _lastFocal = (points[0] + points[1]) / 2;
+    _twoFingerStartFocal = _lastFocal;
+    _twoFingerPending = Offset.zero;
+    _twoFingerStarts
+      ..clear()
+      ..addAll(_contacts);
+    _focalVelocity = Offset.zero;
+    _lastFocalAt = _clock.elapsed;
+    _wheel = 0;
+    _smoothRemainder = Offset.zero;
+    _gesture = _TouchGesture.twoFinger;
+  }
+
+  void _onPointerMove(PointerMoveEvent event) {
+    final start = _contactStarts[event.pointer];
+    if (start == null) return;
+    _contacts[event.pointer] = event.localPosition;
+    _travel = math.max(_travel, (event.localPosition - start).distance);
+    if (_contacts.length >= 2) {
+      _twoFingerUpdate();
+      return;
+    }
+    // A finger left over from a two-finger gesture does nothing.
+    if (_maxContacts > 1) return;
+    final local = event.localPosition;
+    final delta = local - (_lastLocal ?? local);
+    _lastLocal = local;
+    setState(() {
+      _touchMarker = local;
+      switch (_gesture) {
+        case _TouchGesture.pending:
+          if (_travel > _dragSlop) {
+            // A plain drag moves the view, like a photo; nothing is sent.
+            _longPressTimer?.cancel();
+            _longPressTimer = null;
+            _gesture = _TouchGesture.viewPan;
+            _offset += local - (_pressLocal ?? local);
+            _limitOffset();
+          }
+        case _TouchGesture.holding:
+          if ((local - (_pressLocal ?? local)).distance > _dragSlop) {
+            _beginDrag(local);
+          }
+        case _TouchGesture.drag:
+          final point = _desktopPoint(local, clamp: true);
+          if (point != null) _sendMove(point);
+        case _TouchGesture.viewPan:
+          _offset += delta;
+          _limitOffset();
+        default:
+          break;
+      }
+    });
+  }
+
+  /// Starts a held-button drag after touch-and-hold.
+  void _beginDrag(Offset local) {
+    if (!_canSendInput) {
+      _gesture = _TouchGesture.ignored;
+      return;
+    }
+    final start = _pressLocal == null ? null : _desktopPoint(_pressLocal!);
+    if (start == null) {
+      // Started in the black bars around the desktop.
+      _gesture = _TouchGesture.ignored;
+      return;
+    }
+    _gesture = _TouchGesture.drag;
+    final right = _armed == _ArmedButton.right;
+    _armed = _ArmedButton.none;
+    _sendMove(start);
+    final down = right ? 5 : 0;
+    _heldButton = down;
+    widget.onPointer(down, _pointer);
+    final point = _desktopPoint(local, clamp: true);
+    if (point != null) _sendMove(point);
+  }
+
+  void _onLongPress() {
+    _longPressTimer = null;
+    if (!mounted ||
+        _gesture != _TouchGesture.pending ||
+        _contacts.length != 1 ||
+        !_canSendInput) {
+      return;
+    }
+    if (_pressLocal == null || _desktopPoint(_pressLocal!) == null) return;
+    // Held: dragging from here holds the mouse button; lifting right-clicks.
+    setState(() => _gesture = _TouchGesture.holding);
+    unawaited(HapticFeedback.mediumImpact());
+  }
+
+  void _holdRightClick() {
+    if (!_canSendInput || _pressLocal == null) return;
+    final point = _desktopPoint(_pressLocal!);
     if (point == null) return;
-    _cursor = point;
-    widget.onPointer(2, _cursor);
+    _sendMove(point);
+    widget.onPointer(3, _pointer);
+    _armed = _ArmedButton.none;
   }
 
-  void _directDrag(Offset local) {
-    if (!_canSendInput ||
-        _directLongPressed ||
-        _rawMaxFingers > 1 ||
-        _directDownPosition == null) {
-      return;
-    }
-    if (!_directDragHeld && (local - _directDownPosition!).distance < 8) {
-      return;
-    }
-    if (!_directDragHeld) {
-      _moveToDirectLocal(_directDownPosition!);
-      _directDragHeld = true;
-      widget.onPointer(0, _cursor);
-    }
-    _moveToDirectLocal(local, clamp: true);
+  void _onPointerUp(PointerEvent event) {
+    if (_contactStarts.remove(event.pointer) == null) return;
+    _contacts.remove(event.pointer);
+    if (_contacts.isNotEmpty) return;
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
+    final gesture = _gesture;
+    final contacts = _maxContacts;
+    final elapsed = _clock.elapsed - _gestureStart;
+    _gesture = _TouchGesture.none;
+    _maxContacts = 0;
+    final cancelled = event is PointerCancelEvent;
+    setState(() {
+      _touchMarker = null;
+      _releaseHeld();
+      if (cancelled) return;
+      if (contacts == 1 && gesture == _TouchGesture.pending) {
+        _tap(_pressLocal);
+      } else if (contacts == 1 && gesture == _TouchGesture.holding) {
+        _holdRightClick();
+      } else if (contacts == 2 &&
+          gesture == _TouchGesture.twoFinger &&
+          _travel <= _twoFingerTapSlop &&
+          elapsed <= _twoFingerTapTimeout) {
+        _twoFingerTap();
+      } else if (gesture == _TouchGesture.scroll) {
+        _startMomentum();
+      }
+    });
   }
 
-  void _releaseDirectDrag() {
-    if (!_directDragHeld) return;
-    _directDragHeld = false;
-    if (_canSendInput) widget.onPointer(1, _cursor);
+  void _tap(Offset? local) {
+    if (local == null || !_canSendInput) return;
+    var point = _desktopPoint(local);
+    if (point == null) return;
+    final now = _clock.elapsed;
+    // Windows only counts a double-click within a few pixels, so a second
+    // quick tap near the first reuses its exact position.
+    if (_lastTapPoint != null &&
+        _lastTapLocal != null &&
+        now - _lastTapAt <= _doubleTapTimeout &&
+        (local - _lastTapLocal!).distance <= _doubleTapDistance) {
+      point = _lastTapPoint!;
+    }
+    _lastTapLocal = local;
+    _lastTapPoint = point;
+    _lastTapAt = now;
+    _sendMove(point);
+    switch (_armed) {
+      case _ArmedButton.right:
+        widget.onPointer(3, _pointer);
+      case _ArmedButton.middle:
+        widget.onPointer(4, _pointer);
+      case _ArmedButton.none:
+        widget.onPointer(0, _pointer);
+        widget.onPointer(1, _pointer);
+    }
+    _armed = _ArmedButton.none;
   }
 
-  void _click([int count = 1]) {
+  void _twoFingerTap() {
     if (!_canSendInput) return;
-    for (var i = 0; i < count; i++) {
-      widget.onPointer(0, _cursor);
-      widget.onPointer(1, _cursor);
-    }
+    final point = _desktopPoint(_twoFingerStartFocal);
+    if (point != null) _sendMove(point);
+    widget.onPointer(3, _pointer);
+    _armed = _ArmedButton.none;
   }
 
-  void _tap() {
-    if (_suppressTap) {
-      _suppressTap = false;
-      _doubleTapCandidate = false;
-      return;
+  void _twoFingerUpdate() {
+    if (!_twoFingerActive) return;
+    final points = _contacts.values.take(2).toList(growable: false);
+    final span = (points[0] - points[1]).distance;
+    final focal = (points[0] + points[1]) / 2;
+    final delta = focal - _lastFocal;
+    final now = _clock.elapsed;
+    final seconds =
+        (now - _lastFocalAt).inMicroseconds / Duration.microsecondsPerSecond;
+    if (seconds > 0) {
+      final instant = delta / seconds;
+      _focalVelocity =
+          seconds > 0.1 ? instant : _focalVelocity * 0.4 + instant * 0.6;
     }
-    final secondTap = _doubleTapCandidate;
-    _doubleTapHoldTimer?.cancel();
-    _doubleTapHoldTimer = null;
-    _doubleTapCandidate = false;
-    if (_directTouch) {
-      if (_tapLocalPosition == null ||
-          _directDesktopPoint(_tapLocalPosition!) == null) return;
-      _moveToDirectLocal(_tapLocalPosition!);
-      _click();
-      return;
-    }
-    if (_cursorOffset && _tapLocalPosition != null) {
-      _moveToLocal(_tapLocalPosition!);
-    }
-    _click();
-    if (!secondTap && _canSendInput && _tapLocalPosition != null) {
-      _armDoubleTap(_tapLocalPosition!);
-    }
-  }
-
-  void _armDoubleTap(Offset localPosition) {
-    _doubleTapWindowTimer?.cancel();
-    _doubleTapArmed = true;
-    _doubleTapLocalPosition = localPosition;
-    _doubleTapWindowTimer = Timer(const Duration(milliseconds: 350), () {
-      _doubleTapWindowTimer = null;
-      _doubleTapArmed = false;
-    });
-  }
-
-  void _beginDoubleTapHold(Offset localPosition) {
-    _doubleTapWindowTimer?.cancel();
-    _doubleTapWindowTimer = null;
-    _doubleTapArmed = false;
-    _doubleTapCandidate = true;
-    _doubleTapPendingTravel = 0;
-    _doubleTapLocalPosition = localPosition;
-    _doubleTapHoldTimer?.cancel();
-    _doubleTapHoldTimer = Timer(const Duration(milliseconds: 250), () {
-      _doubleTapHoldTimer = null;
-      if (!mounted ||
-          !_canSendInput ||
-          _panMode ||
-          _rawPointers.length != 1 ||
-          _rawMaxFingers > 1 ||
-          !_doubleTapCandidate) {
-        return;
+    _lastFocalAt = now;
+    final spanChange = _startSpan <= 0 ? 0.0 : (span / _startSpan - 1).abs();
+    var apply = delta;
+    var pinchBase = _lastSpan;
+    if (_gesture == _TouchGesture.twoFinger) {
+      _twoFingerPending += delta;
+      final decided = _classifyTwoFinger(spanChange);
+      if (decided != null) {
+        _gesture = decided;
+        apply = _twoFingerPending;
+        if (decided == _TouchGesture.pinch) pinchBase = _startSpan;
       }
-      setState(() {
-        if (_cursorOffset && _doubleTapLocalPosition != null) {
-          _moveToLocal(_doubleTapLocalPosition!);
-        }
-        _gestureDragHeld = true;
-        _doubleTapCandidate = false;
-      });
-      widget.onPointer(0, _cursor);
-    });
-  }
-
-  void _cancelDoubleTapCandidate() {
-    _doubleTapHoldTimer?.cancel();
-    _doubleTapHoldTimer = null;
-    _doubleTapCandidate = false;
-    _doubleTapPendingTravel = 0;
-  }
-
-  void _releaseGestureDrag() {
-    if (!_gestureDragHeld) return;
-    setState(() => _gestureDragHeld = false);
-    widget.onPointer(1, _cursor);
-  }
-
-  void _scaleUpdate(ScaleUpdateDetails details) {
-    _maxFingers = math.max(_maxFingers, details.pointerCount);
-    if (_fingers != details.pointerCount) {
-      _fingers = details.pointerCount;
-      _lastFocal = details.localFocalPoint;
-      _gestureScale = details.scale;
-      if (details.pointerCount >= 2) {
-        _twoFingerMode = _TwoFingerMode.undecided;
-        _twoFingerUpdates = 0;
-        _twoFingerStartScale = details.scale;
-        _twoFingerPendingDelta = Offset.zero;
-      }
-      return;
-    }
-    final delta = details.localFocalPoint - _lastFocal;
-    final factor = details.scale / _gestureScale;
-    if (_doubleTapCandidate &&
-        !_gestureDragHeld &&
-        _doubleTapHoldTimer != null) {
-      _doubleTapPendingTravel += delta.distance;
-      if (_doubleTapPendingTravel > 8) _cancelDoubleTapCandidate();
     }
     setState(() {
-      if (_maxFingers >= 2) {
-        _twoFingerUpdates++;
-        _twoFingerPendingDelta += delta;
-        if (_twoFingerMode == _TwoFingerMode.undecided &&
-            _twoFingerUpdates >= 2) {
-          final scaleChange = (details.scale / _twoFingerStartScale - 1).abs();
-          if (scaleChange >= 0.04) {
-            _twoFingerMode = _TwoFingerMode.pinch;
-          } else if (_twoFingerPendingDelta.distance >= 6) {
-            _twoFingerMode = _TwoFingerMode.scroll;
-          }
-        }
-        if (_twoFingerMode == _TwoFingerMode.pinch) {
-          _setZoom((_zoom ?? 1) * factor, details.localFocalPoint);
-        } else if (_twoFingerMode == _TwoFingerMode.scroll && _canSendInput) {
-          _wheel += _twoFingerPendingDelta.dy / 8;
-          final steps = _wheel.truncate();
-          if (steps != 0) {
-            widget.onScroll(steps);
-            _wheel -= steps;
-          }
-          _twoFingerPendingDelta = Offset.zero;
-        }
-      } else if (_panMode || !_canSendInput) {
-        _offset += delta;
-        _limitOffset();
-      } else if (_canSendInput) {
-        if (_directTouch) {
-          _directDrag(details.localFocalPoint);
-        } else if (_cursorOffset) {
-          _moveToLocal(details.localFocalPoint);
-        } else {
-          _move(delta);
-        }
+      switch (_gesture) {
+        case _TouchGesture.pinch:
+          final factor = pinchBase > 0 ? span / pinchBase : 1.0;
+          _offset += apply;
+          _setZoom((_zoom ?? 1) * factor, focal);
+        case _TouchGesture.pan:
+          _offset += apply;
+          _limitOffset();
+        case _TouchGesture.scroll:
+          _scrollBy(apply);
+        default:
+          break;
       }
-      _lastFocal = details.localFocalPoint;
-      _gestureScale = details.scale;
+    });
+    _lastSpan = span;
+    _lastFocal = focal;
+  }
+
+  /// Decides what a two-finger gesture is from how each finger moved since
+  /// the second finger landed. Fingers report one at a time, so a single
+  /// finger's step on its own is not read as a pinch.
+  _TouchGesture? _classifyTwoFinger(double spanChange) {
+    final ids = _contacts.keys.take(2).toList(growable: false);
+    final firstStart = _twoFingerStarts[ids[0]];
+    final secondStart = _twoFingerStarts[ids[1]];
+    if (firstStart == null || secondStart == null) return null;
+    final first = _contacts[ids[0]]! - firstStart;
+    final second = _contacts[ids[1]]! - secondStart;
+    final most = math.max(first.distance, second.distance);
+    final least = math.min(first.distance, second.distance);
+    if (most < _twoFingerDecideDistance) return null;
+    // One finger moves the view, so two fingers scroll Windows.
+    final travel = _canSendInput ? _TouchGesture.scroll : _TouchGesture.pan;
+    final together = least >= 2 &&
+        (first.dx * second.dx + first.dy * second.dy) /
+                (first.distance * second.distance) >
+            0.5;
+    if (together && least >= most * 0.35) return travel;
+    if (spanChange >= _pinchThreshold && (least >= 2 || most >= 30)) {
+      return _TouchGesture.pinch;
+    }
+    if (most >= 30) return travel;
+    return null;
+  }
+
+  /// Scrolls Windows so the content follows a finger movement in viewport
+  /// pixels.
+  void _scrollBy(Offset fingerDelta) {
+    if (!_canSendInput) return;
+    var delta = fingerDelta;
+    if (delta.dy.abs() >= delta.dx.abs() * 1.6) {
+      delta = Offset(0, delta.dy);
+    } else if (delta.dx.abs() >= delta.dy.abs() * 1.6) {
+      delta = Offset(delta.dx, 0);
+    }
+    if (widget.onSmoothScroll != null) {
+      _sendWheelUnits(delta / _scale * _wheelUnitsPerDesktopPixel);
+      return;
+    }
+    _wheel += delta.dy / _wheelStepPixels;
+    final steps = _wheel.truncate();
+    if (steps != 0) {
+      widget.onScroll(steps);
+      _wheel -= steps;
+    }
+  }
+
+  void _sendWheelUnits(Offset units) {
+    final total = _smoothRemainder + units;
+    final sent =
+        Offset(total.dx.truncateToDouble(), total.dy.truncateToDouble());
+    _smoothRemainder = total - sent;
+    if (sent == Offset.zero) return;
+    widget.onSmoothScroll!(Offset(sent.dx.clamp(-1200.0, 1200.0).toDouble(),
+        sent.dy.clamp(-1200.0, 1200.0).toDouble()));
+  }
+
+  void _startMomentum() {
+    if (!_canSendInput || widget.onSmoothScroll == null) return;
+    if (_clock.elapsed - _lastFocalAt > const Duration(milliseconds: 80)) {
+      return;
+    }
+    var velocity = _focalVelocity;
+    if (velocity.distance < _momentumMinSpeed) return;
+    if (velocity.distance > _momentumMaxSpeed) {
+      velocity = velocity / velocity.distance * _momentumMaxSpeed;
+    }
+    _momentum?.cancel();
+    _momentumVelocity = velocity;
+    _momentum = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      if (!mounted || !_canSendInput) {
+        _stopMomentum();
+        return;
+      }
+      _momentumVelocity = _momentumVelocity * 0.92;
+      if (_momentumVelocity.distance < 60) {
+        _stopMomentum();
+        return;
+      }
+      _scrollBy(_momentumVelocity * 0.016);
     });
   }
 
-  void _scaleEnd(ScaleEndDetails details) {
-    _fingers = 0;
-    _maxFingers = 0;
-    _wheel = 0;
-    _twoFingerMode = _TwoFingerMode.undecided;
-    _twoFingerUpdates = 0;
-    _twoFingerPendingDelta = Offset.zero;
+  void _stopMomentum() {
+    _momentum?.cancel();
+    _momentum = null;
+    _momentumVelocity = Offset.zero;
   }
 
-  void _rawPointerDown(PointerDownEvent event) {
-    final firstPointer = _rawPointers.isEmpty;
-    if (firstPointer) {
-      _rawMaxFingers = 0;
-      _directLongPressed = false;
-      _directDownPosition = _directTouch && _canSendInput
-          ? (_directDesktopPoint(event.localPosition) != null
-              ? event.localPosition
-              : null)
-          : null;
-    }
-    _rawPointers.add(event.pointer);
-    _rawMaxFingers = math.max(_rawMaxFingers, _rawPointers.length);
-    if (firstPointer &&
-        _doubleTapArmed &&
-        _doubleTapLocalPosition != null &&
-        (event.localPosition - _doubleTapLocalPosition!).distance <= 48 &&
-        _canSendInput &&
-        !_panMode &&
-        !_directTouch) {
-      _beginDoubleTapHold(event.localPosition);
-    }
-    if (_rawPointers.length > 1) {
-      _cancelDoubleTapCandidate();
-      if (_gestureDragHeld) _releaseGestureDrag();
-      _releaseDirectDrag();
-      _directDownPosition = null;
-    }
+  void _arm(_ArmedButton button) {
+    if (!_canSendInput) return;
+    setState(() {
+      _armed = _armed == button ? _ArmedButton.none : button;
+      _panel = _MonitorPanel.none;
+    });
   }
 
-  void _rawPointerUp(PointerEvent event) {
-    _rawPointers.remove(event.pointer);
-    if (_rawPointers.isNotEmpty) return;
-    final releasedDirectDrag = _directDragHeld;
-    _releaseDirectDrag();
-    _directDownPosition = null;
-    _directLongPressed = false;
-    _doubleTapHoldTimer?.cancel();
-    _doubleTapHoldTimer = null;
-    final releasedGestureDrag = _gestureDragHeld;
-    if (_gestureDragHeld) {
-      _releaseGestureDrag();
+  // ---------------------------------------------------------------------
+  // Keyboard
+
+  void _toggleKeyboard() {
+    if (!_liveKeyboardSupported) {
+      widget.onKeyboard();
+      return;
     }
-    if (event is PointerCancelEvent) _doubleTapCandidate = false;
-    _suppressTap =
-        releasedGestureDrag || releasedDirectDrag || _rawMaxFingers >= 2;
-    _rawMaxFingers = 0;
+    if (_liveKeyboard) {
+      _closeLiveKeyboard();
+      return;
+    }
+    widget.onSoftKeyboard?.call(true);
+    setState(() {
+      _liveKeyboard = true;
+      _panel = _MonitorPanel.none;
+    });
   }
 
-  Widget _button(String tooltip, IconData icon, VoidCallback? action,
-          {bool selected = false}) =>
-      SizedBox(
-          width: 48,
-          height: 48,
-          child: IconButton(
-              tooltip: tooltip,
-              icon: Icon(icon),
-              color: selected ? MirpgRemoteTheme.accent : Colors.white,
-              disabledColor: Colors.white38,
-              padding: EdgeInsets.zero,
-              onPressed: action));
+  void _closeLiveKeyboard() {
+    if (!_liveKeyboard) return;
+    setState(() => _liveKeyboard = false);
+    widget.onSoftKeyboard?.call(false);
+  }
+
+  void _compose() {
+    _closeLiveKeyboard();
+    widget.onKeyboard();
+  }
+
+  List<MonitorLiveShortcut> get _liveShortcuts => [
+        for (final preset in _shortcuts)
+          if (_monitorShortcutPhysicalKey(preset.key) != null)
+            MonitorLiveShortcut(
+              label: preset.label,
+              modifiers: preset.modifiers
+                  .map(_monitorShortcutModifierKey)
+                  .whereType<PhysicalKeyboardKey>()
+                  .toList(growable: false),
+              key: _monitorShortcutPhysicalKey(preset.key)!,
+            ),
+      ];
+
+  Widget _liveKeyboardBar() => MonitorLiveKeyboardBar(
+        key: _keyboardBarKey,
+        enabled: _canSendInput,
+        onText: (text) => widget.onTextInput?.call(text),
+        onKey: (key) => widget.onKeyTap?.call(key),
+        onKeyState: (key, down) => widget.onKeyState?.call(key, down),
+        shortcuts: _liveShortcuts,
+        onCompose: _compose,
+        onClose: _closeLiveKeyboard,
+      );
+
+  // ---------------------------------------------------------------------
+  // Controls
 
   void _showGestureHelp() {
     showModalBottomSheet<void>(
         context: context,
         useSafeArea: true,
+        isScrollControlled: true,
         builder: (_) => SingleChildScrollView(
             child: Padding(
                 padding: const EdgeInsets.all(20),
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
                   const ListTile(
-                      leading: Icon(Icons.mouse_outlined),
-                      title: Text('Windows Pointer'),
-                      subtitle: Text(
-                          'Mouse mode works like a trackpad. Local zoom and Pan never change Windows resolution.')),
-                  const ListTile(
                       leading: Icon(Icons.touch_app_outlined),
-                      title: Text('Touch mode'),
+                      title: Text('Touch Windows directly'),
                       subtitle: Text(
-                          'Tap exactly where you point, drag with one finger to move windows, hold to right-click. Use Pan to move your zoomed view.')),
-                  ListTile(
-                      leading: const Icon(Icons.touch_app_outlined),
-                      title: const Text('One finger'),
-                      subtitle: Text(_cursorOffset
-                          ? 'Cursor offset is on. The pointer stays above your finger; tap to left-click and hold to right-click.'
-                          : 'Swipe to move the pointer. Tap to left-click. Hold to right-click.')),
+                          'There is no pointer to steer. Windows is clicked exactly where you touch. Tap twice quickly to double-click.')),
                   const ListTile(
-                      leading: Icon(Icons.drag_indicator),
-                      title: Text('Double tap and hold'),
+                      leading: Icon(Icons.pan_tool_alt_outlined),
+                      title: Text('Drag with one finger'),
                       subtitle: Text(
-                          'In Mouse mode, hold the second tap to drag. Lift your finger to release the left mouse button.')),
+                          'Moves the zoomed view around. Nothing is sent to Windows.')),
+                  const ListTile(
+                      leading: Icon(Icons.swipe_outlined),
+                      title: Text('Touch and hold'),
+                      subtitle: Text(
+                          'Hold until the phone buzzes, then drag to hold the left button (select text, move windows), or lift to right-click.')),
+                  const ListTile(
+                      leading: Icon(Icons.ads_click),
+                      title: Text('Right-click'),
+                      subtitle: Text(
+                          'Touch and hold then lift, or tap with two fingers. Controls also has right- and middle-click for the next tap.')),
                   const ListTile(
                       leading: Icon(Icons.zoom_out_map),
                       title: Text('Two fingers'),
                       subtitle: Text(
-                          'Pinch to zoom. Drag together to scroll the remote computer.')),
+                          'Pinch to zoom. Drag to scroll Windows.')),
+                  const ListTile(
+                      leading: Icon(Icons.keyboard_outlined),
+                      title: Text('Keyboard'),
+                      subtitle: Text(
+                          'Types into Windows as you go. Tap Ctrl, Alt, Shift or Win once for the next key, twice to lock it. Compose sends a whole block at once.')),
+                  const ListTile(
+                      leading: Icon(Icons.zoom_in),
+                      title: Text('Local zoom only'),
+                      subtitle: Text(
+                          'Zooming and moving the view never change Windows resolution or click anything.')),
                 ]))));
-  }
-
-  void _showPrecisionSettings() {
-    showModalBottomSheet<void>(
-        context: context,
-        useSafeArea: true,
-        builder: (_) => StatefulBuilder(builder: (context, setSheetState) {
-              final percent = (_precisionGain * 100).round();
-              return Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Row(children: [
-                      const Expanded(
-                          child: Text('Precision pointer speed',
-                              style: TextStyle(fontWeight: FontWeight.w600))),
-                      IconButton(
-                          tooltip: 'Close precision settings',
-                          onPressed: () => Navigator.of(context).pop(),
-                          icon: const Icon(Icons.close)),
-                    ]),
-                    Text('Pointer gain $percent%'),
-                    Slider(
-                        value: _precisionGain,
-                        min: 0.1,
-                        max: 1,
-                        divisions: 18,
-                        label: '$percent%',
-                        onChanged: (value) {
-                          setState(() => _precisionGain = value);
-                          setSheetState(() {});
-                          _emitPreferences();
-                        }),
-                    TextButton(
-                        onPressed: () {
-                          setState(() => _precisionGain = 0.35);
-                          setSheetState(() {});
-                          _emitPreferences();
-                        },
-                        child: const Text('Reset to 35%')),
-                  ]));
-            }));
   }
 
   void _resetControls() {
     const defaults = MonitorControlPreferences();
-    _cancelContactsForLayoutChange();
+    _cancelContacts();
     setState(() {
+      _armed = _ArmedButton.none;
       _loadPreferences(defaults);
       _limitOffset();
     });
     _emitPreferences();
   }
 
-  Widget _actionsPanel() => Material(
-      color: MirpgRemoteTheme.surface,
-      elevation: 8,
-      borderRadius: BorderRadius.circular(16),
-      child: Padding(
-          padding: const EdgeInsets.all(6),
-          child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                _button(
-                    'Left click', Icons.mouse, _canSendInput ? _click : null),
-                _button('Right click', Icons.ads_click,
-                    _canSendInput ? () => widget.onPointer(3, _cursor) : null),
-                _button('Middle click', Icons.mouse_outlined,
-                    _canSendInput ? () => widget.onPointer(4, _cursor) : null),
-                _button('Pan', Icons.pan_tool_alt_outlined,
-                    () => setState(() => _panMode = !_panMode),
-                    selected: _panMode),
-                if (!_directTouch) ...[
-                  _button(
-                      'Precision',
-                      Icons.gps_fixed,
-                      _canSendInput
-                          ? () {
-                              setState(() => _precision = !_precision);
-                              _emitPreferences();
-                            }
-                          : null,
-                      selected: _precision),
-                  _button(
-                      'Precision speed', Icons.tune, _showPrecisionSettings),
+  Widget _controlTile(
+          String tooltip, IconData icon, String label, VoidCallback? action,
+          {bool selected = false}) =>
+      Tooltip(
+        message: tooltip,
+        child: Semantics(
+          button: true,
+          enabled: action != null,
+          selected: selected,
+          child: InkWell(
+            onTap: action,
+            borderRadius: BorderRadius.circular(12),
+            child: Container(
+              width: 84,
+              height: 68,
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              decoration: BoxDecoration(
+                color: selected
+                    ? MirpgRemoteTheme.accent.withOpacity(0.16)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon,
+                      size: 22,
+                      color: action == null
+                          ? Colors.white38
+                          : selected
+                              ? MirpgRemoteTheme.accent
+                              : MirpgRemoteTheme.textPrimary),
+                  const SizedBox(height: 4),
+                  Text(label,
+                      maxLines: 2,
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          height: 1.1,
+                          color: action == null
+                              ? Colors.white38
+                              : MirpgRemoteTheme.textSecondary,
+                          fontSize: 11)),
                 ],
-                _button('Drag lock', Icons.drag_indicator,
-                    _canSendInput ? () => _setDragLocked(!_dragLocked) : null,
-                    selected: _dragLocked),
-                _button(
-                    widget.localViewOnly ? 'Disable view only' : 'View only',
-                    widget.localViewOnly
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                    widget.onLocalViewOnlyChanged == null
-                        ? null
-                        : () => widget
-                            .onLocalViewOnlyChanged!(!widget.localViewOnly),
-                    selected: widget.localViewOnly),
-                _button(
-                    _toolbarDock == MonitorToolbarDock.right
-                        ? 'Dock controls left'
-                        : 'Dock controls right',
-                    _toolbarDock == MonitorToolbarDock.right
-                        ? Icons.align_horizontal_left
-                        : Icons.align_horizontal_right, () {
-                  setState(() {
-                    _toolbarDock = _toolbarDock == MonitorToolbarDock.right
-                        ? MonitorToolbarDock.left
-                        : MonitorToolbarDock.right;
-                  });
-                  _emitPreferences();
-                }),
-                _button(
-                    _mouseButtonsVisible
-                        ? 'Hide mouse buttons'
-                        : 'Show mouse buttons',
-                    Icons.mouse_outlined, () {
-                  setState(() => _mouseButtonsVisible = !_mouseButtonsVisible);
-                  _emitPreferences();
-                }, selected: _mouseButtonsVisible),
-                _button(
-                    _thumbwheelVisible ? 'Hide thumbwheel' : 'Show thumbwheel',
-                    Icons.swap_vert, () {
-                  setState(() => _thumbwheelVisible = !_thumbwheelVisible);
-                  _emitPreferences();
-                }, selected: _thumbwheelVisible),
-                if (!_directTouch)
-                  _button('Cursor offset', Icons.touch_app_outlined, () {
-                    setState(() => _cursorOffset = !_cursorOffset);
-                    _emitPreferences();
-                  }, selected: _cursorOffset),
-                _button('Ctrl+Alt+Del', Icons.security,
-                    _canSendInput ? widget.onCtrlAltDel : null),
-                _button('Gestures', Icons.help_outline, _showGestureHelp),
-                _button('Reset controls', Icons.restart_alt, _resetControls),
-              ]))));
+              ),
+            ),
+          ),
+        ),
+      );
 
-  Widget _displayPanel() => Material(
-      color: MirpgRemoteTheme.surface,
-      elevation: 8,
-      borderRadius: BorderRadius.circular(16),
-      child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            _button('Fit screen', Icons.fit_screen,
-                () => setState(() => _applyPreset(_MonitorViewPreset.fit))),
-            _button(
-                'Readable',
-                Icons.text_fields,
-                () =>
-                    setState(() => _applyPreset(_MonitorViewPreset.readable))),
-            _button(
-                'Zoom out',
-                Icons.zoom_out,
-                () => setState(() => _setZoom(
-                    (_zoom ?? 1) / 1.25, _viewport.center(Offset.zero)))),
-            Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text('Zoom: $_viewLabel',
-                    style: const TextStyle(color: Colors.white))),
-            _button(
-                'Zoom in',
-                Icons.zoom_in,
-                () => setState(() => _setZoom(
-                    (_zoom ?? 1) * 1.25, _viewport.center(Offset.zero)))),
-            _button('Orientation: $_orientationLabel', Icons.screen_rotation,
-                _cycleOrientation),
-          ])));
+  Widget _controlsPanel() => Material(
+        key: const ValueKey('monitor-controls-panel'),
+        color: MirpgRemoteTheme.surface,
+        elevation: 8,
+        borderRadius: BorderRadius.circular(16),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(8),
+          child: Wrap(spacing: 4, runSpacing: 4, children: [
+            _controlTile('Right click', Icons.ads_click, 'Right-click next tap',
+                _canSendInput ? () => _arm(_ArmedButton.right) : null,
+                selected: _armed == _ArmedButton.right),
+            _controlTile('Middle click', Icons.adjust, 'Middle-click next tap',
+                _canSendInput ? () => _arm(_ArmedButton.middle) : null,
+                selected: _armed == _ArmedButton.middle),
+            _controlTile('Zoom out', Icons.zoom_out, 'Zoom out',
+                () => _zoomBy(1 / 1.25)),
+            _controlTile('Zoom in', Icons.zoom_in, 'Zoom in · $_viewLabel',
+                () => _zoomBy(1.25)),
+            _controlTile('Orientation: $_orientationLabel',
+                Icons.screen_rotation, _orientationLabel, _cycleOrientation),
+            _controlTile(
+                _thumbwheelVisible ? 'Hide thumbwheel' : 'Show thumbwheel',
+                Icons.swap_vert,
+                'Scroll wheel', () {
+              setState(() => _thumbwheelVisible = !_thumbwheelVisible);
+              _emitPreferences();
+            }, selected: _thumbwheelVisible),
+            _controlTile(
+                widget.localViewOnly ? 'Disable view only' : 'View only',
+                widget.localViewOnly
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined,
+                'View only',
+                widget.onLocalViewOnlyChanged == null
+                    ? null
+                    : () =>
+                        widget.onLocalViewOnlyChanged!(!widget.localViewOnly),
+                selected: widget.localViewOnly),
+            _controlTile(
+                _toolbarDock == MonitorToolbarDock.right
+                    ? 'Dock controls left'
+                    : 'Dock controls right',
+                _toolbarDock == MonitorToolbarDock.right
+                    ? Icons.align_horizontal_left
+                    : Icons.align_horizontal_right,
+                _toolbarDock == MonitorToolbarDock.right
+                    ? 'Dock left'
+                    : 'Dock right', () {
+              setState(() {
+                _toolbarDock = _toolbarDock == MonitorToolbarDock.right
+                    ? MonitorToolbarDock.left
+                    : MonitorToolbarDock.right;
+              });
+              _emitPreferences();
+            }),
+            _controlTile('Ctrl+Alt+Del', Icons.security, 'Ctrl+Alt+Del',
+                _canSendInput ? widget.onCtrlAltDel : null),
+            _controlTile(
+                'Gestures', Icons.help_outline, 'Gestures', _showGestureHelp),
+            _controlTile(
+                'Reset controls', Icons.restart_alt, 'Reset', _resetControls),
+          ]),
+        ),
+      );
+
+  void _toggleControls() => setState(() => _panel =
+      _panel == _MonitorPanel.controls ? _MonitorPanel.none : _MonitorPanel.controls);
 
   Widget _toolbarButton(String tooltip, IconData icon, VoidCallback? action,
           {bool selected = false}) =>
@@ -1652,14 +1730,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         widget.onWindows?.call();
       case _MonitorSessionAction.quality:
         widget.onSessionStatus?.call();
-      case _MonitorSessionAction.actions:
-        setState(() => _panel = _panel == _MonitorPanel.actions
-            ? _MonitorPanel.none
-            : _MonitorPanel.actions);
-      case _MonitorSessionAction.display:
-        setState(() => _panel = _panel == _MonitorPanel.display
-            ? _MonitorPanel.none
-            : _MonitorPanel.display);
       case _MonitorSessionAction.hideControls:
         setState(() {
           _toolbarVisible = false;
@@ -1669,74 +1739,43 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     }
   }
 
+  PopupMenuItem<_MonitorSessionAction> _menuItem(
+          _MonitorSessionAction value, IconData icon, String title) =>
+      PopupMenuItem(
+        value: value,
+        child: ListTile(
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          leading: Icon(icon),
+          title: Text(title),
+        ),
+      );
+
   Widget _sessionMenu() => PopupMenuButton<_MonitorSessionAction>(
         tooltip: 'Session controls',
         icon: const Icon(Icons.more_vert_rounded),
         onSelected: _handleSessionAction,
         itemBuilder: (context) => [
           if (widget.onClipboard != null)
-            const PopupMenuItem(
-              value: _MonitorSessionAction.clipboard,
-              child: ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.content_copy_outlined),
-                title: Text('Clipboard'),
-              ),
-            ),
+            _menuItem(_MonitorSessionAction.clipboard,
+                Icons.content_copy_outlined, 'Clipboard'),
           if (widget.onWindows != null)
-            const PopupMenuItem(
-              value: _MonitorSessionAction.windows,
-              child: ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.web_asset_outlined),
-                title: Text('Windows'),
-              ),
-            ),
+            _menuItem(_MonitorSessionAction.windows, Icons.web_asset_outlined,
+                'Windows'),
           if (widget.onSessionStatus != null)
-            const PopupMenuItem(
-              value: _MonitorSessionAction.quality,
-              child: ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.network_check),
-                title: Text('Quality & connection'),
-              ),
-            ),
-          const PopupMenuDivider(),
-          const PopupMenuItem(
-            value: _MonitorSessionAction.actions,
-            child: ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.tune_rounded),
-              title: Text('Input controls'),
-            ),
-          ),
-          const PopupMenuItem(
-            value: _MonitorSessionAction.display,
-            child: ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.monitor_outlined),
-              title: Text('Display controls'),
-            ),
-          ),
-          const PopupMenuItem(
-            value: _MonitorSessionAction.hideControls,
-            child: ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.keyboard_arrow_down_rounded),
-              title: Text('Hide controls'),
-            ),
-          ),
+            _menuItem(_MonitorSessionAction.quality, Icons.network_check,
+                'Quality & connection'),
+          if (widget.onClipboard != null ||
+              widget.onWindows != null ||
+              widget.onSessionStatus != null)
+            const PopupMenuDivider(),
+          _menuItem(_MonitorSessionAction.hideControls,
+              Icons.keyboard_arrow_down_rounded, 'Hide controls'),
         ],
       );
 
   Widget _sessionTopBar() => Material(
-        color: const Color(0xFF151D21),
+        color: MirpgRemoteTheme.background,
         child: SafeArea(
           bottom: false,
           child: SizedBox(
@@ -1763,7 +1802,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                                 fontWeight: FontWeight.w600)),
                         const SizedBox(height: 2),
                         Text(
-                          '${widget.desktopSize.width.round()} × ${widget.desktopSize.height.round()} · ${_directTouch ? 'Touch' : 'Mouse'}',
+                          '${widget.desktopSize.width.round()} × ${widget.desktopSize.height.round()} · $_viewLabel',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -1846,7 +1885,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                             color: action == null
                                 ? Colors.white38
                                 : selected
-                                    ? const Color(0xFFCEF8EE)
+                                    ? MirpgRemoteTheme.accent
                                     : MirpgRemoteTheme.textSecondary,
                             fontSize: 11,
                             fontWeight:
@@ -1859,8 +1898,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         ),
       );
 
+  VoidCallback? get _keyboardAction => _canSendInput ? _toggleKeyboard : null;
+
   Widget _sessionToolbar() => Material(
-        color: const Color(0xFF192126),
+        color: MirpgRemoteTheme.background,
         child: SafeArea(
           top: false,
           child: Padding(
@@ -1876,28 +1917,12 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   'Readable view', Icons.text_fields_rounded, 'Readable', () {
                 setState(() => _applyPreset(_MonitorViewPreset.readable));
               }, selected: _viewPreset == _MonitorViewPreset.readable),
-              _footerControl(
-                  'Input mode: ${_directTouch ? 'Touch' : 'Mouse'}',
-                  _directTouch
-                      ? Icons.touch_app_outlined
-                      : Icons.mouse_outlined,
-                  _directTouch ? 'Touch' : 'Mouse',
-                  _toggleInputMode,
-                  selected: _directTouch),
-              if (_directTouch)
-                _footerControl('Pan mode', Icons.pan_tool_alt_outlined, 'Pan',
-                    () => setState(() => _panMode = !_panMode),
-                    selected: _panMode)
-              else
-                _footerControl('Precision mode', Icons.gps_fixed, 'Precision',
-                    () {
-                  final next = !_precision;
-                  if (!next) _releaseVisibleHeldControls();
-                  setState(() => _precision = next);
-                  _emitPreferences();
-                }, selected: _precision),
               _footerControl('Keyboard', Icons.keyboard_outlined, 'Keyboard',
-                  _canSendInput ? widget.onKeyboard : null),
+                  _keyboardAction,
+                  selected: _liveKeyboard),
+              _footerControl('Controls', Icons.tune_rounded, 'Controls',
+                  _toggleControls,
+                  selected: _panel == _MonitorPanel.controls),
               _footerControl('Switch view', Icons.view_carousel_outlined,
                   'Targets', widget.onSwitchView),
             ]),
@@ -1905,233 +1930,21 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         ),
       );
 
-  void _releaseVisibleHeldControls() {
-    if (_dragLocked) _setDragLocked(false);
-    if (_floatingLeftPressed) _setFloatingButton(true, false);
-    if (_floatingRightPressed) _setFloatingButton(false, false);
-  }
-
-  Widget _precisionToolbar() => Material(
-        color: const Color(0xFF17272B),
-        child: SafeArea(
-          top: false,
-          bottom: false,
-          child: LayoutBuilder(builder: (context, constraints) {
-            final compact = constraints.maxWidth < 620;
-            final held =
-                _dragLocked || _floatingLeftPressed || _floatingRightPressed;
-            return SizedBox(
-              height: 64,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Row(children: [
-                  if (!compact) ...[
-                    const Text('Precision',
-                        style: TextStyle(
-                            color: MirpgRemoteTheme.textSecondary,
-                            fontSize: 12)),
-                    const SizedBox(width: 6),
-                  ],
-                  Expanded(
-                    child: Slider(
-                      value: _precisionGain,
-                      min: 0.1,
-                      max: 1,
-                      divisions: 18,
-                      onChanged: (value) {
-                        setState(() => _precisionGain = value);
-                        _emitPreferences();
-                      },
-                    ),
-                  ),
-                  _floatingMouseButton('Remote left mouse button', Icons.mouse,
-                      true, _floatingLeftPressed),
-                  _floatingMouseButton('Remote right mouse button',
-                      Icons.ads_click, false, _floatingRightPressed),
-                  if (compact)
-                    IconButton(
-                      tooltip: _dragLocked ? 'Release drag lock' : 'Drag lock',
-                      onPressed: _canSendInput
-                          ? () => _setDragLocked(!_dragLocked)
-                          : null,
-                      color: _dragLocked
-                          ? MirpgRemoteTheme.accent
-                          : MirpgRemoteTheme.textPrimary,
-                      icon: Icon(_dragLocked
-                          ? Icons.lock_open_outlined
-                          : Icons.drag_indicator),
-                    )
-                  else
-                    TextButton.icon(
-                      onPressed: _canSendInput
-                          ? () => _setDragLocked(!_dragLocked)
-                          : null,
-                      icon: Icon(_dragLocked
-                          ? Icons.lock_open_outlined
-                          : Icons.drag_indicator),
-                      label: Text(_dragLocked ? 'Drag locked' : 'Drag lock'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: _dragLocked
-                            ? MirpgRemoteTheme.accent
-                            : MirpgRemoteTheme.textPrimary,
-                      ),
-                    ),
-                  IconButton(
-                    tooltip: 'Release all held controls',
-                    onPressed: held ? _releaseVisibleHeldControls : null,
-                    color: MirpgRemoteTheme.warning,
-                    icon: const Icon(Icons.lock_open_outlined),
-                  ),
-                  IconButton(
-                    tooltip: 'Close precision controls',
-                    onPressed: () {
-                      _releaseVisibleHeldControls();
-                      setState(() => _precision = false);
-                      _emitPreferences();
-                    },
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-                ]),
-              ),
-            );
-          }),
-        ),
-      );
-
-  void _setDragLocked(bool locked) {
-    if (locked && !_canSendInput) return;
-    if (_dragLocked == locked) return;
-    setState(() => _dragLocked = locked);
-    widget.onPointer(locked ? 0 : 1, _cursor);
-  }
-
-  Offset _floatingMouseTopLeft() {
-    final maxX = math.max(0.0, _viewport.width - _floatingMouseSize.width);
-    final maxY = math.max(0.0, _viewport.height - _floatingMouseSize.height);
-    return Offset(
-        _mouseButtonsPosition.dx * maxX, _mouseButtonsPosition.dy * maxY);
-  }
-
-  void _moveFloatingMouse(Offset delta) {
-    final maxX = math.max(1.0, _viewport.width - _floatingMouseSize.width);
-    final maxY = math.max(1.0, _viewport.height - _floatingMouseSize.height);
-    _mouseButtonsPosition = Offset(
-      (_mouseButtonsPosition.dx + delta.dx / maxX).clamp(0.0, 1.0).toDouble(),
-      (_mouseButtonsPosition.dy + delta.dy / maxY).clamp(0.0, 1.0).toDouble(),
-    );
-  }
-
-  void _nudgeFloatingMouse(Offset delta) {
-    setState(() => _moveFloatingMouse(delta));
-    _emitPreferences();
-  }
-
-  void _setFloatingButton(bool left, bool down) {
-    if (down && !_canSendInput) return;
-    final wasDown = left ? _floatingLeftPressed : _floatingRightPressed;
-    if (wasDown == down) return;
-    setState(() {
-      if (left) {
-        _floatingLeftPressed = down;
-      } else {
-        _floatingRightPressed = down;
-      }
-    });
-    widget.onPointer(left ? (down ? 0 : 1) : (down ? 5 : 6), _cursor);
-  }
-
-  Widget _floatingMouseButton(
-      String tooltip, IconData icon, bool left, bool pressed) {
-    return Tooltip(
-      message: tooltip,
-      child: Listener(
-        onPointerDown:
-            _canSendInput ? (_) => _setFloatingButton(left, true) : null,
-        onPointerUp:
-            _canSendInput ? (_) => _setFloatingButton(left, false) : null,
-        onPointerCancel:
-            _canSendInput ? (_) => _setFloatingButton(left, false) : null,
-        child: Semantics(
-          button: true,
-          enabled: _canSendInput,
-          label: tooltip,
-          value: pressed ? 'Held' : 'Released',
-          onTap: _canSendInput
-              ? () {
-                  _setFloatingButton(left, true);
-                  _setFloatingButton(left, false);
-                }
-              : null,
-          child: SizedBox(
-            width: 48,
-            height: 48,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: pressed
-                    ? MirpgRemoteTheme.accent.withOpacity(0.24)
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon,
-                  color: _canSendInput
-                      ? pressed
-                          ? MirpgRemoteTheme.accent
-                          : Colors.white
-                      : Colors.white38),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _floatingMouseButtons() {
-    return Material(
-      key: const ValueKey('monitor-mouse-buttons'),
-      color: const Color(0xF2191F22),
-      elevation: 8,
-      borderRadius: BorderRadius.circular(14),
-      child: SizedBox(
-        width: _floatingMouseSize.width,
-        height: _floatingMouseSize.height,
-        child: Row(children: [
-          Semantics(
-            label: 'Move mouse button controls',
-            hint: 'Drag to reposition these controls on the screen',
-            customSemanticsActions: {
-              CustomSemanticsAction(label: 'Move controls left'): () =>
-                  _nudgeFloatingMouse(const Offset(-24, 0)),
-              CustomSemanticsAction(label: 'Move controls right'): () =>
-                  _nudgeFloatingMouse(const Offset(24, 0)),
-              CustomSemanticsAction(label: 'Move controls up'): () =>
-                  _nudgeFloatingMouse(const Offset(0, -24)),
-              CustomSemanticsAction(label: 'Move controls down'): () =>
-                  _nudgeFloatingMouse(const Offset(0, 24)),
-            },
-            child: GestureDetector(
-              key: const ValueKey('monitor-mouse-buttons-drag'),
-              behavior: HitTestBehavior.opaque,
-              onPanUpdate: (details) =>
-                  setState(() => _moveFloatingMouse(details.delta)),
-              onPanEnd: (_) => _emitPreferences(),
-              child: const SizedBox(
-                width: 48,
-                height: 52,
-                child:
-                    Icon(Icons.drag_indicator, color: Colors.white70, size: 20),
-              ),
-            ),
-          ),
-          _floatingMouseButton('Remote left mouse button', Icons.mouse, true,
-              _floatingLeftPressed),
-          _floatingMouseButton('Remote right mouse button', Icons.ads_click,
-              false, _floatingRightPressed),
-        ]),
-      ),
-    );
-  }
-
   Widget _thumbwheel() {
+    void scroll(double dy) {
+      if (!_canSendInput) return;
+      if (widget.onSmoothScroll != null) {
+        _sendWheelUnits(Offset(0, dy * _thumbwheelUnitsPerPixel));
+        return;
+      }
+      _thumbwheelDelta += dy / 12;
+      final steps = _thumbwheelDelta.truncate();
+      if (steps != 0) {
+        widget.onScroll(steps);
+        _thumbwheelDelta -= steps;
+      }
+    }
+
     return Semantics(
       label: 'Remote scroll thumbwheel',
       value: _canSendInput ? 'Ready' : 'Disabled',
@@ -2143,20 +1956,13 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       child: GestureDetector(
         key: const ValueKey('monitor-thumbwheel'),
         behavior: HitTestBehavior.opaque,
-        onVerticalDragUpdate: _canSendInput
-            ? (details) {
-                _thumbwheelDelta += details.delta.dy / 8;
-                final steps = _thumbwheelDelta.truncate();
-                if (steps != 0) {
-                  widget.onScroll(steps);
-                  _thumbwheelDelta -= steps;
-                }
-              }
-            : null,
+        onVerticalDragStart: (_) => _stopMomentum(),
+        onVerticalDragUpdate:
+            _canSendInput ? (details) => scroll(details.delta.dy) : null,
         onVerticalDragEnd: (_) => _thumbwheelDelta = 0,
         onVerticalDragCancel: () => _thumbwheelDelta = 0,
         child: Material(
-          color: const Color(0xF2191F22),
+          color: MirpgRemoteTheme.surface.withOpacity(0.94),
           elevation: 8,
           borderRadius: BorderRadius.circular(18),
           child: SizedBox(
@@ -2175,21 +1981,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         ),
       ),
     );
-  }
-
-  Rect _visibleSourceRect() {
-    final left =
-        (-_offset.dx / _scale).clamp(0.0, widget.desktopSize.width).toDouble();
-    final top =
-        (-_offset.dy / _scale).clamp(0.0, widget.desktopSize.height).toDouble();
-    final right = ((_viewport.width - _offset.dx) / _scale)
-        .clamp(0.0, widget.desktopSize.width)
-        .toDouble();
-    final bottom = ((_viewport.height - _offset.dy) / _scale)
-        .clamp(0.0, widget.desktopSize.height)
-        .toDouble();
-    return Rect.fromLTRB(
-        left, top, math.max(left, right), math.max(top, bottom));
   }
 
   void _navigateMinimap(Offset localPosition, Size minimapSize) {
@@ -2216,17 +2007,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     );
   }
 
-  void _panLocalViewport(Offset fraction) {
-    setState(() {
-      _offset += Offset(
-        _viewport.width * fraction.dx,
-        _viewport.height * fraction.dy,
-      );
-      _limitOffset();
-    });
-  }
-
-  Widget _minimap() {
+  Size get _minimapSize {
     final aspect = widget.desktopSize.height / widget.desktopSize.width;
     var width = math.min(176.0, _viewport.width * 0.36);
     var height = width * aspect;
@@ -2234,7 +2015,13 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       height = 116;
       width = height / aspect;
     }
-    final minimapSize = Size(width, height);
+    return Size(width, height);
+  }
+
+  Widget _minimap() {
+    final minimapSize = _minimapSize;
+    final width = minimapSize.width;
+    final height = minimapSize.height;
     final hitSize = Size(math.max(48, width), math.max(48, height));
     final visible = _visibleSourceRect();
     final left = visible.left / widget.desktopSize.width * width;
@@ -2285,7 +2072,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   ),
                   if (widget.image == null)
                     const Positioned.fill(
-                        child: ColoredBox(color: Color(0xFF242C30))),
+                        child: ColoredBox(color: MirpgRemoteTheme.raised)),
                   Positioned(
                     left: left,
                     top: top,
@@ -2309,225 +2096,255 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     );
   }
 
-  Widget _modeBadge() {
+  Widget? _modeBadge() {
     final labels = <String>[
-      if (_dragLocked) 'Drag locked',
-      if (_gestureDragHeld) 'Dragging',
-      if (_panMode) 'Pan',
-      if (_precision && !_directTouch)
-        'Precision ${(_precisionGain * 100).round()}%',
-      if (_cursorOffset && !_directTouch) 'Cursor offset',
+      if (_armed == _ArmedButton.right) 'Next tap right-clicks',
+      if (_armed == _ArmedButton.middle) 'Next tap middle-clicks',
+      if (_gesture == _TouchGesture.holding)
+        'Drag to hold the button · lift to right-click',
+      if (_heldButton != null) 'Dragging',
     ];
+    if (labels.isEmpty) return null;
     return Material(
-      color: const Color(0xF2191F22),
+      color: MirpgRemoteTheme.surface.withOpacity(0.94),
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           Text(labels.join(' · '),
               style: const TextStyle(color: MirpgRemoteTheme.textPrimary)),
-          if (_dragLocked) ...[
+          if (_armed != _ArmedButton.none) ...[
             const SizedBox(width: 8),
             TextButton(
-                onPressed: _canSendInput ? () => _setDragLocked(false) : null,
-                child: const Text('Release')),
+                onPressed: () => setState(() => _armed = _ArmedButton.none),
+                child: const Text('Cancel')),
           ],
         ]),
       ),
     );
   }
 
+  Widget _sessionRail(List<Widget> controls) => Material(
+        color: MirpgRemoteTheme.background,
+        child: SizedBox(
+          width: 56,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: controls,
+          ),
+        ),
+      );
+
   @override
-  Widget build(BuildContext context) => Column(children: [
-        if (_toolbarVisible) _sessionTopBar(),
-        Expanded(child: LayoutBuilder(builder: (context, box) {
-          final size = Size(box.maxWidth, box.maxHeight);
-          if (size.isEmpty || widget.desktopSize.isEmpty) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (_viewport != size) {
-            _viewport = size;
-            _fit = math.min(size.width / widget.desktopSize.width,
-                size.height / widget.desktopSize.height);
-            if (_viewPreset == _MonitorViewPreset.readable) {
-              _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
-            } else if (_viewPreset == _MonitorViewPreset.fit) {
-              _zoom = 1;
-            } else {
-              _zoom ??= 1;
-            }
-            _offset = size.center(Offset.zero) - _cursor * _scale;
-            _limitOffset();
-          }
-          final floatingMouse = _floatingMouseTopLeft();
-          return Stack(children: [
-            Positioned.fill(
-                child: Listener(
-                    onPointerDown: _rawPointerDown,
-                    onPointerUp: _rawPointerUp,
-                    onPointerCancel: _rawPointerUp,
-                    child: Semantics(
-                        label: _directTouch
-                            ? 'Windows direct touch interaction. Tap where you want to click, swipe to drag, hold to right-click, pinch to zoom, and drag with two fingers to scroll.'
-                            : 'Windows mouse interaction. Swipe with one finger to move the pointer, tap to click, hold to right-click, pinch to zoom, and drag with two fingers to scroll.',
-                        child: GestureDetector(
-                            key: const ValueKey('monitor-trackpad'),
-                            behavior: HitTestBehavior.opaque,
-                            onTapDown: _panMode
-                                ? null
-                                : (details) =>
-                                    _tapLocalPosition = details.localPosition,
-                            onTap: _panMode ? null : _tap,
-                            onLongPressStart: _canSendInput && !_panMode
-                                ? (details) {
-                                    if (_doubleTapCandidate ||
-                                        _doubleTapHoldTimer != null ||
-                                        _gestureDragHeld) {
-                                      return;
-                                    }
-                                    if (_directTouch) {
-                                      if (_directDesktopPoint(
-                                              details.localPosition) ==
-                                          null) {
-                                        return;
-                                      }
-                                      _directLongPressed = true;
-                                      _releaseDirectDrag();
-                                      setState(() => _moveToDirectLocal(
-                                          details.localPosition));
-                                    } else if (_cursorOffset) {
-                                      setState(() =>
-                                          _moveToLocal(details.localPosition));
-                                    }
-                                    widget.onPointer(3, _cursor);
-                                  }
-                                : null,
-                            onScaleStart: (details) {
-                              _fingers = details.pointerCount;
-                              _maxFingers = details.pointerCount;
-                              _lastFocal = details.localFocalPoint;
-                              _gestureScale = 1;
-                              _wheel = 0;
-                              _twoFingerMode = _TwoFingerMode.undecided;
-                              _twoFingerUpdates = 0;
-                              _twoFingerStartScale = 1;
-                              _twoFingerPendingDelta = Offset.zero;
-                            },
-                            onScaleUpdate: _scaleUpdate,
-                            onScaleEnd: _scaleEnd,
-                            child: ClipRect(
-                                child: Stack(children: [
-                              Positioned(
-                                  key: const ValueKey('monitor-frame'),
-                                  left: _offset.dx,
-                                  top: _offset.dy,
-                                  width: widget.desktopSize.width * _scale,
-                                  height: widget.desktopSize.height * _scale,
-                                  child: RawImage(
-                                      image: widget.image,
-                                      fit: BoxFit.fill,
-                                      filterQuality: FilterQuality.medium)),
-                              if (widget.image == null)
-                                const Center(
-                                    child: CircularProgressIndicator()),
-                              if (widget.canControl)
-                                Positioned(
-                                    left: _offset.dx + _cursor.dx * _scale - 3,
-                                    top: _offset.dy + _cursor.dy * _scale - 3,
-                                    child: const IgnorePointer(
-                                        child: Icon(Icons.north_west,
-                                            size: 24,
-                                            color: Colors.white,
-                                            shadows: [
-                                          Shadow(
-                                              blurRadius: 3,
-                                              color: Colors.black)
-                                        ]))),
-                            ])))))),
-            if ((_zoom ?? 1) > 1.01)
-              Positioned(top: 12, right: 12, child: _minimap()),
-            if (_dragLocked ||
-                _gestureDragHeld ||
-                _panMode ||
-                (_precision && !_directTouch) ||
-                (_cursorOffset && !_directTouch))
-              Positioned(top: 12, left: 12, child: _modeBadge()),
-            if (widget.frameStatus != null)
-              Positioned(
-                  top: 12,
-                  left: 0,
-                  right: 0,
-                  child: IgnorePointer(
-                      child: Center(
-                          child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                  color: const Color(0xE61C2225),
-                                  borderRadius: BorderRadius.circular(999)),
-                              child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 7),
-                                  child: Text(widget.frameStatus!,
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontWeight: FontWeight.w600))))))),
-            if (_mouseButtonsVisible && (!_precision || _directTouch))
-              Positioned(
-                  left: floatingMouse.dx,
-                  top: floatingMouse.dy,
-                  child: _floatingMouseButtons()),
-            if (_thumbwheelVisible)
-              Positioned(
-                  left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
-                  right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
-                  top: math.max(12, (_viewport.height - 144) / 2),
-                  child: _thumbwheel()),
-            if (_toolbarVisible && _panel != _MonitorPanel.none)
-              Positioned(
-                  left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
-                  right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
-                  bottom: 12,
-                  child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                          maxWidth: math.max(0, _viewport.width - 16)),
-                      child: _panel == _MonitorPanel.actions
-                          ? _actionsPanel()
-                          : _displayPanel())),
-            if (!_toolbarVisible)
-              Positioned(
-                  left: _toolbarDock == MonitorToolbarDock.left ? 4 : null,
-                  right: _toolbarDock == MonitorToolbarDock.right ? 4 : null,
-                  bottom: 4,
-                  child: Material(
-                      color: const Color(0xF2191F22),
-                      elevation: 8,
-                      borderRadius: BorderRadius.circular(14),
-                      child: IconButton(
-                          tooltip: 'Show toolbar',
-                          color: Colors.white,
-                          icon: const Icon(Icons.keyboard_arrow_up),
-                          onPressed: () {
-                            setState(() => _toolbarVisible = true);
-                            _emitPreferences();
-                          }))),
+  Widget build(BuildContext context) => LayoutBuilder(builder: (context, box) {
+        final height = box.maxHeight;
+        final keyboard = _liveKeyboard && _liveKeyboardSupported;
+        // Place controls along the axis that preserves the largest whole image.
+        final railScale = math.min(
+            (box.maxWidth - 112) / widget.desktopSize.width,
+            height / widget.desktopSize.height);
+        final barScale = math.min(box.maxWidth / widget.desktopSize.width,
+            (height - 124) / widget.desktopSize.height);
+        if (_toolbarVisible &&
+            height >= 240 &&
+            box.maxWidth >= 400 &&
+            railScale > barScale) {
+          return Column(children: [
+            Expanded(
+                child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                  _sessionRail([
+                    _toolbarButton('Dashboard', Icons.arrow_back_rounded,
+                        widget.onDashboard),
+                    _toolbarButton(
+                        'Fit view',
+                        Icons.fit_screen_outlined,
+                        () => setState(
+                            () => _applyPreset(_MonitorViewPreset.fit)),
+                        selected: _viewPreset == _MonitorViewPreset.fit),
+                    _toolbarButton(
+                        'Readable view',
+                        Icons.text_fields_rounded,
+                        () => setState(
+                            () => _applyPreset(_MonitorViewPreset.readable)),
+                        selected: _viewPreset == _MonitorViewPreset.readable),
+                    _toolbarButton('Switch view', Icons.view_carousel_outlined,
+                        widget.onSwitchView),
+                  ]),
+                  Expanded(child: _remoteViewport()),
+                  _sessionRail([
+                    _sessionMenu(),
+                    _toolbarButton(
+                        'Keyboard', Icons.keyboard_outlined, _keyboardAction,
+                        selected: _liveKeyboard),
+                    _toolbarButton(
+                        'Controls', Icons.tune_rounded, _toggleControls,
+                        selected: _panel == _MonitorPanel.controls),
+                  ]),
+                ])),
+            if (keyboard) _liveKeyboardBar(),
           ]);
-        })),
-        if (_toolbarVisible && _precision && !_directTouch) _precisionToolbar(),
-        if (_toolbarVisible) _sessionToolbar(),
-      ]);
+        }
+        return Column(children: [
+          if (_toolbarVisible) _sessionTopBar(),
+          Expanded(child: _remoteViewport()),
+          if (keyboard)
+            _liveKeyboardBar()
+          else if (_toolbarVisible)
+            _sessionToolbar(),
+        ]);
+      });
+
+  Widget _remoteViewport() => LayoutBuilder(builder: (context, box) {
+        final size = Size(box.maxWidth, box.maxHeight);
+        if (size.isEmpty || widget.desktopSize.isEmpty) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (_viewport != size) {
+          _viewport = size;
+          _fit = math.min(size.width / widget.desktopSize.width,
+              size.height / widget.desktopSize.height);
+          if (_viewPreset == _MonitorViewPreset.readable) {
+            _zoom = (1 / _fit).clamp(1.0, 6.0).toDouble();
+          } else if (_viewPreset == _MonitorViewPreset.fit) {
+            _zoom = 1;
+          } else {
+            _zoom ??= 1;
+          }
+          _offset = size.center(Offset.zero) - _pointer * _scale;
+          _limitOffset();
+        }
+        final frameStatus =
+            widget.frameStatus ?? (widget.localViewOnly ? 'View only' : null);
+        final badge = _modeBadge();
+        final minimapVisible = _isZoomed;
+        final thumbwheelTop = math.max(
+            minimapVisible ? _minimapSize.height + 28 : 12.0,
+            (_viewport.height - 144) / 2);
+        final marker = _touchMarker;
+        return Stack(children: [
+          Positioned.fill(
+              child: Listener(
+                  key: const ValueKey('monitor-surface'),
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: _onPointerDown,
+                  onPointerMove: _onPointerMove,
+                  onPointerUp: _onPointerUp,
+                  onPointerCancel: _onPointerUp,
+                  child: Semantics(
+                      label:
+                          'Windows touch screen. Tap where you want to click, drag with one finger to move the view, touch and hold then drag to drag in Windows, touch and hold then lift or tap with two fingers to right-click, pinch to zoom, and drag with two fingers to scroll.',
+                      child: ClipRect(
+                          child: Stack(children: [
+                        Positioned(
+                            key: const ValueKey('monitor-frame'),
+                            left: _offset.dx,
+                            top: _offset.dy,
+                            width: widget.desktopSize.width * _scale,
+                            height: widget.desktopSize.height * _scale,
+                            child: RawImage(
+                                image: widget.image,
+                                fit: BoxFit.fill,
+                                filterQuality: FilterQuality.medium)),
+                        if (widget.image == null)
+                          const Center(child: CircularProgressIndicator()),
+                        if (marker != null && widget.canControl)
+                          Positioned(
+                              key: const ValueKey('monitor-touch-marker'),
+                              left: marker.dx - 18,
+                              top: marker.dy - 18,
+                              child: IgnorePointer(
+                                  child: Container(
+                                      width: 36,
+                                      height: 36,
+                                      decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: Colors.white.withOpacity(0.12),
+                                          border: Border.all(
+                                              color: Colors.white70,
+                                              width: 2))))),
+                      ]))))),
+          if (minimapVisible) Positioned(top: 12, right: 12, child: _minimap()),
+          if (badge != null) Positioned(top: 12, left: 12, child: badge),
+          if (frameStatus != null)
+            Positioned(
+                top: 12,
+                left: 0,
+                right: 0,
+                child: IgnorePointer(
+                    child: Center(
+                        child: DecoratedBox(
+                            decoration: BoxDecoration(
+                                color: MirpgRemoteTheme.surface.withOpacity(0.9),
+                                borderRadius: BorderRadius.circular(999)),
+                            child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 7),
+                                child: Text(frameStatus,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w600))))))),
+          if (_showThumbwheel)
+            Positioned(
+                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
+                top: thumbwheelTop,
+                child: _thumbwheel()),
+          if (_panel == _MonitorPanel.controls)
+            Positioned(
+                left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 8 : null,
+                bottom: 12,
+                child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                        maxWidth: math.max(0, _viewport.width - 16),
+                        maxHeight: math.max(0, _viewport.height - 24)),
+                    child: _controlsPanel())),
+          if (!_toolbarVisible)
+            Positioned(
+                left: _toolbarDock == MonitorToolbarDock.left ? 4 : null,
+                right: _toolbarDock == MonitorToolbarDock.right ? 4 : null,
+                bottom: 4,
+                child: Material(
+                    color: MirpgRemoteTheme.surface.withOpacity(0.94),
+                    elevation: 8,
+                    borderRadius: BorderRadius.circular(14),
+                    child: IconButton(
+                        tooltip: 'Show toolbar',
+                        color: Colors.white,
+                        icon: const Icon(Icons.keyboard_arrow_up),
+                        onPressed: () {
+                          setState(() => _toolbarVisible = true);
+                          _emitPreferences();
+                        }))),
+        ]);
+      });
 }
 
-enum _MonitorPanel { none, actions, display }
+enum _MonitorPanel { none, controls }
 
 enum _MonitorSessionAction {
   clipboard,
   windows,
   quality,
-  actions,
-  display,
   hideControls,
 }
 
-enum _TwoFingerMode { undecided, scroll, pinch }
+enum _TouchGesture {
+  none,
+  pending,
+  drag,
+  holding,
+  viewPan,
+  ignored,
+  twoFinger,
+  pinch,
+  pan,
+  scroll,
+}
+
+enum _ArmedButton { none, right, middle }
 
 enum _MonitorViewPreset { fit, readable, custom }
 

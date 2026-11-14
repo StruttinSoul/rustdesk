@@ -445,10 +445,6 @@ pub struct Connection {
     emulator_operation_generation: u64,
     #[cfg(windows)]
     emulator_operation_replay: super::emulator::remote::HostOperationReplay,
-    #[cfg(windows)]
-    codex_operation_identity: String,
-    #[cfg(windows)]
-    codex_operation_generation: u64,
     clipboard: bool,
     audio: bool,
     file: bool,
@@ -638,7 +634,9 @@ impl Connection {
         let (tx, mut rx) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
         let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
         let (_emulator_tx, mut emulator_rx) =
-            mpsc::channel::<super::emulator::remote::GuestEvent>(2);
+            mpsc::channel::<super::emulator::remote::GuestEvent>(
+                super::emulator::remote::GUEST_EVENT_QUEUE_SIZE,
+            );
         let (tx_input, _rx_input) = std_mpsc::channel();
         let (tx_from_authed, mut rx_from_authed) = mpsc::unbounded_channel::<ipc::Data>();
         let mut hbbs_rx = crate::hbbs_http::sync::signal_receiver();
@@ -694,10 +692,6 @@ impl Connection {
             emulator_operation_generation: 1,
             #[cfg(windows)]
             emulator_operation_replay: Default::default(),
-            #[cfg(windows)]
-            codex_operation_identity: uuid::Uuid::new_v4().to_string(),
-            #[cfg(windows)]
-            codex_operation_generation: 1,
             clipboard: Self::permission(keys::OPTION_ENABLE_CLIPBOARD, &control_permissions),
             audio: Self::permission(keys::OPTION_ENABLE_AUDIO, &control_permissions),
             // to-do: make sure is the option correct here
@@ -2292,13 +2286,11 @@ impl Connection {
             privacy_mode: privacy_mode::is_privacy_mode_supported(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             terminal,
-            #[cfg(target_os = "windows")]
-            codex: self.is_remote() && crate::server::codex::is_available(),
             #[cfg(windows)]
             emulator: self.is_remote() && super::emulator::guest_runtime::helper_path().is_ok(),
             #[cfg(windows)]
             // The connected-PC dashboard also hosts Windows monitor, files, terminal,
-            // system-management, and Codex surfaces. Keep it available even when the
+            // system-management surfaces. Keep it available even when the
             // optional Android guest helper is missing; only live emulator capture
             // should depend on that helper.
             target_dashboard: self.is_remote(),
@@ -2982,9 +2974,6 @@ impl Connection {
             self.emulator_operation_generation =
                 self.emulator_operation_generation.wrapping_add(1).max(1);
             self.emulator_operation_replay = Default::default();
-            self.codex_operation_identity = uuid::Uuid::new_v4().to_string();
-            self.codex_operation_generation =
-                self.codex_operation_generation.wrapping_add(1).max(1);
         }
     }
 
@@ -4539,39 +4528,6 @@ impl Connection {
                     allow_err!(self.handle_terminal_action(action).await);
                     #[cfg(any(target_os = "android", target_os = "ios"))]
                     log::warn!("Terminal action received but not supported on this platform");
-                }
-                Some(message::Union::CodexReadRequest(request)) => {
-                    #[cfg(target_os = "windows")]
-                    if self.is_authed_remote_conn() {
-                        if let Some(reply) = self.inner.tx.clone() {
-                            crate::server::codex::submit_read_request(
-                                self.inner.id,
-                                request,
-                                reply,
-                                self.codex_operation_identity.clone(),
-                                self.codex_operation_generation,
-                            );
-                        }
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    let _ = request;
-                }
-                Some(message::Union::CodexControlRequest(request)) => {
-                    #[cfg(target_os = "windows")]
-                    if self.is_authed_remote_conn() {
-                        if let Some(reply) = self.inner.tx.clone() {
-                            crate::server::codex::submit_control_request(
-                                self.inner.id,
-                                request,
-                                reply,
-                                self.peer_keyboard_enabled(),
-                                self.codex_operation_identity.clone(),
-                                self.codex_operation_generation,
-                            );
-                        }
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    let _ = request;
                 }
                 _ => {}
             }
@@ -6710,10 +6666,6 @@ impl Connection {
             Some(message::Union::ScreenshotResponse(_)) => "screenshot_response",
             Some(message::Union::TerminalAction(_)) => "terminal_action",
             Some(message::Union::TerminalResponse(_)) => "terminal_response",
-            Some(message::Union::CodexReadRequest(_)) => "codex_read_request",
-            Some(message::Union::CodexReadResponse(_)) => "codex_read_response",
-            Some(message::Union::CodexControlRequest(_)) => "codex_control_request",
-            Some(message::Union::CodexControlResponse(_)) => "codex_control_response",
             Some(message::Union::EmulatorRequest(_)) => "emulator_request",
             Some(message::Union::EmulatorResponse(_)) => "emulator_response",
             Some(message::Union::EmulatorVideoFrame(_)) => "emulator_video_frame",
@@ -7285,8 +7237,6 @@ impl Drop for Connection {
     fn drop(&mut self) {
         #[cfg(windows)]
         self.emulator_session.take();
-        #[cfg(target_os = "windows")]
-        crate::server::codex::disconnect_client(self.inner.id);
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.release_held_input();
@@ -8301,14 +8251,6 @@ mod test {
                         msg(|m| m.set_port_forward_channel(PortForwardChannel::new())),
                         Some("port_forward_channel"),
                     ),
-                    (
-                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
-                        Some("codex_read_request"),
-                    ),
-                    (
-                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
-                        Some("codex_control_request"),
-                    ),
                 ],
             ),
             (
@@ -8374,14 +8316,6 @@ mod test {
                         msg(|m| m.set_port_forward_channel(PortForwardChannel::new())),
                         Some("port_forward_channel"),
                     ),
-                    (
-                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
-                        Some("codex_read_request"),
-                    ),
-                    (
-                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
-                        Some("codex_control_request"),
-                    ),
                 ],
             ),
             (
@@ -8436,14 +8370,6 @@ mod test {
                         misc_msg(|m| m.set_switch_sides_request(SwitchSidesRequest::new())),
                         Some("misc.switch_sides_request"),
                     ),
-                    (
-                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
-                        Some("codex_read_request"),
-                    ),
-                    (
-                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
-                        Some("codex_control_request"),
-                    ),
                 ],
             ),
             (
@@ -8456,14 +8382,6 @@ mod test {
                     (msg(|m| m.set_terminal_action(TerminalAction::new())), None),
                     (
                         misc_msg(|m| m.set_switch_sides_request(SwitchSidesRequest::new())),
-                        None,
-                    ),
-                    (
-                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
-                        None,
-                    ),
-                    (
-                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
                         None,
                     ),
                 ],
@@ -8501,14 +8419,6 @@ mod test {
                     (
                         msg(|m| m.set_port_forward_channel(PortForwardChannel::new())),
                         None,
-                    ),
-                    (
-                        msg(|m| m.set_codex_read_request(CodexReadRequest::new())),
-                        Some("codex_read_request"),
-                    ),
-                    (
-                        msg(|m| m.set_codex_control_request(CodexControlRequest::new())),
-                        Some("codex_control_request"),
                     ),
                 ],
             ),

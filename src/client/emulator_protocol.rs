@@ -223,6 +223,17 @@ pub fn emulator_request_from_json(payload: &str) -> Option<EmulatorRequest> {
                 ..Default::default()
             });
         }
+        "emulator_shutdown" => {
+            let component = value["component"].as_str()?.to_owned();
+            if !crate::server::emulator::remote::valid_shutdown_target(&component) { return None; }
+            let (operation_id, session_identity, target_identity, session_generation) =
+                host_operation_identity(&value, &format!("emulator:{component}"))?;
+            request.set_host(EmulatorHostRequest {
+                action: "emulator_shutdown".to_owned(), component,
+                operation_id, session_identity, target_identity, session_generation,
+                ..Default::default()
+            });
+        }
         "recover" => {
             let component = value["component"].as_str()?.to_owned();
             let target = format!("component:{component}");
@@ -537,4 +548,17 @@ mod tests {
                 .is_ok()
         );
     }
+    #[test]
+    fn emulator_shutdown_parser_binds_the_named_instance_to_its_operation() {
+        let payload = serde_json::json!({"protocol_version":1,"request_id":22,"action":"emulator_shutdown",
+            "component":"bluestacks:Tiramisu64","operation_id":"shutdown-1","session_identity":"scope-a",
+            "target_identity":"emulator:bluestacks:Tiramisu64","session_generation":4});
+        let request = emulator_request_from_json(&payload.to_string()).unwrap();
+        assert!(matches!(request.union.as_ref(), Some(base::message_proto::emulator_request::Union::Host(host)) if host.component == "bluestacks:Tiramisu64"));
+        let mut forged = payload.clone(); forged["target_identity"] = "emulator:bluestacks:Tiramisu64_3".into();
+        assert!(emulator_request_from_json(&forged.to_string()).is_none());
+        let mut unscoped = payload.clone(); unscoped.as_object_mut().unwrap().remove("operation_id");
+        assert!(emulator_request_from_json(&unscoped.to_string()).is_none());
+    }
+
 }

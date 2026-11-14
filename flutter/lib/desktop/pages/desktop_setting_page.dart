@@ -25,6 +25,9 @@ import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
+import '../widgets/aperture_settings_frame.dart';
+
+bool get _useApertureSettings => isWindows && !bind.isCustomClient();
 
 const double _kTabWidth = 200;
 const double _kTabHeight = 42;
@@ -283,6 +286,17 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    if (_useApertureSettings) {
+      return _buildBlock(children: [Expanded(child: ApertureSettingsFrame(
+        title: translate('Settings'),
+        navigation: _listView(tabs: _settingTabs()),
+        content: PageView(
+          controller: controller,
+          physics: const NeverScrollableScrollPhysics(),
+          children: _children(),
+        ),
+      ))]);
+    }
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.background,
       body: _buildBlock(
@@ -362,6 +376,19 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
   Widget _listItem({required _TabInfo tab}) {
     return Obx(() {
       bool selected = tab.key == selectedTab.value;
+      if (_useApertureSettings) {
+        return ApertureSettingsItem(
+          label: translate(tab.label),
+          icon: selected ? tab.selected : tab.unselected,
+          selected: selected,
+          onTap: () {
+            final index = DesktopSettingPage.tabKeys.indexOf(tab.key);
+            if (index < 0 || selected) return;
+            controller.jumpToPage(index);
+            selectedTab.value = tab.key;
+          },
+        );
+      }
       return SizedBox(
         width: _kTabWidth,
         height: _kTabHeight,
@@ -3529,7 +3556,11 @@ class _AboutState extends State<_About> {
       final scrollController = ScrollController();
       return SingleChildScrollView(
         controller: scrollController,
-        child: _Card(title: translate('About RustDesk'), children: [
+        child: _Card(
+            title: _useApertureSettings
+                ? 'About Aperture'
+                : translate('About RustDesk'),
+            children: [
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -3566,9 +3597,18 @@ class _AboutState extends State<_About> {
                     style: linkStyle,
                   ).marginSymmetric(vertical: 4.0)),
               Container(
-                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
-                padding:
-                    const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
+                decoration: _useApertureSettings
+                    ? BoxDecoration(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Theme.of(context).dividerColor),
+                      )
+                    : const BoxDecoration(color: Color(0xFF2c8cff)),
+                padding: _useApertureSettings
+                    ? const EdgeInsets.symmetric(vertical: 16, horizontal: 16)
+                    : const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
                 child: SelectionArea(
                     child: Row(
                   children: [
@@ -3576,15 +3616,22 @@ class _AboutState extends State<_About> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          if (_useApertureSettings)
+                            const Text('Aperture is built on RustDesk.')
+                                .marginOnly(bottom: 6),
                           Text(
                             'Copyright © ${DateTime.now().toString().substring(0, 4)} Purslane Tech Pte. Ltd.\n$license',
-                            style: const TextStyle(color: Colors.white),
+                            style: _useApertureSettings
+                                ? null
+                                : const TextStyle(color: Colors.white),
                           ),
                           Text(
                             translate('Slogan_tip'),
                             style: TextStyle(
                                 fontWeight: FontWeight.w800,
-                                color: Colors.white),
+                                color: _useApertureSettings
+                                    ? null
+                                    : Colors.white),
                           )
                         ],
                       ),
@@ -3613,7 +3660,7 @@ Widget _Card(
     children: [
       Flexible(
         child: SizedBox(
-          width: _kCardFixedWidth,
+          width: _useApertureSettings ? double.infinity : _kCardFixedWidth,
           child: Card(
             child: Column(
               children: [
@@ -3623,8 +3670,9 @@ Widget _Card(
                         child: Text(
                       translate(title),
                       textAlign: TextAlign.start,
-                      style: const TextStyle(
-                        fontSize: _kTitleFontSize,
+                      style: TextStyle(
+                        fontSize: _useApertureSettings ? 18 : _kTitleFontSize,
+                        fontWeight: _useApertureSettings ? FontWeight.w600 : null,
                       ),
                     )),
                     ...?title_suffix
@@ -3634,7 +3682,7 @@ Widget _Card(
                     .map((e) => e.marginOnly(top: 4, right: _kContentHMargin)),
               ],
             ).marginOnly(bottom: 10),
-          ).marginOnly(left: _kCardLeftMargin, top: 15),
+          ).marginOnly(left: _useApertureSettings ? 0 : _kCardLeftMargin, top: _useApertureSettings ? 16 : 15),
         ),
       ),
     ],

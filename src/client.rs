@@ -102,6 +102,7 @@ mod audio_state_tests;
 pub mod file_trait;
 pub mod helper;
 mod emulator_protocol;
+mod lan_fast_path;
 pub use emulator_protocol::emulator_request_from_json;
 pub mod io_loop;
 pub mod screenshot;
@@ -380,7 +381,7 @@ impl Client {
         debug_assert!(peer == interface.get_id());
         interface.update_direct(None);
         interface.update_received(false);
-        match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+        match lan_fast_path::start(peer, key, token, conn_type, interface.clone()).await {
             Err(err) => {
                 let err_str = err.to_string();
                 if err_str.starts_with("Failed") {
@@ -1571,6 +1572,9 @@ impl Client {
             punch_type
         );
         let res = Self::secure_connection(peer_id, signed_id_pk.clone(), key, &mut conn).await;
+        if res.is_ok() {
+            lan_fast_path::remember_verified_peer(peer_id, &signed_id_pk, key, conn.is_secured());
+        }
         let pk: Option<Vec<u8>> = match res {
             Ok(pk) => pk,
             Err(e) if typ == "WebRTC" && !relay_server.is_empty() => {

@@ -804,7 +804,7 @@ class _TerminalPageState extends State<TerminalPage>
       child: SafeArea(
         top: false,
         child: Material(
-          color: MirpgRemoteTheme.surface,
+          color: MirpgStudioPalette.of(context).surface,
           elevation: 8,
           borderRadius: BorderRadius.circular(14),
           child: Padding(
@@ -929,9 +929,10 @@ class _TerminalPageState extends State<TerminalPage>
       bottom: _sysKeyboardHeight,
       child: Container(
         key: _keyboardKey,
-        decoration: const BoxDecoration(
-          color: MirpgRemoteTheme.surface,
-          border: Border(top: BorderSide(color: MirpgRemoteTheme.divider)),
+        decoration: BoxDecoration(
+          color: MirpgStudioPalette.of(context).surface,
+          border: Border(top: BorderSide(
+              color: MirpgStudioPalette.of(context).divider)),
         ),
         padding: EdgeInsets.zero,
         child: Column(
@@ -1031,9 +1032,9 @@ class _TerminalPageState extends State<TerminalPage>
           minimumSize: const Size(terminalKeyboardKeyWidth, 32),
           padding: EdgeInsets.zero,
           textStyle: const TextStyle(fontSize: 12),
-          backgroundColor: MirpgRemoteTheme.raised,
-          foregroundColor: MirpgRemoteTheme.textPrimary,
-          side: const BorderSide(color: MirpgRemoteTheme.outline),
+          backgroundColor: MirpgStudioPalette.of(context).raised,
+          foregroundColor: MirpgStudioPalette.of(context).textPrimary,
+          side: BorderSide(color: MirpgStudioPalette.of(context).outline),
         ),
       ),
     );
@@ -1070,14 +1071,16 @@ class _TerminalPageState extends State<TerminalPage>
           minimumSize: const Size(terminalKeyboardKeyWidth, 32),
           padding: EdgeInsets.zero,
           textStyle: const TextStyle(fontSize: 12),
-          backgroundColor:
-              isLocked ? MirpgRemoteTheme.accent : MirpgRemoteTheme.raised,
+          backgroundColor: isLocked
+              ? MirpgStudioPalette.of(context).accent
+              : MirpgStudioPalette.of(context).raised,
           foregroundColor: isLocked
-              ? MirpgRemoteTheme.background
-              : MirpgRemoteTheme.textPrimary,
+              ? Theme.of(context).colorScheme.onPrimary
+              : MirpgStudioPalette.of(context).textPrimary,
           side: BorderSide(
-            color:
-                isLocked ? MirpgRemoteTheme.accent : MirpgRemoteTheme.outline,
+            color: isLocked
+                ? MirpgStudioPalette.of(context).accent
+                : MirpgStudioPalette.of(context).outline,
           ),
         ),
       ),
@@ -1097,9 +1100,9 @@ class _TerminalPageState extends State<TerminalPage>
         minimumSize: const Size(terminalKeyboardKeyWidth, 32),
         padding: EdgeInsets.zero,
         textStyle: const TextStyle(fontSize: 12),
-        backgroundColor: MirpgRemoteTheme.raised,
-        foregroundColor: MirpgRemoteTheme.textPrimary,
-        side: const BorderSide(color: MirpgRemoteTheme.outline),
+        backgroundColor: MirpgStudioPalette.of(context).raised,
+        foregroundColor: MirpgStudioPalette.of(context).textPrimary,
+        side: BorderSide(color: MirpgStudioPalette.of(context).outline),
       ),
     );
   }

@@ -256,6 +256,10 @@ pub fn handle_request_scoped(
             ),
             "process_end_failed",
         ),
+        "emulator_shutdown" => match super::shutdown_windows::request(&request.component) {
+            Ok(message) => serde_json::json!({"ok": true, "accepted": true, "message": message}),
+            Err(error) => serde_json::json!({"ok": false, "accepted": true, "error_code": "emulator_shutdown_failed", "error": error.to_string()}),
+        },
         "recover" => mutation_result(
             recover_component(&request.component),
             "recover_component_failed",
@@ -643,23 +647,6 @@ fn probe_watchdog(auto_recover: bool) -> WatchdogState {
             detail: error.to_string(),
             recoverable: false,
         },
-    });
-    components.push(ComponentHealth {
-        id: "codex".to_owned(),
-        label: "Codex".to_owned(),
-        state: if crate::server::codex::is_available() {
-            "healthy"
-        } else {
-            "unavailable"
-        }
-        .to_owned(),
-        detail: if crate::server::codex::is_available() {
-            "Codex installation detected"
-        } else {
-            "Codex is not available on this Windows host"
-        }
-        .to_owned(),
-        recoverable: false,
     });
     let adb = match bluestacks::watchdog_adb_health() {
         Ok((0, _)) => ComponentHealth {

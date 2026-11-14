@@ -66,7 +66,6 @@ jobs:
             test/target_dashboard_test.dart \
             test/emulator_model_test.dart \
             test/monitor_control_view_test.dart \
-            test/codex_page_test.dart \
             test/bluestacks_model_test.dart
 
   windows-x64:

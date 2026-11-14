@@ -12,7 +12,8 @@ const GUEST_CHANNEL_BASE: usize = 0x40000000;
 // stale video. BlueStacks does not reliably emit periodic keyframes, so overload
 // recovery asks the pinned guest helper to reset video and provide a fresh random-
 // access boundary.
-const GUEST_VIDEO_QUEUE_SIZE: usize = 8;
+// Cover a 300-ms delivery burst with scheduling headroom; drain immediately.
+const GUEST_VIDEO_QUEUE_SIZE: usize = 12;
 const GUEST_VIDEO_REFRESH_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(super) struct GuestVideoDecoder {
@@ -151,6 +152,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dashboard_preview_fps_restores_preference_without_saving_a_preview_cap() {
+        let mut config = crate::client::LoginConfigHandler::default();
+        config.config.options.insert("custom-fps".into(), "60".into());
+        config.config.image_quality = "custom".into();
+        config.last_auto_fps = Some(5);
+        let message = config.set_dashboard_preview_mode(true);
+        let Some(message::Union::Misc(misc)) = message.union else { panic!("missing FPS message") };
+        let Some(misc::Union::Option(option)) = misc.union else { panic!("missing FPS option") };
+        assert_eq!(option.custom_fps, 6);
+        assert_eq!(*config.custom_fps.lock().unwrap(), Some(6));
+        assert_eq!(config.config.options["custom-fps"], "60");
+        config.set_dashboard_preview_mode(false);
+        assert_eq!(*config.custom_fps.lock().unwrap(), Some(60));
+        assert_eq!(config.last_auto_fps, None);
+        config.config.image_quality = "balanced".into();
+        config.set_dashboard_preview_mode(false);
+        assert_eq!(*config.custom_fps.lock().unwrap(), Some(30));
+    }
+
+
+    #[test]
     fn guest_video_preserves_references_during_a_short_delivery_burst() {
         let (sender, receiver) = mpsc::sync_channel(GUEST_VIDEO_QUEUE_SIZE);
         let mut decoder = GuestVideoDecoder {
@@ -160,8 +182,8 @@ mod tests {
             waiting_key: true,
             last_refresh: None,
         };
-        // Six frames delivered together after 200 ms of network/scheduling jitter.
-        for index in 0..6 {
+        // Ten frames delivered together after a brief scheduling/delivery stall.
+        for index in 0..10 {
             assert!(!decoder.push(EmulatorVideoFrame {
                 pts: index * 33,
                 key: index == 0,
@@ -172,14 +194,14 @@ mod tests {
             std::iter::from_fn(|| receiver.try_recv().ok())
                 .map(|frame| frame.pts)
                 .collect::<Vec<_>>(),
-            vec![0, 33, 66, 99, 132, 165],
+            (0..10).map(|index| index * 33).collect::<Vec<_>>(),
             "Losing a reference frame freezes playback until the next keyframe"
         );
         assert!(!decoder.push(EmulatorVideoFrame {
-            pts: 198,
+            pts: 330,
             ..Default::default()
         }));
-        assert_eq!(receiver.try_recv().unwrap().pts, 198);
+        assert_eq!(receiver.try_recv().unwrap().pts, 330);
     }
 
     #[test]
@@ -255,6 +277,28 @@ mod tests {
             queued <= GUEST_VIDEO_QUEUE_SIZE,
             "A stalled decoder must not retain an unbounded video backlog: {queued} frames"
         );
+    }
+}
+
+impl crate::client::LoginConfigHandler {
+    pub(crate) fn set_dashboard_preview_mode(&mut self, preview: bool) -> Message {
+        let active_fps = if self.config.image_quality == "custom" {
+            self.config.options.get("custom-fps")
+                .and_then(|fps| fps.parse::<i32>().ok())
+                .filter(|fps| (5..=120).contains(fps))
+                .unwrap_or(30)
+        } else {
+            30
+        };
+        self.last_auto_fps = None;
+        self.set_custom_fps(if preview { active_fps.min(6) } else { active_fps }, false)
+    }
+}
+
+impl<T: InvokeUiSession> Session<T> {
+    pub(crate) fn set_dashboard_preview_mode(&self, preview: bool) {
+        let message = self.lc.write().unwrap().set_dashboard_preview_mode(preview);
+        self.send(Data::Message(message));
     }
 }
 

@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
+    os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -1696,6 +1697,7 @@ struct TimedCommandOutput {
 
 fn run_command_with_timeout(program: &Path, args: &[String]) -> ResultType<TimedCommandOutput> {
     let mut child = Command::new(program)
+        .creation_flags(0x08000000)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

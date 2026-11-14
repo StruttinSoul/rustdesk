@@ -1,3 +1,5 @@
+> Historical snapshot: the Codex integration was removed from Aperture on 2026-10-20. References below describe prior work, not current features or acceptance requirements. See [removal report](../../remote/2026-10-20-codex-removal.md).
+
 # Live BlueStacks and PC monitor dashboard
 
 Date: 2026-10-02

@@ -73,7 +73,8 @@ pub fn inventory(
     let (targets, provider_errors) = targets();
     let instances = targets
         .into_iter()
-        .map(|local| EmulatorInstance {
+        .map(|local| {
+            let mut instance = EmulatorInstance {
             default_package: if local.target.provider.to_string() == "bluestacks" {
                 super::bluestacks::default_app_for_instance(&local.target.provider_instance_id)
             } else {
@@ -86,6 +87,9 @@ pub fn inventory(
             android_version: local.target.android_version.unwrap_or_default(),
             last_error: local.target.last_error.unwrap_or_default(),
             ..Default::default()
+            };
+            super::shutdown_windows::annotate(&mut instance);
+            instance
         })
         .collect();
     let mut response = response(request_id);
@@ -102,6 +106,7 @@ pub fn inventory(
             "host.status".to_owned(),
             "host.windows.list.v1".to_owned(),
             "host.window_focus.v1".to_owned(),
+            "host.emulator_shutdown.v1".to_owned(),
             "host.process_end".to_owned(),
             "host.process_identity.v2".to_owned(),
             "host.recover.bluestacks_adb".to_owned(),
@@ -216,6 +221,31 @@ struct GuestGeometry {
     ready: bool,
 }
 
+#[derive(Default)]
+struct GuestIdleRefresh {
+    last_frame: Option<Instant>,
+    requested: bool,
+}
+
+impl GuestIdleRefresh {
+    fn note_frame(&mut self, now: Instant) {
+        self.last_frame = Some(now);
+        self.requested = false;
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        let due = self
+            .last_frame
+            .map(|last| now.saturating_duration_since(last) >= Duration::from_secs(2))
+            .unwrap_or(false);
+        if self.requested || !due {
+            return false;
+        }
+        self.requested = true;
+        true
+    }
+}
+
 // A full connection channel must not stop reading the scrcpy socket: doing
 // so buffers old frames in TCP and eventually makes the remote view jump ahead.
 // After any dropped H.264 reference, wait for a new random-access frame.
@@ -283,11 +313,13 @@ impl GuestGeometry {
         }
     }
 
-    fn begin_stream(&mut self, width: u16, height: u16) {
+    fn begin_stream(&mut self, width: u16, height: u16) -> bool {
+        let changed = self.generation == 0 || self.width != width || self.height != height;
         self.width = width;
         self.height = height;
         self.generation = self.generation.saturating_add(1).max(1);
         self.ready = false;
+        changed
     }
 }
 
@@ -566,6 +598,9 @@ fn run_session(
     let recovery_timeout = recovery_timed_out.clone();
     let recovery_geometry = geometry.clone();
     let recovery_socket = helper.cancellation_socket()?;
+    let capture_idle = Arc::new(Mutex::new(GuestIdleRefresh::default()));
+    let watchdog_idle = capture_idle.clone();
+    let recovery_input = capture_input.clone();
     let recovery_watchdog = thread::Builder::new()
         .name("emulator-recovery-watchdog".to_owned())
         .spawn(move || {
@@ -589,6 +624,13 @@ fn run_session(
                     }
                     break;
                 }
+                // Some emulator encoders stop repeating frames on a static screen.
+                // Probe once; only an actual new capture can rearm the probe.
+                if watchdog_idle.lock().unwrap().take_due(Instant::now()) {
+                    if let Err(error) = recovery_input.try_send(GuestInputCommand::ResetVideo) {
+                        log::trace!("Idle guest refresh unavailable: {error}");
+                    }
+                }
                 thread::sleep(Duration::from_millis(100));
             }
         })?;
@@ -601,8 +643,8 @@ fn run_session(
             }
             let packet = helper.read_packet()?;
             if let VideoPacket::Session { width, height } = &packet {
-                geometry.lock().unwrap().begin_stream(*width, *height);
-                if !preview {
+                let changed = geometry.lock().unwrap().begin_stream(*width, *height);
+                if !preview && changed {
                     events.blocking_send(GuestEvent::Response(with_phase(
                         status_response(
                             request.request_id,
@@ -618,6 +660,7 @@ fn run_session(
                 }
             }
             if let Some(frame) = frames.accept(packet)? {
+                capture_idle.lock().unwrap().note_frame(Instant::now());
                 let ready_dimensions = {
                     let mut current = geometry.lock().unwrap();
                     let became_ready = !current.ready;
@@ -700,7 +743,7 @@ fn input_loop(
             };
             let current = geometry.lock().unwrap();
             if current.generation != observed_generation {
-                release_guest_touches(&mut socket, &mut touches);
+                release_guest_input(&mut socket, &mut touches, &mut keys);
                 observed_generation = current.generation;
             }
             let Some(command) = command else {
@@ -882,6 +925,31 @@ mod tests {
     }
 
     #[test]
+    fn idle_preview_refresh_is_bounded_and_rearmed_only_by_a_frame() {
+        let now = Instant::now();
+        let mut idle = GuestIdleRefresh::default();
+        assert!(!idle.take_due(now + Duration::from_secs(20)));
+        idle.note_frame(now);
+        assert!(!idle.take_due(now + Duration::from_secs(1)));
+        assert!(idle.take_due(now + Duration::from_secs(2)));
+        assert!(!idle.take_due(now + Duration::from_secs(30)));
+        idle.note_frame(now + Duration::from_secs(31));
+        assert!(!idle.take_due(now + Duration::from_secs(32)));
+        assert!(idle.take_due(now + Duration::from_secs(33)));
+    }
+
+    #[test]
+    fn flowing_preview_frames_do_not_request_capture_resets() {
+        let now = Instant::now();
+        let mut idle = GuestIdleRefresh::default();
+        for second in 0..30 {
+            let frame_at = now + Duration::from_secs(second);
+            idle.note_frame(frame_at);
+            assert!(!idle.take_due(frame_at + Duration::from_millis(1900)));
+        }
+    }
+
+    #[test]
     fn startup_phase_is_carried_as_evidence() {
         let response = with_phase(
             status_response(
@@ -900,6 +968,41 @@ mod tests {
             _ => panic!("Expected emulator status"),
         };
         assert_eq!(status.phase, "waiting_screen");
+    }
+
+    #[test]
+    fn guest_transport_preserves_short_frame_bursts_without_restarting_video() {
+        let (events, mut receiver) = hbb_common::tokio::sync::mpsc::channel(
+            super::super::remote::GUEST_EVENT_QUEUE_SIZE,
+        );
+        let (input, requests) = mpsc::sync_channel(2);
+        let mut sender = GuestFrameBackpressure::default();
+        // Six 30-FPS frames arriving together after a 200-ms scheduling delay.
+        for index in 0..6 {
+            sender
+                .deliver(
+                    EmulatorVideoFrame {
+                        session_id: 9,
+                        pts: index * 33,
+                        key: index == 0,
+                        ..Default::default()
+                    },
+                    &events,
+                    &input,
+                )
+                .unwrap();
+        }
+        assert!(
+            requests.try_recv().is_err(),
+            "A short frame burst must not reset the guest encoder"
+        );
+        let delivered = std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(|event| match event {
+                GuestEvent::Frame(frame) => frame.pts,
+                _ => panic!("Expected video frame"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(delivered, vec![0, 33, 66, 99, 132, 165]);
     }
 
     #[test]
@@ -1213,6 +1316,79 @@ mod tests {
             &wire[32..],
             &touch_packet(1, 9, 200, 300, 720, 1280).unwrap()
         );
+    }
+
+    #[hbb_common::tokio::test]
+    #[ignore = "Captures an explicitly selected idle local BlueStacks preview without injecting input"]
+    async fn idle_preview_keeps_delivering_current_frames() {
+        async fn next_frame(
+            receiver: &mut hbb_common::tokio::sync::mpsc::Receiver<GuestEvent>,
+            session_id: u64,
+        ) {
+            loop {
+                match receiver.recv().await.expect("Preview closed before its next frame") {
+                    GuestEvent::Frame(frame) if frame.session_id == session_id => {
+                        assert!(!frame.data.is_empty());
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let target = std::env::var("MIRPG_TEST_IDLE_TARGET").expect("Set MIRPG_TEST_IDLE_TARGET");
+        let (sender, mut receiver) = hbb_common::tokio::sync::mpsc::channel(32);
+        let session = GuestSession::start_preview(1, target, sender).unwrap();
+        hbb_common::tokio::time::timeout(
+            Duration::from_secs(30), next_frame(&mut receiver, session.id),
+        ).await.expect("Preview did not start");
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(12) {
+            hbb_common::tokio::time::timeout(
+                Duration::from_secs(3), next_frame(&mut receiver, session.id),
+            ).await.expect("Idle preview stopped delivering frames before the stale-image deadline");
+        }
+        session.cancel();
+    }
+
+    #[hbb_common::tokio::test]
+    #[ignore = "Captures an explicitly selected idle local fullscreen guest without injecting input"]
+    async fn idle_fullscreen_keeps_delivering_current_frames() {
+        let target = std::env::var("MIRPG_TEST_IDLE_TARGET").expect("Set MIRPG_TEST_IDLE_TARGET");
+        let (sender, mut receiver) = hbb_common::tokio::sync::mpsc::channel(32);
+        let mut request = EmulatorRequest { request_id: 1, protocol_version: PROTOCOL_VERSION, ..Default::default() };
+        request.set_select(base::message_proto::EmulatorSelectRequest { target_id: target, ..Default::default() });
+        let session = GuestSession::start(request, sender).unwrap();
+        let started = Instant::now();
+        let mut received = 0;
+        let mut maximum_gap = Duration::ZERO;
+        let mut last_frame = Instant::now();
+        let result = async {
+            while started.elapsed() < Duration::from_secs(15) {
+                let event = hbb_common::tokio::time::timeout(
+                    if received == 0 { Duration::from_secs(30) } else { Duration::from_secs(3) },
+                    receiver.recv(),
+                ).await.map_err(|_| "Fullscreen stopped delivering frames before the four-second input deadline")?
+                    .ok_or("Fullscreen closed before its next frame")?;
+                if let GuestEvent::Response(response) = &event {
+                    if let Some(base::message_proto::emulator_response::Union::Status(status)) = &response.union {
+                        if received != 0 && status.state.enum_value_or_default() == EmulatorSessionState::EmulatorStarting {
+                            return Err("Same-size recovery replaced the live image with a loading screen");
+                        }
+                    }
+                }
+                if let GuestEvent::Frame(frame) = event {
+                    assert_eq!(frame.session_id, session.id);
+                    assert!(!frame.data.is_empty());
+                    if received != 0 { maximum_gap = maximum_gap.max(last_frame.elapsed()); }
+                    last_frame = Instant::now();
+                    received += 1;
+                }
+            }
+            Ok::<_, &str>(())
+        }.await;
+        session.cancel();
+        eprintln!("Fullscreen capture: frames={received}, elapsed={:?}, maximum_gap={maximum_gap:?}", started.elapsed());
+        result.unwrap();
     }
 
     #[hbb_common::tokio::test]

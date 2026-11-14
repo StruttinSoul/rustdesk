@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MIRPG Remote · OpenPencil UI review</title>
+  <style>
+    :root { color-scheme:dark; --bg:#101416; --surface:#191F22; --raised:#242C30; --muted:#AEBAC0; --line:#3E494E; --mint:#70D8C1; }
+    * {box-sizing:border-box}
+    body {margin:0;padding:0 18px 65px;background:var(--bg);color:#F1F4F5;font:15px/1.55 Inter,system-ui,Arial,sans-serif}
+    header {margin:0 auto;max-width:1280px;padding:56px 4px 32px;display:flex;align-items:end;justify-content:space-between;gap:20px;flex-wrap:wrap}
+    .eyebrow {color:var(--mint);letter-spacing:.14em;text-transform:uppercase;font-size:11px;font-weight:800}
+    h1 {font-size:clamp(28px,4vw,48px);line-height:1.05;margin:10px 0}
+    p {margin:0;color:var(--muted)}
+    .pill {padding:10px 15px;border-radius:30px;border:1px solid #2c524c;color:var(--mint);background:#16382F;white-space:nowrap;font-weight:700}
+    .grid {max-width:2050px;margin:auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(295px,1fr));gap:18px}
+    article {background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:15px;min-width:0}
+    .label {display:flex;gap:10px;align-items:center;min-height:43px;margin-bottom:10px;font-weight:800}
+    .number {display:grid;place-items:center;width:32px;height:32px;background:#16382F;border-radius:50%;color:var(--mint)}
+    img {width:100%;height:auto;display:block;border-radius:17px;max-width:393px;margin:0 auto;border:1px solid #304148}
+    .reason {font-size:13px;color:var(--muted);padding:13px 5px 2px}
+    .findings {max-width:1280px;margin:42px auto 0;display:flex;flex-wrap:wrap;gap:10px}
+    .finding {background:var(--raised);border-radius:12px;padding:10px 14px;display:inline-flex;gap:9px;font-size:13px}
+    .priority {color:var(--mint);font-weight:800}
+    footer {max-width:1280px;margin:30px auto;color:var(--muted);font-size:13px}
+    a {color:var(--mint)}
+  </style>
+</head>
+<body>
+  <header>
+    <div><div class="eyebrow">OpenPencil · October 12, 2026 · visual proposal</div>
+      <h1>Make remote access feel effortless.</h1>
+      <p>Five editable screen proposals based on your screenshots and current Flutter code. No production UI was changed.</p>
+    </div><div class="pill">Graphite + mint · 393 × 852</div>
+  </header>
+  <main class="grid">
+    <article><div class="label"><span class="number">01</span> Live workspace</div><img src="exports/overview.png" alt="Overview redesign" /><div class="reason">Direct one-tap entry; live monitor and BlueStacks previews; boot controls belong on stopped cards.</div></article>
+    <article><div class="label"><span class="number">02</span> BlueStacks session</div><img src="exports/bluestacks.png" alt="BlueStacks remote view" /><div class="reason">Portrait game feed, right-side Back/Home/Recents, and always-reachable target switcher.</div></article>
+    <article><div class="label"><span class="number">03</span> Readable Windows</div><img src="exports/windows.png" alt="Windows remote controls" /><div class="reason">A usable default zoom mode, visible mouse and keyboard controls, and a desktop minimap.</div></article>
+    <article><div class="label"><span class="number">04</span> Chat-first Codex</div><img src="exports/codex.png" alt="Codex thread redesign" /><div class="reason">Real task status plus grouped tool calls keeps console output from swamping conversations.</div></article>
+    <article><div class="label"><span class="number">05</span> Graceful recovery</div><img src="exports/recovery.png" alt="Stream recovery view" /><div class="reason">Show that Jarvis is connected while a preview has failed, then offer Retry and Switch view.</div></article>
+  </main>
+  <section class="findings" aria-label="Key priorities">
+    <div class="finding"><span class="priority">P0</span> Black monitor previews</div>
+    <div class="finding"><span class="priority">P0</span> Closed guest dead end</div>
+    <div class="finding"><span class="priority">P1</span> Huge Codex command logs</div>
+    <div class="finding"><span class="priority">P1</span> Tiny Windows desktop</div>
+    <div class="finding"><span class="priority">P1</span> Generic connection errors</div>
+  </section>
+  <footer>These screens are illustrative, not captured live video. For evidence, limitations and implementation criteria, see <a href="qa/UI_REVIEW_2026-10-12.md">the UI audit</a>. Edit the original <a href="MIRPG-Remote-UI-Review.fig">OpenPencil .fig</a>.</footer>
+</body>
+</html>

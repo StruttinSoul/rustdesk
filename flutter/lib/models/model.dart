@@ -16,7 +16,6 @@ import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/models/clipboard_transfer_model.dart';
-import 'package:flutter_hbb/models/codex_model.dart';
 import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:flutter_hbb/models/group_model.dart';
@@ -28,7 +27,6 @@ import 'package:flutter_hbb/models/user_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/models/desktop_render_texture.dart';
 import 'package:flutter_hbb/models/terminal_model.dart';
-import 'package:flutter_hbb/models/task_notification_policy.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:flutter_hbb/utils/http_service.dart' as http;
@@ -396,8 +394,6 @@ class FfiModel with ChangeNotifier {
             .receive(int.parse(evt['id'] as String), evt['text'] ?? '');
       } else if (name == 'terminal_response') {
         parent.target?.routeTerminalResponse(evt);
-      } else if (name == 'codex_read_response') {
-        parent.target?.codexModel.handleResponse(evt);
       } else if (name == 'emulator_response') {
         final model = parent.target?.emulatorModel;
         final previousId = model?.guestSessionId;
@@ -414,8 +410,6 @@ class FfiModel with ChangeNotifier {
         }
       } else if (name == 'manual_clipboard_response') {
         parent.target?.clipboardTransferModel.handleResponse(evt);
-      } else if (name == 'codex_control_response') {
-        parent.target?.codexModel.handleControlResponse(evt);
       } else if (name == 'file_dir') {
         parent.target?.fileModel.receiveFileDir(evt);
       } else if (name == 'empty_dirs') {
@@ -1521,7 +1515,6 @@ class FfiModel with ChangeNotifier {
       Map<String, dynamic> features = json.decode(evt['features']);
       _pi.features.privacyMode = features['privacy_mode'] == true;
       _pi.features.terminal = features['terminal'] == true;
-      _pi.features.codex = features['codex'] == true;
       _pi.features.emulator = features['emulator'] == true;
       _pi.features.targetDashboard = features['target_dashboard'] == true;
       _pi.features.hostManagement = features['host_management'] == true;
@@ -1992,6 +1985,7 @@ class VirtualMouseMode with ChangeNotifier {
 class ImageModel with ChangeNotifier {
   ui.Image? _image;
   final Map<int, ui.Image> _dashboardImages = {};
+  final Stopwatch _presentationClock = Stopwatch()..start();
   final Map<int, DateTime> _dashboardImageUpdatedAt = {};
   final Map<int, int> _dashboardImagePreviewRequest = {};
   ui.Image? dashboardImage(int channel) => _dashboardImages[channel];
@@ -2069,6 +2063,11 @@ class ImageModel with ChangeNotifier {
   }
 
   decodeAndUpdate(int display, Uint8List rgba) async {
+    final emulator = parent.target?.emulatorModel;
+    if (emulator != null &&
+        !emulator.framePacer.shouldPresent(display, _presentationClock.elapsed)) {
+      return;
+    }
     if (parent.target?.emulatorModel.dashboardActive == true) {
       await _decodeDashboard(display, rgba);
       return;
@@ -4290,7 +4289,6 @@ class FFI {
   late final CanvasModel canvasModel; // session
   late final ServerModel serverModel; // global
   late final ChatModel chatModel; // session
-  late final CodexModel codexModel; // session
   late final EmulatorModel emulatorModel;
   bool _emulatorModelReady = false;
   late final ClipboardTransferModel clipboardTransferModel;
@@ -4332,49 +4330,6 @@ class FFI {
     canvasModel = CanvasModel(WeakReference(this));
     serverModel = ServerModel(WeakReference(this));
     chatModel = ChatModel(WeakReference(this));
-    codexModel = CodexModel(
-      sessionId,
-      taskNotificationsEnabled:
-          bind.mainGetLocalOption(key: kCodexTaskNotificationsOption) == 'Y',
-      hideSensitiveNotificationContent:
-          bind.mainGetLocalOption(key: kCodexTaskNotificationPrivacyOption) !=
-              'N',
-      seenNotificationEventIds: TaskNotificationPolicy.decodeSeenEventIds(
-        bind.mainGetLocalOption(key: kCodexTaskNotificationSeenOption),
-      ),
-      notificationRuntimeIdProvider: () => id,
-      notificationPermissionRequester: isAndroid
-          ? () async {
-              if (androidVersion < 33) return true;
-              if (await AndroidPermissionManager.check(
-                  kAndroid13Notification)) {
-                return true;
-              }
-              return AndroidPermissionManager.request(kAndroid13Notification);
-            }
-          : null,
-      notificationSender: isAndroid
-          ? (alert) async {
-              return invokeMethod(
-                  'show_task_notification', alert.toPlatformMap());
-            }
-          : null,
-      notificationSettingsSaver:
-          (enabled, hideSensitiveContent, encodedSeenEventIds) async {
-        await bind.mainSetLocalOption(
-          key: kCodexTaskNotificationsOption,
-          value: enabled ? 'Y' : 'N',
-        );
-        await bind.mainSetLocalOption(
-          key: kCodexTaskNotificationPrivacyOption,
-          value: hideSensitiveContent ? 'Y' : 'N',
-        );
-        await bind.mainSetLocalOption(
-          key: kCodexTaskNotificationSeenOption,
-          value: encodedSeenEventIds,
-        );
-      },
-    );
     emulatorModel = EmulatorModel(sessionId);
     _emulatorModelReady = true;
     clipboardTransferModel = ClipboardTransferModel(
@@ -4424,7 +4379,6 @@ class FFI {
 
   /// Mobile reuse FFI
   void mobileReset() {
-    codexModel.reset();
     emulatorModel.reset();
     clipboardTransferModel.clearEphemeralState();
     ffiModel.resetRestartReconnectState();
@@ -4706,7 +4660,6 @@ class FFI {
       platformFFI.clearVideoFrameCallback();
     }
     chatModel.close();
-    codexModel.reset();
     emulatorModel.reset();
     clipboardTransferModel.clearEphemeralState();
     // Close all terminal models
@@ -4836,7 +4789,6 @@ class Resolution {
 class Features {
   bool privacyMode = false;
   bool terminal = false;
-  bool codex = false;
   bool emulator = false;
   bool targetDashboard = false;
   bool hostManagement = false;

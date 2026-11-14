@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0B1418">
+  <title>MIRPG Remote — Control Deck V3</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0B1418;--panel:#122127;--mint:#79E3CA;--ink:#F3F1EA;--muted:#A6B9BD;--copper:#DDBA85;--line:#315057}
+    *{box-sizing:border-box}
+    body{margin:0;padding:0 18px 52px;background:var(--bg);color:var(--ink);font:14px/1.6 Inter,"Segoe UI",system-ui,sans-serif}
+    header{max-width:1480px;margin:auto;padding:52px 0 35px;border-bottom:1px solid var(--line);display:flex;gap:25px;justify-content:space-between;align-items:flex-end;flex-wrap:wrap}
+    .kicker{font-size:11px;letter-spacing:.19em;font-weight:800;color:var(--mint)}
+    h1{font-size:clamp(36px,5vw,64px);line-height:1.02;margin:15px 0 20px;letter-spacing:-.05em;max-width:700px}
+    p{color:var(--muted);max-width:720px;margin:0}
+    .meta{border-left:3px solid var(--copper);padding-left:16px;color:var(--muted);font-size:12px;line-height:2}
+    .grid{max-width:1480px;margin:34px auto 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:25px 22px}
+    figure{margin:0;min-width:0}
+    figure img{display:block;width:100%;max-width:393px;margin:auto;border:1px solid var(--line);background:#071013;border-radius:4px}
+    figcaption{padding:14px 5px 0;display:flex;align-items:start;gap:12px;font-size:13px}
+    figcaption b{color:var(--copper);font-size:11px;font-weight:800;letter-spacing:.12em;line-height:1.9}
+    figcaption strong{display:block;font-size:15px}
+    figcaption span{display:block;color:var(--muted);max-width:230px}
+    footer{max-width:1480px;margin:45px auto 0;border-top:1px solid var(--line);padding-top:20px;color:var(--muted);font-size:12px}
+    a{color:var(--mint)}
+    @media(max-width:640px){header{padding-top:24px}.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <div class="kicker">MIRPG  /  REMOTE  /  THE CONTROL DECK</div>
+      <h1>Your world.<br>One connection.</h1>
+      <p>A more distinctive remote-access interface: editorial hierarchy, signal motifs, copper details, and dedicated controls that leave the actual screen usable.</p>
+    </div>
+    <div class="meta">CONCEPT V3<br>06 EDITABLE SCREENS<br>393 × 852 / ANDROID<br>OPENPENCIL / NO APP CHANGES</div>
+  </header>
+  <main class="grid">
+    <figure><img src="exports/MIRPG-Control-Deck-V3-home.png" alt="Home with Windows and Android thumbnails"><figcaption><b>01</b><div><strong>Your space</strong><span>Live-first targets; both game previews fit above the dock.</span></div></figcaption></figure>
+    <figure><img src="exports/MIRPG-Control-Deck-V3-views.png" alt="Switcher for monitors and BlueStacks"><figcaption><b>02</b><div><strong>All surfaces</strong><span>Five clear rows, no crowding or duplicate text.</span></div></figcaption></figure>
+    <figure><img src="exports/MIRPG-Control-Deck-V3-android.png" alt="Immersive Android guest with system navigation rail"><figcaption><b>03</b><div><strong>Game, uninterrupted</strong><span>Separate right rail for Back, Home, Recents and typing.</span></div></figcaption></figure>
+    <figure><img src="exports/MIRPG-Control-Deck-V3-windows.png" alt="Readable remote Windows desktop"><figcaption><b>04</b><div><strong>Windows, usable</strong><span>Readable desk mode and a target switcher outside important content.</span></div></figcaption></figure>
+    <figure><img src="exports/MIRPG-Control-Deck-V3-codex.png" alt="Codex conversation and activity"><figcaption><b>05</b><div><strong>Codex in context</strong><span>Conversation-first layout with collapsed technical activity.</span></div></figcaption></figure>
+    <figure><img src="exports/MIRPG-Control-Deck-V3-recovery.png" alt="Recovery screen with retry stream controls"><figcaption><b>06</b><div><strong>Keep working</strong><span>One failed preview does not hide the still-connected PC.</span></div></figcaption></figure>
+  </main>
+  <footer>
+    Editable design: <a href="MIRPG-Control-Deck-V3.fig">MIRPG-Control-Deck-V3.fig</a>.
+    Layout verification: <a href="qa/CONTROL_DECK_V3_REVIEW.md">V3 design review</a>.
+    All video art, device statistics, and program windows are illustrative.
+  </footer>
+</body>
+</html>

@@ -3003,12 +3003,6 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                     self.handler.handle_terminal_response(response);
                 }
-                Some(message::Union::CodexReadResponse(response)) => {
-                    self.handler.handle_codex_read_response(response);
-                }
-                Some(message::Union::CodexControlResponse(response)) => {
-                    self.handler.handle_codex_control_response(response);
-                }
                 Some(message::Union::EmulatorResponse(response)) => {
                     self.handle_emulator_response(response)
                 }

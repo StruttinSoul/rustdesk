@@ -5,6 +5,13 @@ use std::collections::VecDeque;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+pub fn valid_shutdown_target(target: &str) -> bool {
+    target.strip_prefix("bluestacks:").map(|id| !id.is_empty() && id.len() <= 64 &&
+        id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')).unwrap_or(false)
+}
+// Match the client's short-burst budget; sustained overload still requests a keyframe.
+pub const GUEST_EVENT_QUEUE_SIZE: usize = 8;
+
 pub enum GuestEvent {
     Response(EmulatorResponse),
     Frame(EmulatorVideoFrame),
@@ -142,6 +149,7 @@ pub fn authorize_request(
             {
                 Ok(())
             }
+            "emulator_shutdown" if control && valid_shutdown_target(&host.component) => Ok(()),
             "recover" if control && host.component == "bluestacks_adb" => Ok(()),
             "window_focus"
                 if control
@@ -174,6 +182,7 @@ pub fn authorize_request(
                     && host.gateway_expected_process_identity.starts_with("gateway:")
                     && host.gateway_expected_process_identity.len() <= 128 => Ok(()),
             "process_end"
+            | "emulator_shutdown"
             | "recover"
             | "window_focus"
             | "phone_workspace_begin"
@@ -271,6 +280,7 @@ pub fn authorize_host_operation(
     if !matches!(
         host.action.as_str(),
         "process_end"
+            | "emulator_shutdown"
             | "recover"
             | "window_focus"
             | "phone_workspace_begin"
@@ -296,6 +306,7 @@ pub fn authorize_host_operation(
     }
     let expected_target = match host.action.as_str() {
         "process_end" => format!("process:{}:{}", host.pid, host.process_creation_time_100ns),
+        "emulator_shutdown" if valid_shutdown_target(&host.component) => format!("emulator:{}", host.component),
         "recover" => format!("component:{}", host.component),
         "window_focus" => format!("window:{}:{}", host.window_id, host.desktop_generation),
         "phone_workspace_begin" => format!(
@@ -609,4 +620,25 @@ mod tests {
         message.set_misc(misc);
         assert!(!blocks_desktop_message(&message));
     }
+    #[test]
+    fn emulator_shutdown_requires_control_and_exact_connection_target_scope() {
+        let mut request = EmulatorRequest { protocol_version: PROTOCOL_VERSION, ..Default::default() };
+        request.set_host(EmulatorHostRequest { action: "emulator_shutdown".into(), component: "bluestacks:Tiramisu64".into(),
+            operation_id: "shutdown-1".into(), session_identity: "scope-a".into(),
+            target_identity: "emulator:bluestacks:Tiramisu64".into(), session_generation: 4, ..Default::default() });
+        assert!(authorize_request(&request, true, true, None).is_ok());
+        assert!(authorize_request(&request, true, false, None).is_err());
+        assert!(authorize_request(&request, false, true, None).is_err());
+        assert!(authorize_host_operation(&request, "scope-a", 4).is_ok());
+        assert!(authorize_host_operation(&request, "scope-b", 4).is_err());
+        assert!(authorize_host_operation(&request, "scope-a", 5).is_err());
+        let mut forged = match request.union.as_ref().unwrap() { emulator_request::Union::Host(host) => host.clone(), _ => unreachable!() };
+        forged.target_identity = "emulator:bluestacks:Tiramisu64_3".into();
+        request.set_host(forged);
+        assert!(authorize_host_operation(&request, "scope-a", 4).is_err());
+        for target in ["bluestacks:", "ldplayer:0", "windows:0", "bluestacks:../x", "bluestacks:a:b"] {
+            assert!(!valid_shutdown_target(target));
+        }
+    }
+
 }

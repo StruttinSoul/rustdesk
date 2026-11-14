@@ -886,13 +886,13 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 showLanguageSettings(gFFI.dialogManager);
               }),
           SettingsTile(
-            title: Text(translate(
-                Theme.of(context).brightness == Brightness.light
-                    ? 'Light Theme'
-                    : 'Dark Theme')),
-            leading: Icon(Theme.of(context).brightness == Brightness.light
-                ? Icons.dark_mode
-                : Icons.light_mode),
+            title: const Text('Appearance'),
+            description: Text(switch (MyTheme.getThemeModePreference()) {
+              ThemeMode.system => 'Follow system',
+              ThemeMode.light => 'Light',
+              ThemeMode.dark => 'Dark',
+            }),
+            leading: const Icon(Icons.palette_outlined),
             onPressed: (context) {
               showThemeSettings(gFFI.dialogManager);
             },

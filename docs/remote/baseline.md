@@ -1,3 +1,5 @@
+> Historical snapshot: the Codex integration was removed from Aperture on 2026-10-20. References below describe prior work, not current features or acceptance requirements. See [removal report](2026-10-20-codex-removal.md).
+
 # MIRPG Remote WP0 Baseline
 
 Generated 2026-10-05 America/Vancouver. WP0 records evidence only and does not change application behavior.

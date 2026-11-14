@@ -21,11 +21,9 @@ import '../../common/widgets/remote_input.dart';
 import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
-import '../../models/task_notification_policy.dart';
 import '../../utils/image.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
-import 'codex_page.dart';
 import 'emulator_page.dart';
 import 'target_dashboard_page.dart';
 
@@ -209,14 +207,11 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         !gFFI.ffiModel.authenticatedPeer ||
         !gFFI.ffiModel.pi.features.targetDashboard) return;
     _dashboardOpened = true;
-    final notificationTarget =
-        TaskNotificationDeepLinkStore.takeForRuntime(widget.id);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         Navigator.of(context).push(MaterialPageRoute(
           builder: (_) => TargetDashboardPage(
             ffi: gFFI,
-            initialCodexThreadId: notificationTarget?.taskId,
           ),
         ));
       }
@@ -774,23 +769,6 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                 : EmulatorPage(ffi: gFFI))),
       ));
     }
-    if (gFFI.ffiModel.pi.features.codex &&
-        !gFFI.ffiModel.pi.features.targetDashboard) {
-      actions.add(
-        TTextMenu(
-          child: const Text('Codex'),
-          trailingIcon: Icon(Icons.code, color: MyTheme.accent),
-          onPressed: () {
-            Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => CodexPage(model: gFFI.codexModel),
-              ),
-            );
-          },
-        ),
-      );
-    }
-
     if (gFFI.ffiModel.pi.platform == kPeerPlatformAndroid &&
         gFFI.ffiModel.keyboard &&
         versionCmp(gFFI.ffiModel.pi.version, '1.2.7') >= 0) {

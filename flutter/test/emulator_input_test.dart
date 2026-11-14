@@ -46,9 +46,9 @@ void main() {
         child: SizedBox(
           width: 384,
           height: 832,
-          child: PortraitGuestStage(
-            guestWidth: 720,
-            guestHeight: 1280,
+          child: GuestControlStage(
+            controlsVisible: true,
+            onToggleControls: () {},
             video: const SizedBox.expand(
               key: Key('portrait-video'),
               child: ColoredBox(color: Colors.black),
@@ -88,9 +88,9 @@ void main() {
         child: SizedBox(
           width: 384,
           height: 700,
-          child: PortraitGuestStage(
-            guestWidth: 720,
-            guestHeight: 1280,
+          child: GuestControlStage(
+            controlsVisible: true,
+            onToggleControls: () {},
             video: const SizedBox.expand(
               key: Key('portrait-video'),
               child: ColoredBox(color: Colors.black),
@@ -123,9 +123,9 @@ void main() {
           child: SizedBox(
             width: 384,
             height: screenHeight,
-            child: PortraitGuestStage(
-              guestWidth: 720,
-              guestHeight: 1280,
+            child: GuestControlStage(
+              controlsVisible: true,
+              onToggleControls: () {},
               video: LayoutBuilder(
                 builder: (_, constraints) => Listener(
                   key: const Key('touch-surface'),

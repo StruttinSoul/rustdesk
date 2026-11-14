@@ -188,8 +188,9 @@ class _HostManagementPageState extends State<HostManagementPage> {
         minVerticalPadding: 14,
         leading: Icon(
           Icons.hub_outlined,
-          color:
-              good ? MirpgRemoteTheme.accent : MirpgRemoteTheme.textSecondary,
+          color: good
+              ? MirpgStudioPalette.of(context).good
+              : MirpgStudioPalette.of(context).textSecondary,
         ),
         title: Text(title),
         subtitle: Text(subtitle, maxLines: 3, overflow: TextOverflow.ellipsis),
@@ -234,8 +235,8 @@ class _HostManagementPageState extends State<HostManagementPage> {
         leading: Icon(
           active != null ? Icons.phone_android : Icons.add_to_queue_outlined,
           color: active != null || support?.supported == true
-              ? MirpgRemoteTheme.accent
-              : MirpgRemoteTheme.textSecondary,
+              ? MirpgStudioPalette.of(context).good
+              : MirpgStudioPalette.of(context).textSecondary,
         ),
         title: Text(title),
         subtitle: Text(subtitle, maxLines: 3, overflow: TextOverflow.ellipsis),
@@ -514,7 +515,7 @@ IconData _healthIcon(String state) => switch (state) {
     };
 
 Color? _healthColor(BuildContext context, String state) => switch (state) {
-      'healthy' => MirpgRemoteTheme.accent,
+      'healthy' => MirpgStudioPalette.of(context).good,
       'unhealthy' => Theme.of(context).colorScheme.error,
       _ => null,
     };

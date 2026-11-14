@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/mobile/pages/server_page.dart';
 import 'package:flutter_hbb/mobile/pages/settings_page.dart';
@@ -8,6 +9,7 @@ import '../../common/widgets/chat_page.dart';
 import '../../models/platform_model.dart';
 import '../../models/state_model.dart';
 import '../widgets/mirpg_remote_theme.dart';
+import '../../common/widgets/aperture_brand.dart';
 import 'connection_page.dart';
 
 abstract class PageShape extends Widget {
@@ -45,6 +47,7 @@ class HomePageState extends State<HomePage> {
     super.initState();
     initPages();
     if (isAndroid && !bind.isIncomingOnly()) {
+      unawaited(bind.mainDiscover());
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         final id = await bind.mainGetLastRemoteId();
         if (mounted &&
@@ -164,7 +167,7 @@ class HomePageState extends State<HomePage> {
       children: [
         Text(pageTitle),
         Text(
-          'MIRPG Remote',
+          ApertureBrand.name,
           style: Theme.of(context).textTheme.labelSmall?.copyWith(
                 color: MirpgRemoteTheme.textSecondary,
                 fontWeight: FontWeight.w500,
