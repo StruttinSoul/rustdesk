@@ -15,6 +15,7 @@ use std::{
 const VERIFIED_IDENTITY: &str = "aperture-lan-verified-identity";
 const LAST_ADDRESS: &str = "aperture-lan-last-address";
 const CANDIDATE_TIMEOUT: Duration = Duration::from_millis(250);
+const LAN_HEAD_START: Duration = CANDIDATE_TIMEOUT;
 const MAX_CANDIDATES: usize = 3;
 const DISCOVERY_BUDGET: Duration = Duration::from_millis(750);
 type StartOutcome = (
@@ -47,7 +48,12 @@ impl LanPolicy {
             && !self.custom_server
             && !self.token_bearing
             && !self.switch_back
-            && self.connection_type == ConnType::DEFAULT_CONN
+            // Files and terminal too: Aperture has no account, and RustDesk's public server
+            // refuses connections without one, so these must not depend on it at home.
+            && matches!(
+                self.connection_type,
+                ConnType::DEFAULT_CONN | ConnType::FILE_TRANSFER | ConnType::TERMINAL
+            )
     }
 }
 pub(super) async fn start(
@@ -257,6 +263,16 @@ pub(super) async fn race_lan<T>(
     normal: impl Future<Output = ResultType<T>>,
 ) -> ResultType<T> {
     tokio::pin!(lan, normal);
+    // The normal route reaches the public rendezvous server, NAT test and STUN
+    // servers. Give the home path a head start so a working one never touches them.
+    tokio::select! {
+        biased;
+        result = &mut lan => return match result {
+            Ok(value) => Ok(value),
+            Err(_) => normal.await,
+        },
+        _ = tokio::time::sleep(LAN_HEAD_START) => {}
+    }
     tokio::select! {
         biased;
         result = &mut lan => match result {
@@ -308,7 +324,15 @@ mod tests {
                 ..ordinary()
             },
             LanPolicy {
-                connection_type: ConnType::FILE_TRANSFER,
+                connection_type: ConnType::PORT_FORWARD,
+                ..ordinary()
+            },
+            LanPolicy {
+                connection_type: ConnType::RDP,
+                ..ordinary()
+            },
+            LanPolicy {
+                connection_type: ConnType::VIEW_CAMERA,
                 ..ordinary()
             },
         ];
@@ -316,6 +340,21 @@ mod tests {
             assert!(!policy.allows_lan());
         }
     }
+    #[test]
+    fn lan_allows_file_transfer_and_terminal() {
+        for connection_type in [ConnType::FILE_TRANSFER, ConnType::TERMINAL] {
+            let policy = LanPolicy {
+                incoming_only: false,
+                forced_relay: false,
+                custom_server: false,
+                token_bearing: false,
+                switch_back: false,
+                connection_type,
+            };
+            assert!(policy.allows_lan(), "{connection_type:?}");
+        }
+    }
+
     #[tokio::test]
     async fn ready_lan_wins_without_waiting_for_rendezvous() {
         let result = race_lan(async { Ok("lan") }, async {
@@ -357,6 +396,41 @@ mod tests {
         })
         .await;
         assert_eq!(result.unwrap_err().to_string(), "normal route failed");
+    }
+
+    // At home the secured LAN path answers in ~40 ms; the public rendezvous
+    // server, NAT test and STUN servers should not be contacted at all then.
+    #[tokio::test]
+    async fn working_home_path_never_starts_the_public_route() {
+        let started = std::sync::atomic::AtomicBool::new(false);
+        let result = race_lan(
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok("lan")
+            },
+            async {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok("rendezvous")
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap(), "lan");
+        assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn slow_home_path_does_not_hold_back_the_public_route() {
+        let begun = std::time::Instant::now();
+        let result = race_lan(
+            async {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                Ok("lan")
+            },
+            async { Ok("rendezvous") },
+        )
+        .await;
+        assert_eq!(result.unwrap(), "rendezvous");
+        assert!(begun.elapsed() < Duration::from_secs(1));
     }
 }
 #[cfg(test)]
