@@ -1432,6 +1432,98 @@ void main() {
     model.dispose();
   });
 
+  group('taskbar restart', () {
+    Future<EmulatorModel> connected(List<Map<String, dynamic>> sent,
+        {List<String> capabilities = const [
+          'operation.identity.v1',
+          'operation.ack.v1',
+          'host.shell_restart.v1',
+        ]}) async {
+      final model = EmulatorModel(Uuid().v4obj(),
+          commandSender: (_, value) async => sent.add(jsonDecode(value)));
+      await model.refresh();
+      model.handleResponse({
+        'type': 'inventory',
+        'request_id': sent.single['request_id'],
+        'protocol_version': 1,
+        'instances': const [],
+        'provider_errors': const [],
+        'capabilities': capabilities,
+        'operation_session_identity': 'scope-shell',
+        'operation_generation': 3,
+      });
+      return model;
+    }
+
+    Map<String, dynamic> reply(Map<String, dynamic> request,
+            {required bool ok, String? message, String? error}) =>
+        {
+          'type': 'host',
+          'request_id': request['request_id'],
+          'protocol_version': 1,
+          'host': {
+            'ok': ok,
+            'accepted': true,
+            'state': ok ? 'applied' : 'failed',
+            if (message != null) 'message': message,
+            if (error != null) 'error': error,
+            if (error != null) 'error_code': 'shell_restart_failed',
+            'operation_id': request['operation_id'],
+            'session_identity': 'scope-shell',
+            'target_identity': 'shell:explorer',
+            'session_generation': 3,
+          },
+        };
+
+    test('sends an identified request and reports the PC result', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent);
+      expect(model.hostShellRestartCapability, CapabilityStatus.supported);
+
+      final result = model.restartHostShell();
+      await Future<void>.delayed(Duration.zero);
+      final request = Map<String, dynamic>.from(sent.last);
+      expect(request['action'], 'shell_restart');
+      expect(request['target_identity'], 'shell:explorer');
+      expect(request['session_identity'], 'scope-shell');
+      expect(request['session_generation'], 3);
+      expect((request['operation_id'] as String).isNotEmpty, isTrue);
+
+      model.handleResponse(
+          reply(request, ok: true, message: 'Taskbar restarted'));
+      final outcome = await result;
+      expect(outcome.ok, isTrue);
+      expect(outcome.message, 'Taskbar restarted');
+      model.dispose();
+    });
+
+    test('reports a failure from the PC', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent);
+      final result = model.restartHostShell();
+      await Future<void>.delayed(Duration.zero);
+      model.handleResponse(reply(Map<String, dynamic>.from(sent.last),
+          ok: false, error: 'Windows Explorer did not close'));
+      final outcome = await result;
+      expect(outcome.ok, isFalse);
+      expect(outcome.message, 'Windows Explorer did not close');
+      model.dispose();
+    });
+
+    test('does nothing when the PC does not offer it', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent,
+          capabilities: const ['operation.identity.v1', 'operation.ack.v1']);
+      expect(
+          model.hostShellRestartCapability, isNot(CapabilityStatus.supported));
+      final before = sent.length;
+      final outcome = await model.restartHostShell();
+      expect(outcome.ok, isFalse);
+      expect(sent.length, before);
+      model.dispose();
+    });
+  });
+
   test('negotiated host mutations carry identity and correlate concurrently',
       () async {
     final sent = <Map<String, dynamic>>[];

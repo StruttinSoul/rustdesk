@@ -132,6 +132,18 @@ pub fn emulator_request_from_json(payload: &str) -> Option<EmulatorRequest> {
                 ..Default::default()
             });
         }
+        "shell_restart" => {
+            let (operation_id, session_identity, target_identity, session_generation) =
+                host_operation_identity(&value, "shell:explorer")?;
+            request.set_host(EmulatorHostRequest {
+                action: "shell_restart".to_owned(),
+                operation_id,
+                session_identity,
+                target_identity,
+                session_generation,
+                ..Default::default()
+            });
+        }
         "windows_list" => request.set_host(EmulatorHostRequest {
             action: "windows_list".to_owned(),
             ..Default::default()
@@ -494,6 +506,48 @@ mod tests {
             forged.is_none(),
             "a forged opaque target identity must be rejected"
         );
+    }
+
+    #[test]
+    fn shell_restart_is_control_gated_and_operation_bound() {
+        let request = emulator_request_from_json(
+            r#"{"protocol_version":1,"request_id":50,"action":"shell_restart","operation_id":"op-50","session_identity":"scope-shell","target_identity":"shell:explorer","session_generation":4}"#,
+        )
+        .expect("taskbar restart should parse as a typed host mutation");
+
+        assert!(matches!(
+            request.union,
+            Some(emulator_request::Union::Host(ref host)) if host.action == "shell_restart"
+        ));
+        assert!(
+            crate::server::emulator::remote::authorize_request(&request, true, true, None).is_ok()
+        );
+        assert!(
+            crate::server::emulator::remote::authorize_request(&request, true, false, None)
+                .is_err(),
+            "restarting Explorer changes the host and requires control permission"
+        );
+        assert!(crate::server::emulator::remote::authorize_host_operation(
+            &request,
+            "scope-shell",
+            4
+        )
+        .is_ok());
+        assert!(crate::server::emulator::remote::authorize_host_operation(
+            &request,
+            "scope-other",
+            4
+        )
+        .is_err());
+
+        assert!(emulator_request_from_json(
+            r#"{"protocol_version":1,"request_id":51,"action":"shell_restart","operation_id":"op-51","session_identity":"scope-shell","target_identity":"shell:other","session_generation":4}"#,
+        )
+        .is_none());
+        assert!(emulator_request_from_json(
+            r#"{"protocol_version":1,"request_id":52,"action":"shell_restart"}"#,
+        )
+        .is_none());
     }
 
     #[test]

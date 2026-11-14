@@ -27,6 +27,8 @@ pub mod remote;
 #[cfg(windows)]
 pub mod remote_windows;
 #[cfg(windows)]
+pub mod shell_windows;
+#[cfg(windows)]
 pub mod shutdown_windows;
 #[cfg(windows)]
 pub mod window_picker;

@@ -263,6 +263,10 @@ pub fn handle_request_scoped(
             Ok(message) => serde_json::json!({"ok": true, "accepted": true, "message": message}),
             Err(error) => serde_json::json!({"ok": false, "accepted": true, "error_code": "emulator_shutdown_failed", "error": error.to_string()}),
         },
+        "shell_restart" => match super::shell_windows::restart() {
+            Ok(message) => serde_json::json!({"ok": true, "accepted": true, "message": message}),
+            Err(error) => serde_json::json!({"ok": false, "accepted": true, "error_code": "shell_restart_failed", "error": error.to_string()}),
+        },
         "recover" => mutation_result(
             recover_component(&request.component),
             "recover_component_failed",

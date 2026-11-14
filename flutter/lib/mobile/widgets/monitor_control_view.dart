@@ -330,7 +330,8 @@ class MonitorControlView extends StatefulWidget {
       this.focusRect,
       this.focusRevision = 0,
       this.frameStatus,
-      this.onCtrlAltDel});
+      this.onCtrlAltDel,
+      this.onRestartTaskbar});
   final Size desktopSize;
   final ui.Image? image;
   final bool canControl;
@@ -371,6 +372,9 @@ class MonitorControlView extends StatefulWidget {
   final int focusRevision;
   final String? frameStatus;
   final VoidCallback? onCtrlAltDel;
+
+  /// Restarts Windows Explorer on the PC; null hides the control.
+  final VoidCallback? onRestartTaskbar;
 
   @override
   State<MonitorControlView> createState() => _MonitorControlViewState();
@@ -1674,6 +1678,9 @@ class _MonitorControlViewState extends State<MonitorControlView> {
             }),
             _controlTile('Ctrl+Alt+Del', Icons.security, 'Ctrl+Alt+Del',
                 _canSendInput ? widget.onCtrlAltDel : null),
+            if (widget.onRestartTaskbar != null)
+              _controlTile('Restart taskbar', Icons.call_to_action_outlined,
+                  'Taskbar', _canSendInput ? widget.onRestartTaskbar : null),
             _controlTile(
                 'Gestures', Icons.help_outline, 'Gestures', _showGestureHelp),
             _controlTile(

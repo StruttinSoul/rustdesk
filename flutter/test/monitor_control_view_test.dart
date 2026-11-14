@@ -13,6 +13,7 @@ void main() {
       MonitorControlPreferences preferences = const MonitorControlPreferences(),
       ValueChanged<MonitorControlPreferences>? onPreferencesChanged,
       VoidCallback? ctrlAltDel,
+      VoidCallback? restartTaskbar,
       VoidCallback? switchView,
       VoidCallback? dashboard,
       VoidCallback? keyboard,
@@ -41,6 +42,7 @@ void main() {
           onDashboard: dashboard,
           frameStatus: frameStatus,
           onCtrlAltDel: ctrlAltDel,
+          onRestartTaskbar: restartTaskbar,
         ))));
   }
 
@@ -435,6 +437,29 @@ void main() {
     expect(ctrlAltDel, 1);
     await tester.tap(find.byTooltip('Dashboard'));
     expect(dashboards, 1);
+  });
+
+  testWidgets('Controls restarts the PC taskbar', (tester) async {
+    var restarts = 0;
+    await show(tester, restartTaskbar: () => restarts++);
+    await openControls(tester);
+    await tester.tap(find.byTooltip('Restart taskbar'));
+    expect(restarts, 1);
+  });
+
+  testWidgets('Restart taskbar is hidden when the PC does not offer it',
+      (tester) async {
+    await show(tester);
+    await openControls(tester);
+    expect(find.byTooltip('Restart taskbar'), findsNothing);
+  });
+
+  testWidgets('Restart taskbar is unavailable without control', (tester) async {
+    var restarts = 0;
+    await show(tester, control: false, restartTaskbar: () => restarts++);
+    await openControls(tester);
+    await tester.tap(find.byTooltip('Restart taskbar'), warnIfMissed: false);
+    expect(restarts, 0);
   });
 
   testWidgets('Right click arms the next tap', (tester) async {

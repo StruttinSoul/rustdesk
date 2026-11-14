@@ -181,6 +181,7 @@ pub fn authorize_request(
             }
             "gateway_setup_open" | "gateway_imdb_set_enabled" | "gateway_imdb_refresh"
                 if control => Ok(()),
+            "shell_restart" if control => Ok(()),
             "gateway_restart"
                 if control
                     && host.gateway_expected_process_identity.starts_with("gateway:")
@@ -195,6 +196,7 @@ pub fn authorize_request(
             | "gateway_imdb_set_enabled"
             | "gateway_imdb_refresh"
             | "gateway_restart"
+            | "shell_restart"
                 if !control =>
             {
                 Err("Host management action requires control permission")
@@ -293,6 +295,7 @@ pub fn authorize_host_operation(
             | "gateway_imdb_set_enabled"
             | "gateway_imdb_refresh"
             | "gateway_restart"
+            | "shell_restart"
     ) {
         return Err("Invalid host management action");
     }
@@ -324,6 +327,7 @@ pub fn authorize_host_operation(
             "gateway:restart:{}",
             host.gateway_expected_process_identity
         ),
+        "shell_restart" => "shell:explorer".to_owned(),
         _ => return Err("Invalid host management action"),
     };
     if host.target_identity != expected_target {

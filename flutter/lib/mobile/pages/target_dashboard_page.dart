@@ -1605,11 +1605,55 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                                   }
                                 })
                             : null,
+                        onRestartTaskbar: model.hostShellRestartCapability ==
+                                CapabilityStatus.supported
+                            ? () => unawaited(_restartTaskbar(target.display!))
+                            : null,
                       );
                     }),
               )),
             ]))),
       );
+
+  Future<void> _restartTaskbar(int display) async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Restart the PC’s taskbar?'),
+            content: const Text(
+                'This restarts Windows Explorer on the PC, which brings back a missing taskbar and desktop. Open File Explorer folders close; other apps stay open.'),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Cancel')),
+              FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Restart')),
+            ],
+          ),
+        ) ??
+        false;
+    if (!mounted) return;
+    if (!confirmed || !_canControlMonitor(display)) {
+      _monitorFocus.requestFocus();
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+          const SnackBar(content: Text('Restarting the PC’s taskbar…')));
+    final result = await model.restartHostShell().timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => const HostShellRestartResult(
+            false, 'The PC didn’t answer. Check its screen.'));
+    if (!mounted) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+          content: Text(result.ok ? 'Taskbar restarted' : result.message)));
+    _monitorFocus.requestFocus();
+  }
 
   Future<void> _monitorWindows(int display) async {
     await showModalBottomSheet<void>(

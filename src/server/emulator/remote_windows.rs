@@ -111,6 +111,7 @@ pub fn inventory(
             "host.window_focus.v1".to_owned(),
             "host.emulator_shutdown.v1".to_owned(),
             "host.process_end".to_owned(),
+            "host.shell_restart.v1".to_owned(),
             "host.process_identity.v2".to_owned(),
             "host.recover.bluestacks_adb".to_owned(),
             "host.phone_workspace.v1".to_owned(),
@@ -1002,6 +1003,9 @@ mod tests {
         assert!(inventory
             .capabilities
             .contains(&"host.process_end".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.shell_restart.v1".to_owned()));
         assert!(inventory
             .capabilities
             .contains(&"host.process_identity.v2".to_owned()));

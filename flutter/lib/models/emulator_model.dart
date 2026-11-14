@@ -167,6 +167,8 @@ class EmulatorModel extends ChangeNotifier {
   final Map<int, Timer> _hostOperationTimeouts = {};
   final Map<int, int> _hostOperationStartedMonotonicMs = {};
   final Map<int, Completer<HostWindowInfo?>> _hostWindowFocusCompletions = {};
+  final Map<int, Completer<HostShellRestartResult>> _shellRestartCompletions =
+      {};
   final Set<int> _pendingHostOperations = {};
   final Set<String> _shutdownPending = {};
   final Map<int, String> _shutdownRequests = {};
@@ -290,6 +292,8 @@ class EmulatorModel extends ChangeNotifier {
       _capabilities.status('host.windows.list.v1');
   CapabilityStatus get hostWindowFocusCapability =>
       _capabilities.status('host.window_focus.v1');
+  CapabilityStatus get hostShellRestartCapability =>
+      _capabilities.status('host.shell_restart.v1');
   CapabilityStatus get phoneWorkspaceCapability =>
       _capabilities.status('host.phone_workspace.v1');
   CapabilityStatus get gatewayStatusCapability =>
@@ -1082,6 +1086,59 @@ class EmulatorModel extends ChangeNotifier {
     );
   }
 
+  /// Restarts Windows Explorer (taskbar and desktop) on the PC as the signed-in user.
+  Future<HostShellRestartResult> restartHostShell() {
+    if (!_canMutateHost('host.shell_restart.v1')) {
+      return Future.value(const HostShellRestartResult(
+          false, 'This PC can’t restart its taskbar from the phone.'));
+    }
+    hostError = '';
+    hostMessage = '';
+    final requestId = ++_sequence;
+    final operationId = const Uuid().v4();
+    const targetIdentity = 'shell:explorer';
+    _beginHostOperation(
+      requestId: requestId,
+      operationId: operationId,
+      targetIdentity: targetIdentity,
+      action: 'shell_restart',
+    );
+    final completion = Completer<HostShellRestartResult>();
+    _shellRestartCompletions[requestId] = completion;
+    notifyListeners();
+    unawaited(_sendHostOperation(
+      {
+        'action': 'shell_restart',
+        'request_id': requestId,
+        'operation_id': operationId,
+        'session_identity': _operationSessionIdentity,
+        'target_identity': targetIdentity,
+        'session_generation': _operationGeneration,
+      },
+      requestId: requestId,
+      capability: 'host.shell_restart.v1',
+      stillValid: () => true,
+    ));
+    return completion.future;
+  }
+
+  void _finishShellRestart(int requestId, bool ok, String message) {
+    final completion = _shellRestartCompletions.remove(requestId);
+    if (completion != null && !completion.isCompleted) {
+      completion.complete(HostShellRestartResult(ok, message));
+    }
+  }
+
+  void _abandonShellRestarts() {
+    for (final completion in _shellRestartCompletions.values) {
+      if (!completion.isCompleted) {
+        completion.complete(const HostShellRestartResult(
+            false, 'The connection changed before the PC answered.'));
+      }
+    }
+    _shellRestartCompletions.clear();
+  }
+
   bool _canMutateHost(String capability) =>
       _operationSessionIdentity.isNotEmpty &&
       _operationGeneration > 0 &&
@@ -1114,6 +1171,7 @@ class EmulatorModel extends ChangeNotifier {
       _hostOperationTimeouts.remove(requestId);
       _hostOperationStartedMonotonicMs.remove(requestId);
       _hostWindowFocusCompletions.remove(requestId)?.complete(null);
+      _finishShellRestart(requestId, false, _shellRestartUnfinished);
       hostMessage =
           'The PC may have applied the request. Refresh before retrying.';
       if (action.startsWith('phone_workspace_')) {
@@ -1172,6 +1230,7 @@ class EmulatorModel extends ChangeNotifier {
           if (shutdownTarget != null) _shutdownPending.remove(shutdownTarget);
           _hostOperationStartedMonotonicMs.remove(requestId);
           _hostWindowFocusCompletions.remove(requestId)?.complete(null);
+          _finishShellRestart(requestId, false, _shellRestartUnfinished);
           hostMessage = '';
           hostError = operation.error;
           if (operation.action.startsWith('phone_workspace_')) {
@@ -1207,6 +1266,7 @@ class EmulatorModel extends ChangeNotifier {
           _pendingHostOperations.remove(requestId);
           _hostOperationStartedMonotonicMs.remove(requestId);
           _hostWindowFocusCompletions.remove(requestId)?.complete(null);
+          _finishShellRestart(requestId, false, _shellRestartUnfinished);
           hostMessage = '';
           hostError = failure.toString();
           if (operation.action.startsWith('phone_workspace_')) {
@@ -1477,6 +1537,7 @@ class EmulatorModel extends ChangeNotifier {
         }
         _hostWindowFocusCompletions.remove(id)?.complete(observedWindow);
         hostMessage = host['message']?.toString() ?? '';
+        _finishShellRestart(id, true, hostMessage);
         if (operation.action.startsWith('phone_workspace_')) {
           phoneWorkspaceMessage = host['message']?.toString() ?? '';
           phoneWorkspaceError = '';
@@ -1503,6 +1564,7 @@ class EmulatorModel extends ChangeNotifier {
         _hostWindowFocusCompletions.remove(id)?.complete(null);
         hostError =
             host['error']?.toString() ?? 'Host management request failed';
+        _finishShellRestart(id, false, hostError);
         if (operation.action.startsWith('phone_workspace_')) {
           phoneWorkspaceMessage = '';
           phoneWorkspaceError =
@@ -1591,6 +1653,7 @@ class EmulatorModel extends ChangeNotifier {
           if (!completion.isCompleted) completion.complete(null);
         }
         _hostWindowFocusCompletions.clear();
+        _abandonShellRestarts();
         _clearShutdownState();
       }
       _operationSessionIdentity = operationIdentity;
@@ -1767,6 +1830,7 @@ class EmulatorModel extends ChangeNotifier {
         _pendingHostOperations.remove(id);
         _hostOperationStartedMonotonicMs.remove(id);
         _hostWindowFocusCompletions.remove(id)?.complete(null);
+        _finishShellRestart(id, false, _shellRestartUnfinished);
         hostError = requestError;
         if (operation?.action.startsWith('gateway_') == true) {
           _gatewayMutationLoading = false;
@@ -1857,6 +1921,7 @@ class EmulatorModel extends ChangeNotifier {
       if (!completion.isCompleted) completion.complete(null);
     }
     _hostWindowFocusCompletions.clear();
+    _abandonShellRestarts();
     _hostOperations.advanceGeneration();
     _operationGeneration = _hostOperations.generation;
     _operationSessionIdentity = '';
@@ -1958,6 +2023,7 @@ class EmulatorModel extends ChangeNotifier {
       if (!completion.isCompleted) completion.complete(null);
     }
     _hostWindowFocusCompletions.clear();
+    _abandonShellRestarts();
     previews.clear();
     guestFailures.clear();
     _previewTargets.clear();
@@ -1993,6 +2059,7 @@ class EmulatorModel extends ChangeNotifier {
       if (!completion.isCompleted) completion.complete(null);
     }
     _hostWindowFocusCompletions.clear();
+    _abandonShellRestarts();
     super.dispose();
   }
 }
@@ -2007,4 +2074,13 @@ class RemotePreview {
   final int height;
   final String error;
   int get channel => 0x40000000 | (sessionId & 0x3fffffff);
+}
+
+const _shellRestartUnfinished =
+    'The taskbar restart didn’t finish. Check the PC’s screen.';
+
+class HostShellRestartResult {
+  const HostShellRestartResult(this.ok, this.message);
+  final bool ok;
+  final String message;
 }
