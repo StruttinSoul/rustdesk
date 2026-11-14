@@ -726,12 +726,38 @@ void main() {
     expect(typed, ['hi']);
     expect(states, ['Control Left:true', 'Control Left:false']);
 
-    await tester.tap(find.byTooltip('Compose text'));
+    await tester.tap(find.byTooltip('Close keyboard'));
     await tester.pump();
-    expect(composes, 1);
+    expect(composes, 0);
     expect(soft, [true, false]);
     expect(find.byKey(const ValueKey('monitor-live-keyboard')), findsNothing);
     expect(find.byTooltip('Readable view'), findsOneWidget);
+  });
+
+  testWidgets('live keyboard has no compose button', (tester) async {
+    await show(tester, text: (_) {}, key: (_) {}, keyState: (_, __) {});
+    await tester.tap(find.byTooltip('Keyboard'));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byTooltip('Compose text'), findsNothing);
+  });
+
+  testWidgets('Shortcuts opens shortcut presets and saves edits',
+      (tester) async {
+    final changes = <MonitorControlPreferences>[];
+    await show(tester,
+        text: (_) {},
+        key: (_) {},
+        keyState: (_, __) {},
+        onPreferencesChanged: changes.add);
+    await tester.tap(find.byTooltip('Keyboard'));
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.byTooltip('Shortcuts'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Shortcut presets'), findsOneWidget);
+    await tester.tap(find.byTooltip('Move Ctrl+C up'));
+    await tester.pump();
+    expect(changes.last.shortcuts.first.id, 'copy');
   });
 
   testWidgets('Text input stays local until Send is explicitly tapped',

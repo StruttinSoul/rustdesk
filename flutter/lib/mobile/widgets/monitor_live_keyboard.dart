@@ -43,8 +43,8 @@ MonitorSoftKeyboardEdit diffMonitorSoftKeyboardText(
     String before, String after) {
   final limit = math.min(before.length, after.length);
   var common = 0;
-  while (common < limit &&
-      before.codeUnitAt(common) == after.codeUnitAt(common)) {
+  while (
+      common < limit && before.codeUnitAt(common) == after.codeUnitAt(common)) {
     common++;
   }
   // Never split a surrogate pair (emoji and other astral characters).
@@ -165,7 +165,7 @@ class MonitorLiveKeyboardBar extends StatefulWidget {
     required this.onKeyState,
     required this.onClose,
     this.shortcuts = const <MonitorLiveShortcut>[],
-    this.onCompose,
+    this.onShortcuts,
     this.focusDelay = const Duration(milliseconds: 150),
   });
 
@@ -175,7 +175,7 @@ class MonitorLiveKeyboardBar extends StatefulWidget {
   final void Function(PhysicalKeyboardKey key, bool down) onKeyState;
   final VoidCallback onClose;
   final List<MonitorLiveShortcut> shortcuts;
-  final VoidCallback? onCompose;
+  final VoidCallback? onShortcuts;
   final Duration focusDelay;
 
   @override
@@ -184,8 +184,7 @@ class MonitorLiveKeyboardBar extends StatefulWidget {
 
 class MonitorLiveKeyboardBarState extends State<MonitorLiveKeyboardBar>
     with WidgetsBindingObserver {
-  static const List<PhysicalKeyboardKey> _modifierOrder =
-      <PhysicalKeyboardKey>[
+  static const List<PhysicalKeyboardKey> _modifierOrder = <PhysicalKeyboardKey>[
     PhysicalKeyboardKey.controlLeft,
     PhysicalKeyboardKey.altLeft,
     PhysicalKeyboardKey.shiftLeft,
@@ -429,8 +428,8 @@ class MonitorLiveKeyboardBarState extends State<MonitorLiveKeyboardBar>
   void _startRepeat(PhysicalKeyboardKey key) {
     _stopRepeat();
     _tapKey(key);
-    _repeatTimer = Timer.periodic(
-        const Duration(milliseconds: 80), (_) => _tapKey(key));
+    _repeatTimer =
+        Timer.periodic(const Duration(milliseconds: 80), (_) => _tapKey(key));
   }
 
   void _stopRepeat() {
@@ -565,7 +564,8 @@ class MonitorLiveKeyboardBarState extends State<MonitorLiveKeyboardBar>
           width: double.infinity,
           height: 56,
           child: Stack(children: [
-            Positioned(left: 0, top: 0, width: 1, height: 1, child: _hiddenField()),
+            Positioned(
+                left: 0, top: 0, width: 1, height: 1, child: _hiddenField()),
             Row(children: [
               Expanded(
                 child: ListView(
@@ -575,12 +575,12 @@ class MonitorLiveKeyboardBarState extends State<MonitorLiveKeyboardBar>
                 ),
               ),
               Container(width: 1, height: 32, color: Colors.white12),
-              if (widget.onCompose != null)
+              if (widget.onShortcuts != null)
                 _MonitorKeyCap(
-                  tooltip: 'Compose text',
-                  icon: Icons.edit_note,
+                  tooltip: 'Shortcuts',
+                  icon: Icons.bolt_outlined,
                   enabled: true,
-                  onTap: widget.onCompose!,
+                  onTap: widget.onShortcuts!,
                 ),
               _MonitorKeyCap(
                 tooltip: 'Close keyboard',

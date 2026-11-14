@@ -398,6 +398,176 @@ double monitorKeyboardPanDy({
   return offsetDy;
 }
 
+/// Shows the shortcut preset editor; [onChanged] gets every change.
+Future<void> showMonitorShortcutSettings(BuildContext context,
+        {required List<MonitorShortcutPreset> shortcuts,
+        required ValueChanged<List<MonitorShortcutPreset>> onChanged}) =>
+    _MonitorShortcutEditor(shortcuts, onChanged).show(context);
+
+class _MonitorShortcutEditor {
+  _MonitorShortcutEditor(List<MonitorShortcutPreset> shortcuts, this._onChanged)
+      : _shortcuts = List.of(shortcuts);
+
+  final List<MonitorShortcutPreset> _shortcuts;
+  final ValueChanged<List<MonitorShortcutPreset>> _onChanged;
+
+  void _emit() => _onChanged(List.unmodifiable(_shortcuts));
+
+  void _moveShortcut(int index, int delta, StateSetter refreshSheet) {
+    final next = index + delta;
+    if (next < 0 || next >= _shortcuts.length) return;
+    final shortcut = _shortcuts.removeAt(index);
+    _shortcuts.insert(next, shortcut);
+    refreshSheet(() {});
+    _emit();
+  }
+
+  void _editShortcut(
+      BuildContext sheetContext, int index, StateSetter refreshSheet) {
+    final preset = _shortcuts[index];
+    var key = preset.key;
+    final modifiers = preset.modifiers.toSet();
+    showDialog<void>(
+        context: sheetContext,
+        builder: (dialogContext) => StatefulBuilder(
+              builder: (dialogContext, refreshDialog) => AlertDialog(
+                title: Text('Edit ${preset.label}'),
+                content: SingleChildScrollView(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('Modifiers',
+                            style:
+                                Theme.of(dialogContext).textTheme.labelLarge)),
+                    const SizedBox(height: 8),
+                    Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _monitorShortcutModifierOrder
+                            .map((modifier) => FilterChip(
+                                  label: Text(
+                                      _monitorShortcutModifierLabel(modifier)),
+                                  selected: modifiers.contains(modifier),
+                                  onSelected: (selected) => refreshDialog(() {
+                                    if (selected) {
+                                      modifiers.add(modifier);
+                                    } else {
+                                      modifiers.remove(modifier);
+                                    }
+                                  }),
+                                ))
+                            .toList()),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      value: key,
+                      decoration: const InputDecoration(labelText: 'Key'),
+                      items: _monitorShortcutKeyLabels.entries
+                          .map((entry) => DropdownMenuItem<String>(
+                              value: entry.key, child: Text(entry.value)))
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) refreshDialog(() => key = value);
+                      },
+                    ),
+                  ]),
+                ),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('Cancel')),
+                  FilledButton(
+                      onPressed: () {
+                        final orderedModifiers = _monitorShortcutModifierOrder
+                            .where(modifiers.contains)
+                            .toList(growable: false);
+                        _shortcuts[index] = preset.copyWith(
+                            modifiers: orderedModifiers, key: key);
+                        refreshSheet(() {});
+                        _emit();
+                        Navigator.of(dialogContext).pop();
+                      },
+                      child: const Text('Save shortcut')),
+                ],
+              ),
+            ));
+  }
+
+  Future<void> show(BuildContext context) {
+    return showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (sheetContext) => StatefulBuilder(
+              builder: (sheetContext, refreshSheet) => SizedBox(
+                height: math.min(
+                    MediaQuery.of(sheetContext).size.height * 0.78, 560),
+                child: Column(children: [
+                  ListTile(
+                    title: const Text('Shortcut presets'),
+                    subtitle: const Text(
+                        'Edit the chord or move presets into your preferred order.'),
+                    trailing: IconButton(
+                        tooltip: 'Close shortcut settings',
+                        onPressed: () => Navigator.of(sheetContext).pop(),
+                        icon: const Icon(Icons.close)),
+                  ),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: _shortcuts.length,
+                      itemBuilder: (_, index) {
+                        final preset = _shortcuts[index];
+                        return ListTile(
+                          key: ValueKey('monitor-shortcut-${preset.id}'),
+                          title: Text(preset.label),
+                          trailing:
+                              Row(mainAxisSize: MainAxisSize.min, children: [
+                            IconButton(
+                                tooltip: 'Move ${preset.label} up',
+                                onPressed: index == 0
+                                    ? null
+                                    : () =>
+                                        _moveShortcut(index, -1, refreshSheet),
+                                icon: const Icon(Icons.arrow_upward)),
+                            IconButton(
+                                tooltip: 'Move ${preset.label} down',
+                                onPressed: index == _shortcuts.length - 1
+                                    ? null
+                                    : () =>
+                                        _moveShortcut(index, 1, refreshSheet),
+                                icon: const Icon(Icons.arrow_downward)),
+                            IconButton(
+                                tooltip: 'Edit ${preset.label}',
+                                onPressed: () => _editShortcut(
+                                    sheetContext, index, refreshSheet),
+                                icon: const Icon(Icons.edit_outlined)),
+                          ]),
+                        );
+                      },
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          _shortcuts
+                            ..clear()
+                            ..addAll(kDefaultMonitorShortcuts);
+                          refreshSheet(() {});
+                          _emit();
+                        },
+                        icon: const Icon(Icons.restart_alt),
+                        label: const Text('Reset shortcuts'),
+                      ),
+                    ),
+                  ),
+                ]),
+              ),
+            ));
+  }
+}
+
 class MonitorKeyboardPanel extends StatefulWidget {
   const MonitorKeyboardPanel(
       {super.key,
@@ -537,160 +707,12 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
   void _emitShortcuts() =>
       widget.onShortcutsChanged?.call(List.unmodifiable(_shortcuts));
 
-  void _moveShortcut(int index, int delta, StateSetter refreshSheet) {
-    final next = index + delta;
-    if (next < 0 || next >= _shortcuts.length) return;
-    setState(() {
-      final shortcut = _shortcuts.removeAt(index);
-      _shortcuts.insert(next, shortcut);
-    });
-    refreshSheet(() {});
-    _emitShortcuts();
-  }
-
-  void _editShortcut(
-      BuildContext sheetContext, int index, StateSetter refreshSheet) {
-    final preset = _shortcuts[index];
-    var key = preset.key;
-    final modifiers = preset.modifiers.toSet();
-    showDialog<void>(
-        context: sheetContext,
-        builder: (dialogContext) => StatefulBuilder(
-              builder: (dialogContext, refreshDialog) => AlertDialog(
-                title: Text('Edit ${preset.label}'),
-                content: SingleChildScrollView(
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text('Modifiers',
-                            style:
-                                Theme.of(dialogContext).textTheme.labelLarge)),
-                    const SizedBox(height: 8),
-                    Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: _monitorShortcutModifierOrder
-                            .map((modifier) => FilterChip(
-                                  label: Text(
-                                      _monitorShortcutModifierLabel(modifier)),
-                                  selected: modifiers.contains(modifier),
-                                  onSelected: (selected) => refreshDialog(() {
-                                    if (selected) {
-                                      modifiers.add(modifier);
-                                    } else {
-                                      modifiers.remove(modifier);
-                                    }
-                                  }),
-                                ))
-                            .toList()),
-                    const SizedBox(height: 16),
-                    DropdownButtonFormField<String>(
-                      value: key,
-                      decoration: const InputDecoration(labelText: 'Key'),
-                      items: _monitorShortcutKeyLabels.entries
-                          .map((entry) => DropdownMenuItem<String>(
-                              value: entry.key, child: Text(entry.value)))
-                          .toList(),
-                      onChanged: (value) {
-                        if (value != null) refreshDialog(() => key = value);
-                      },
-                    ),
-                  ]),
-                ),
-                actions: [
-                  TextButton(
-                      onPressed: () => Navigator.of(dialogContext).pop(),
-                      child: const Text('Cancel')),
-                  FilledButton(
-                      onPressed: () {
-                        final orderedModifiers = _monitorShortcutModifierOrder
-                            .where(modifiers.contains)
-                            .toList(growable: false);
-                        setState(() => _shortcuts[index] = preset.copyWith(
-                            modifiers: orderedModifiers, key: key));
-                        refreshSheet(() {});
-                        _emitShortcuts();
-                        Navigator.of(dialogContext).pop();
-                      },
-                      child: const Text('Save shortcut')),
-                ],
-              ),
-            ));
-  }
-
-  void _showShortcutSettings() {
-    showModalBottomSheet<void>(
-        context: context,
-        isScrollControlled: true,
-        useSafeArea: true,
-        builder: (sheetContext) => StatefulBuilder(
-              builder: (sheetContext, refreshSheet) => SizedBox(
-                height: math.min(
-                    MediaQuery.of(sheetContext).size.height * 0.78, 560),
-                child: Column(children: [
-                  ListTile(
-                    title: const Text('Shortcut presets'),
-                    subtitle: const Text(
-                        'Edit the chord or move presets into your preferred order.'),
-                    trailing: IconButton(
-                        tooltip: 'Close shortcut settings',
-                        onPressed: () => Navigator.of(sheetContext).pop(),
-                        icon: const Icon(Icons.close)),
-                  ),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: _shortcuts.length,
-                      itemBuilder: (_, index) {
-                        final preset = _shortcuts[index];
-                        return ListTile(
-                          key: ValueKey('monitor-shortcut-${preset.id}'),
-                          title: Text(preset.label),
-                          trailing:
-                              Row(mainAxisSize: MainAxisSize.min, children: [
-                            IconButton(
-                                tooltip: 'Move ${preset.label} up',
-                                onPressed: index == 0
-                                    ? null
-                                    : () =>
-                                        _moveShortcut(index, -1, refreshSheet),
-                                icon: const Icon(Icons.arrow_upward)),
-                            IconButton(
-                                tooltip: 'Move ${preset.label} down',
-                                onPressed: index == _shortcuts.length - 1
-                                    ? null
-                                    : () =>
-                                        _moveShortcut(index, 1, refreshSheet),
-                                icon: const Icon(Icons.arrow_downward)),
-                            IconButton(
-                                tooltip: 'Edit ${preset.label}',
-                                onPressed: () => _editShortcut(
-                                    sheetContext, index, refreshSheet),
-                                icon: const Icon(Icons.edit_outlined)),
-                          ]),
-                        );
-                      },
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: () {
-                          setState(() =>
-                              _shortcuts = List.of(kDefaultMonitorShortcuts));
-                          refreshSheet(() {});
-                          _emitShortcuts();
-                        },
-                        icon: const Icon(Icons.restart_alt),
-                        label: const Text('Reset shortcuts'),
-                      ),
-                    ),
-                  ),
-                ]),
-              ),
-            ));
-  }
+  void _showShortcutSettings() =>
+      showMonitorShortcutSettings(context, shortcuts: _shortcuts,
+          onChanged: (shortcuts) {
+        setState(() => _shortcuts = List.of(shortcuts));
+        _emitShortcuts();
+      });
 
   Widget _keyButton(String label, PhysicalKeyboardKey key) => OutlinedButton(
       style: OutlinedButton.styleFrom(minimumSize: const Size(48, 48)),
@@ -1549,11 +1571,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     widget.onSoftKeyboard?.call(false);
   }
 
-  void _compose() {
-    _closeLiveKeyboard();
-    widget.onKeyboard();
-  }
-
   List<MonitorLiveShortcut> get _liveShortcuts => [
         for (final preset in _shortcuts)
           if (_monitorShortcutPhysicalKey(preset.key) != null)
@@ -1574,7 +1591,11 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         onKey: (key) => widget.onKeyTap?.call(key),
         onKeyState: (key, down) => widget.onKeyState?.call(key, down),
         shortcuts: _liveShortcuts,
-        onCompose: _compose,
+        onShortcuts: () => showMonitorShortcutSettings(context,
+            shortcuts: _shortcuts, onChanged: (shortcuts) {
+          setState(() => _shortcuts = List.of(shortcuts));
+          _emitPreferences();
+        }),
         onClose: _closeLiveKeyboard,
       );
 
