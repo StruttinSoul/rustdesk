@@ -382,34 +382,17 @@ void main() {
     await tester.pump();
     expect(tester.getSize(frame).width, greaterThan(before));
     expect(events, isEmpty);
-    expect(find.byKey(const ValueKey('monitor-minimap')), findsOneWidget);
+    expect(find.byKey(const ValueKey('monitor-minimap')), findsNothing);
   });
 
-  testWidgets('Readable preset enlarges Windows and exposes a minimap',
+  testWidgets('Readable preset enlarges Windows without a minimap',
       (tester) async {
     await show(tester);
     final before = tester.getSize(frame).width;
     await tester.tap(find.byTooltip('Readable view'));
     await tester.pump();
     expect(tester.getSize(frame).width, greaterThan(before));
-    expect(find.byKey(const ValueKey('monitor-minimap')), findsOneWidget);
-    await tester.tap(find.byTooltip('Fit view'));
-    await tester.pump();
     expect(find.byKey(const ValueKey('monitor-minimap')), findsNothing);
-  });
-
-  testWidgets('minimap navigation pans locally without remote input',
-      (tester) async {
-    final events = <int>[];
-    await show(tester, pointer: (action, _) => events.add(action));
-    await tester.tap(find.byTooltip('Readable view'));
-    await tester.pump();
-    final before = tester.getTopLeft(frame);
-    final minimap = find.byKey(const ValueKey('monitor-minimap'));
-    await tester.tapAt(tester.getRect(minimap).bottomRight - const Offset(4, 4));
-    await tester.pump();
-    expect(tester.getTopLeft(frame), isNot(before));
-    expect(events, isEmpty);
   });
 
   testWidgets('thumbwheel scrolls without clicking', (tester) async {
@@ -419,8 +402,8 @@ void main() {
         preferences: const MonitorControlPreferences(thumbwheelVisible: true),
         pointer: (action, _) => events.add(action),
         scroll: scroll.add);
-    await tester.drag(find.byKey(const ValueKey('monitor-thumbwheel')),
-        const Offset(0, 60));
+    await tester.drag(
+        find.byKey(const ValueKey('monitor-thumbwheel')), const Offset(0, 60));
     await tester.pump();
     expect(scroll, isNotEmpty);
     expect(events, isEmpty);
@@ -535,8 +518,7 @@ void main() {
     expect(events.where((e) => e == 1).length, 1);
   });
 
-  testWidgets('reset controls restores the persisted defaults',
-      (tester) async {
+  testWidgets('reset controls restores the persisted defaults', (tester) async {
     final changes = <MonitorControlPreferences>[];
     await show(tester,
         preferences: const MonitorControlPreferences(

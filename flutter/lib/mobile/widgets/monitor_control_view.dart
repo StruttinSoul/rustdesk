@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'mirpg_remote_theme.dart';
 import 'monitor_live_keyboard.dart';
@@ -884,7 +883,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   Offset _momentumVelocity = Offset.zero;
 
   double get _scale => _fit * (_zoom ?? 1);
-  bool get _isZoomed => (_zoom ?? 1) > 1.01;
   bool get _canSendInput => widget.canControl && !widget.localViewOnly;
   bool get _liveKeyboardSupported =>
       widget.onTextInput != null &&
@@ -1020,8 +1018,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _emitPreferences();
   }
 
-  void _zoomBy(double factor) =>
-      setState(() => _setZoom((_zoom ?? 1) * factor, _viewport.center(Offset.zero)));
+  void _zoomBy(double factor) => setState(
+      () => _setZoom((_zoom ?? 1) * factor, _viewport.center(Offset.zero)));
 
   void _cycleOrientation() {
     _cancelContacts();
@@ -1069,31 +1067,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
       point.dx.clamp(0, widget.desktopSize.width - 1).toDouble(),
       point.dy.clamp(0, widget.desktopSize.height - 1).toDouble(),
     );
-  }
-
-  Rect _visibleSourceRect() {
-    final left =
-        (-_offset.dx / _scale).clamp(0.0, widget.desktopSize.width).toDouble();
-    final top =
-        (-_offset.dy / _scale).clamp(0.0, widget.desktopSize.height).toDouble();
-    final right = ((_viewport.width - _offset.dx) / _scale)
-        .clamp(0.0, widget.desktopSize.width)
-        .toDouble();
-    final bottom = ((_viewport.height - _offset.dy) / _scale)
-        .clamp(0.0, widget.desktopSize.height)
-        .toDouble();
-    return Rect.fromLTRB(
-        left, top, math.max(left, right), math.max(top, bottom));
-  }
-
-  void _panLocalViewport(Offset fraction) {
-    setState(() {
-      _offset += Offset(
-        _viewport.width * fraction.dx,
-        _viewport.height * fraction.dy,
-      );
-      _limitOffset();
-    });
   }
 
   // ---------------------------------------------------------------------
@@ -1569,8 +1542,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   const ListTile(
                       leading: Icon(Icons.zoom_out_map),
                       title: Text('Two fingers'),
-                      subtitle: Text(
-                          'Pinch to zoom. Drag to scroll Windows.')),
+                      subtitle: Text('Pinch to zoom. Drag to scroll Windows.')),
                   const ListTile(
                       leading: Icon(Icons.keyboard_outlined),
                       title: Text('Keyboard'),
@@ -1710,8 +1682,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         ),
       );
 
-  void _toggleControls() => setState(() => _panel =
-      _panel == _MonitorPanel.controls ? _MonitorPanel.none : _MonitorPanel.controls);
+  void _toggleControls() =>
+      setState(() => _panel = _panel == _MonitorPanel.controls
+          ? _MonitorPanel.none
+          : _MonitorPanel.controls);
 
   Widget _toolbarButton(String tooltip, IconData icon, VoidCallback? action,
           {bool selected = false}) =>
@@ -1920,8 +1894,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
               _footerControl('Keyboard', Icons.keyboard_outlined, 'Keyboard',
                   _keyboardAction,
                   selected: _liveKeyboard),
-              _footerControl('Controls', Icons.tune_rounded, 'Controls',
-                  _toggleControls,
+              _footerControl(
+                  'Controls', Icons.tune_rounded, 'Controls', _toggleControls,
                   selected: _panel == _MonitorPanel.controls),
               _footerControl('Switch view', Icons.view_carousel_outlined,
                   'Targets', widget.onSwitchView),
@@ -1977,119 +1951,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
               const SizedBox(height: 12),
               const Icon(Icons.keyboard_arrow_down, color: Colors.white70),
             ]),
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _navigateMinimap(Offset localPosition, Size minimapSize) {
-    final source = Offset(
-      (localPosition.dx / minimapSize.width).clamp(0.0, 1.0).toDouble() *
-          widget.desktopSize.width,
-      (localPosition.dy / minimapSize.height).clamp(0.0, 1.0).toDouble() *
-          widget.desktopSize.height,
-    );
-    _offset = _viewport.center(Offset.zero) - source * _scale;
-    _limitOffset();
-  }
-
-  void _navigateMinimapHitArea(
-      Offset localPosition, Size minimapSize, Size hitSize) {
-    final insetX = (hitSize.width - minimapSize.width) / 2;
-    final insetY = (hitSize.height - minimapSize.height) / 2;
-    _navigateMinimap(
-      Offset(
-        (localPosition.dx - insetX).clamp(0.0, minimapSize.width).toDouble(),
-        (localPosition.dy - insetY).clamp(0.0, minimapSize.height).toDouble(),
-      ),
-      minimapSize,
-    );
-  }
-
-  Size get _minimapSize {
-    final aspect = widget.desktopSize.height / widget.desktopSize.width;
-    var width = math.min(176.0, _viewport.width * 0.36);
-    var height = width * aspect;
-    if (height > 116) {
-      height = 116;
-      width = height / aspect;
-    }
-    return Size(width, height);
-  }
-
-  Widget _minimap() {
-    final minimapSize = _minimapSize;
-    final width = minimapSize.width;
-    final height = minimapSize.height;
-    final hitSize = Size(math.max(48, width), math.max(48, height));
-    final visible = _visibleSourceRect();
-    final left = visible.left / widget.desktopSize.width * width;
-    final top = visible.top / widget.desktopSize.height * height;
-    final rectWidth = visible.width / widget.desktopSize.width * width;
-    final rectHeight = visible.height / widget.desktopSize.height * height;
-
-    return Semantics(
-      label: 'Desktop viewport minimap',
-      hint: 'Moves the local viewport only and does not click Windows',
-      customSemanticsActions: {
-        CustomSemanticsAction(label: 'Move viewport left'): () =>
-            _panLocalViewport(const Offset(0.2, 0)),
-        CustomSemanticsAction(label: 'Move viewport right'): () =>
-            _panLocalViewport(const Offset(-0.2, 0)),
-        CustomSemanticsAction(label: 'Move viewport up'): () =>
-            _panLocalViewport(const Offset(0, 0.2)),
-        CustomSemanticsAction(label: 'Move viewport down'): () =>
-            _panLocalViewport(const Offset(0, -0.2)),
-      },
-      child: GestureDetector(
-        key: const ValueKey('monitor-minimap'),
-        behavior: HitTestBehavior.opaque,
-        onTapDown: (details) => setState(() => _navigateMinimapHitArea(
-            details.localPosition, minimapSize, hitSize)),
-        onPanUpdate: (details) => setState(() => _navigateMinimapHitArea(
-            details.localPosition, minimapSize, hitSize)),
-        child: SizedBox(
-          width: hitSize.width,
-          height: hitSize.height,
-          child: Center(
-            child: Material(
-              color: Colors.black,
-              elevation: 8,
-              borderRadius: BorderRadius.circular(10),
-              clipBehavior: Clip.antiAlias,
-              child: SizedBox(
-                width: width,
-                height: height,
-                child: Stack(children: [
-                  Positioned.fill(
-                    child: RawImage(
-                      key: const ValueKey('monitor-minimap-image'),
-                      image: widget.image,
-                      fit: BoxFit.fill,
-                      filterQuality: FilterQuality.low,
-                    ),
-                  ),
-                  if (widget.image == null)
-                    const Positioned.fill(
-                        child: ColoredBox(color: MirpgRemoteTheme.raised)),
-                  Positioned(
-                    left: left,
-                    top: top,
-                    width: math.max(8, rectWidth),
-                    height: math.max(8, rectHeight),
-                    child: IgnorePointer(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          border: Border.all(
-                              color: MirpgRemoteTheme.accent, width: 2),
-                        ),
-                      ),
-                    ),
-                  ),
-                ]),
-              ),
-            ),
           ),
         ),
       ),
@@ -2218,10 +2079,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         final frameStatus =
             widget.frameStatus ?? (widget.localViewOnly ? 'View only' : null);
         final badge = _modeBadge();
-        final minimapVisible = _isZoomed;
-        final thumbwheelTop = math.max(
-            minimapVisible ? _minimapSize.height + 28 : 12.0,
-            (_viewport.height - 144) / 2);
+        final thumbwheelTop = math.max(12.0, (_viewport.height - 144) / 2);
         final marker = _touchMarker;
         return Stack(children: [
           Positioned.fill(
@@ -2265,7 +2123,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                                               color: Colors.white70,
                                               width: 2))))),
                       ]))))),
-          if (minimapVisible) Positioned(top: 12, right: 12, child: _minimap()),
           if (badge != null) Positioned(top: 12, left: 12, child: badge),
           if (frameStatus != null)
             Positioned(
@@ -2276,7 +2133,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                     child: Center(
                         child: DecoratedBox(
                             decoration: BoxDecoration(
-                                color: MirpgRemoteTheme.surface.withOpacity(0.9),
+                                color:
+                                    MirpgRemoteTheme.surface.withOpacity(0.9),
                                 borderRadius: BorderRadius.circular(999)),
                             child: Padding(
                                 padding: const EdgeInsets.symmetric(
