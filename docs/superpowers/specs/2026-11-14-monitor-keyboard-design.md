@@ -25,7 +25,7 @@ Typing into Windows from the phone's remote view (Monitor view in `target_dashbo
 ## Design
 ### Keys
 - Strip and Gboard special keys are sent with `inputKey` using the client's named keys (`VK_ESCAPE`, `VK_TAB`, `VK_LEFT`/`UP`/`RIGHT`/`DOWN`, `VK_DELETE`, `VK_HOME`, `VK_END`, `VK_PRIOR`/`VK_NEXT`, `VK_BACK`, `VK_RETURN`, `VK_F1`–`VK_F12`, `VK_INSERT`) and single characters for letters/digits/symbols; Win alone is `Meta`.
-- Held modifiers (the strip's existing Off → Once → Locked states) are carried as the `ctrl`/`alt`/`shift`/`command` flags on each key event, not as separate key-down events. "Once" releases after the next key; "Locked" stays until tapped again.
+- Held modifiers (the strip's existing Off → Once → Locked states) are sent as their own key down/up events and are also carried as the `ctrl`/`alt`/`shift`/`command` flags on every key event, so the PC never drops them. The real down/up is what lets Win alone open Start and a held Alt keep the Alt+Tab switcher open. With Shift alone, characters are sent already shifted (US layout), because the PC types characters as text, which ignores a held Shift. "Once" releases after the next key; "Locked" stays until tapped again.
 - Plain typing without any modifier held keeps using `sessionInputString` (unchanged; it works today).
 - Shortcut presets (Ctrl+C, Alt+Tab …) are sent the same way.
 - Releasing everything on close/disconnect keeps working (no stuck modifiers on Windows).

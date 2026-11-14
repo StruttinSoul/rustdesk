@@ -47,6 +47,25 @@ final Map<PhysicalKeyboardKey, String> _namedKeys =
   PhysicalKeyboardKey.shiftRight: 'VK_SHIFT',
   PhysicalKeyboardKey.metaLeft: 'Meta',
   PhysicalKeyboardKey.metaRight: 'Meta',
+  PhysicalKeyboardKey.minus: '-',
+  PhysicalKeyboardKey.equal: '=',
+  PhysicalKeyboardKey.bracketLeft: '[',
+  PhysicalKeyboardKey.bracketRight: ']',
+  PhysicalKeyboardKey.backslash: r'\',
+  PhysicalKeyboardKey.semicolon: ';',
+  PhysicalKeyboardKey.quote: "'",
+  PhysicalKeyboardKey.comma: ',',
+  PhysicalKeyboardKey.period: '.',
+  PhysicalKeyboardKey.slash: '/',
+  PhysicalKeyboardKey.backquote: '`',
+};
+
+/// What Shift turns each unshifted character into on a US keyboard.
+const Map<String, String> _shifted = <String, String>{
+  '1': '!', '2': '@', '3': '#', '4': r'$', '5': '%', //
+  '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+  '-': '_', '=': '+', '[': '{', ']': '}', r'\': '|',
+  ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~',
 };
 
 const List<PhysicalKeyboardKey> _letters = <PhysicalKeyboardKey>[
@@ -104,8 +123,18 @@ class MonitorKeySender {
 
   /// Presses and releases [key] with whatever is currently held.
   void tap(PhysicalKeyboardKey key) {
-    final name = monitorKeyName(key);
+    var name = monitorKeyName(key);
     if (name == null) return;
+    // A character is typed on the PC as text, which ignores a held Shift, so
+    // Shift on its own is applied here. With Ctrl/Alt/Win the plain key stays
+    // (Ctrl+Shift+T and similar are hotkeys, not text).
+    if (name.length == 1 &&
+        _holds('VK_SHIFT') &&
+        !_holds('VK_CONTROL') &&
+        !_holds('VK_MENU') &&
+        !_holds('Meta')) {
+      name = _shifted[name] ?? name.toUpperCase();
+    }
     _send(name, down: false, press: true);
   }
 

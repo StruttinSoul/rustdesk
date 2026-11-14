@@ -31,6 +31,35 @@ void main() {
     expect(monitorKeyName(PhysicalKeyboardKey.audioVolumeUp), isNull);
   });
 
+  test('maps symbol keys to their characters', () {
+    expect(monitorKeyName(PhysicalKeyboardKey.minus), '-');
+    expect(monitorKeyName(PhysicalKeyboardKey.equal), '=');
+    expect(monitorKeyName(PhysicalKeyboardKey.bracketLeft), '[');
+    expect(monitorKeyName(PhysicalKeyboardKey.bracketRight), ']');
+    expect(monitorKeyName(PhysicalKeyboardKey.backslash), r'\');
+    expect(monitorKeyName(PhysicalKeyboardKey.semicolon), ';');
+    expect(monitorKeyName(PhysicalKeyboardKey.quote), "'");
+    expect(monitorKeyName(PhysicalKeyboardKey.comma), ',');
+    expect(monitorKeyName(PhysicalKeyboardKey.period), '.');
+    expect(monitorKeyName(PhysicalKeyboardKey.slash), '/');
+    expect(monitorKeyName(PhysicalKeyboardKey.backquote), '`');
+  });
+
+  test('Ctrl and minus sends minus with ctrl', () {
+    sender.setState(PhysicalKeyboardKey.controlLeft, true);
+    sender.tap(PhysicalKeyboardKey.minus);
+    expect(calls.last, ('-', false, true, false, true, false, false));
+  });
+
+  test('Shift alone types the shifted character', () {
+    sender.setState(PhysicalKeyboardKey.shiftLeft, true);
+    sender.tap(PhysicalKeyboardKey.keyA);
+    sender.tap(PhysicalKeyboardKey.digit1);
+    sender.tap(PhysicalKeyboardKey.slash);
+    expect(calls.skip(1).map((call) => (call.$1, call.$6)).toList(),
+        [('A', true), ('!', true), ('?', true)]);
+  });
+
   test('Ctrl then C sends c with ctrl', () {
     sender.setState(PhysicalKeyboardKey.controlLeft, true);
     sender.tap(PhysicalKeyboardKey.keyC);
