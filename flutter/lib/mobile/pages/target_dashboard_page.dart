@@ -5,8 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
-import '../../consts.dart'
-    show kKeyFlutterKey, kPeerPlatformLinux, kPeerPlatformWindows;
+import '../../consts.dart' show kPeerPlatformLinux, kPeerPlatformWindows;
 import '../../common/widgets/dialog.dart' show clientClose;
 import '../../models/platform_model.dart' show bind;
 import '../../models/emulator_model.dart';
@@ -23,6 +22,7 @@ import '../widgets/mirpg_remote_theme.dart';
 import '../../common/widgets/aperture_brand.dart';
 import '../widgets/clipboard_transfer_sheet.dart';
 import '../widgets/monitor_control_view.dart';
+import '../widgets/monitor_key_sender.dart';
 import '../widgets/monitor_session_continuity.dart';
 import '../widgets/privacy_controls_sheet.dart';
 import '../widgets/session_quality_panel.dart';
@@ -71,7 +71,22 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   DateTime _monitorLivenessStartedAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _monitorRequiresStreamHeartbeat = false;
   bool _monitorInputWasLive = false;
-  final Set<int> _monitorHeldKeys = <int>{};
+  late final MonitorKeySender _monitorKeys = MonitorKeySender((name,
+          {required down,
+          required press,
+          required alt,
+          required ctrl,
+          required shift,
+          required command}) =>
+      bind.sessionInputKey(
+          sessionId: widget.ffi.sessionId,
+          name: name,
+          down: down,
+          press: press,
+          alt: alt,
+          ctrl: ctrl,
+          shift: shift,
+          command: command));
   final Map<int, String> _monitorDrafts = <int, String>{};
   final Map<int, MonitorControlPreferences> _monitorPreferences =
       <int, MonitorControlPreferences>{};
@@ -1846,14 +1861,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     });
   }
 
-  /// A short key tap for live typing; unlike tapHidKey it does not hold the
-  /// input queue for 100 ms.
+  /// Taps [key] on the PC as a named key, with any held Ctrl/Alt/Shift/Win.
   Future<void> _monitorTapKey(PhysicalKeyboardKey key, int index) async {
     if (!_canControlMonitor(index)) return;
-    final hid = key.usbHidUsage & 0xFFFF;
-    widget.ffi.inputModel.newKeyboardMode(kKeyFlutterKey, hid, true, false);
-    await Future<void>.delayed(const Duration(milliseconds: 12));
-    widget.ffi.inputModel.newKeyboardMode(kKeyFlutterKey, hid, false, false);
+    _monitorKeys.tap(key);
   }
 
   void _monitorKeyState(PhysicalKeyboardKey key, bool down, int index) {
@@ -1864,13 +1875,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       return;
     }
     if (down && !_canControlMonitor(index)) return;
-    final hid = key.usbHidUsage & 0xFFFF;
-    if (down) {
-      if (!_monitorHeldKeys.add(hid)) return;
-    } else if (!_monitorHeldKeys.remove(hid)) {
-      return;
-    }
-    widget.ffi.inputModel.newKeyboardMode(kKeyFlutterKey, hid, down, false);
+    _monitorKeys.setState(key, down);
   }
 
   Future<void> _monitorSoftKeyboard(bool enabled) async {
@@ -1921,12 +1926,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                         sessionId: widget.ffi.sessionId, value: text);
                   }
                 }),
-                onKey: (key) => _queueMonitor(() async {
-                  if (_canControlMonitor(index)) {
-                    await widget.ffi.inputModel
-                        .tapHidKey(key.usbHidUsage & 0xFFFF);
-                  }
-                }),
+                onKey: (key) => _queueMonitor(() => _monitorTapKey(key, index)),
                 onKeyState: (key, down) => _queueMonitor(() async {
                   if (!mounted ||
                       _fullscreen?.display != index ||
@@ -1935,14 +1935,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                     return;
                   }
                   if (down && !_canControlMonitor(index)) return;
-                  final hid = key.usbHidUsage & 0xFFFF;
-                  if (down) {
-                    if (!_monitorHeldKeys.add(hid)) return;
-                  } else if (!_monitorHeldKeys.remove(hid)) {
-                    return;
-                  }
-                  widget.ffi.inputModel
-                      .newKeyboardMode(kKeyFlutterKey, hid, down, false);
+                  _monitorKeys.setState(key, down);
                 }),
               ));
     } finally {
@@ -1989,10 +1982,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     widget.ffi.inputModel.toReleaseRawKeys
         .release(widget.ffi.inputModel.handleRawKeyEvent);
     widget.ffi.inputModel.resetModifiers();
-    for (final hid in _monitorHeldKeys.toList()) {
-      widget.ffi.inputModel.newKeyboardMode(kKeyFlutterKey, hid, false, false);
-    }
-    _monitorHeldKeys.clear();
+    _monitorKeys.releaseAll();
   }
 }
 
