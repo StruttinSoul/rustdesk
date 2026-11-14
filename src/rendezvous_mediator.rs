@@ -280,10 +280,7 @@ impl RendezvousMediator {
             }
         }
         crate::hbbs_http::sync::start();
-        #[cfg(target_os = "windows")]
-        if crate::platform::is_installed() && crate::is_server() {
-            crate::updater::start_auto_update();
-        }
+        // Aperture does not auto-update from RustDesk's official releases.
         check_zombie();
         let server = new_server();
         if config::option2bool("stop-service", &Config::get_option("stop-service")) {

@@ -2549,8 +2549,9 @@ pub fn is_disable_ab() -> SyncReturn<bool> {
     SyncReturn(config::is_disable_ab())
 }
 
+/// Aperture has no RustDesk account sign-in: this hides Account, address book and groups.
 pub fn is_disable_account() -> SyncReturn<bool> {
-    SyncReturn(config::is_disable_account())
+    SyncReturn(true)
 }
 
 pub fn is_disable_group_panel() -> SyncReturn<bool> {
@@ -3170,5 +3171,13 @@ pub mod server_side {
         _class: JClass,
     ) -> jboolean {
         jboolean::from(crate::server::is_clipboard_service_ok())
+    }
+}
+
+#[cfg(test)]
+mod aperture_account_tests {
+    #[test]
+    fn account_sign_in_is_disabled() {
+        assert!(super::is_disable_account().0);
     }
 }

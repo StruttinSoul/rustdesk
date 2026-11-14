@@ -2045,7 +2045,7 @@ pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let (sender, mut receiver) = mpsc::unbounded_channel::<Data>();
     *handler.sender.write().unwrap() = Some(sender.clone());
-    let token = LocalConfig::get_option("access_token");
+    let token = connection_account_token();
     let key = crate::get_key(false).await;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if handler.is_port_forward() {
@@ -2172,4 +2172,18 @@ async fn start_one_port_forward<T: InvokeUiSession>(
 async fn send_note(url: String, id: String, sid: u64, note: String) {
     let body = serde_json::json!({ "id": id, "session_id": sid, "note": note });
     allow_err!(crate::post_request(url, body.to_string(), "").await);
+}
+
+/// Aperture has no RustDesk account sign-in, so a session never carries an account token, even
+/// if an old one is still saved. A token would also keep the secured LAN path from being used.
+fn connection_account_token() -> String {
+    String::new()
+}
+
+#[cfg(test)]
+mod aperture_account_tests {
+    #[test]
+    fn sessions_never_send_an_account_token() {
+        assert!(super::connection_account_token().is_empty());
+    }
 }

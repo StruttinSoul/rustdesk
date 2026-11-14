@@ -1017,8 +1017,13 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
     }
 }
 
+/// Aperture never asks RustDesk's servers for a newer official client.
+pub(crate) fn software_update_check_allowed() -> bool {
+    false
+}
+
 pub fn check_software_update() {
-    if is_custom_client() {
+    if !software_update_check_allowed() || is_custom_client() {
         return;
     }
     let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
@@ -2947,6 +2952,11 @@ pub fn is_valid_untrusted_peer_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn aperture_never_checks_rustdesk_for_updates() {
+        assert!(!super::software_update_check_allowed());
+    }
+
     use super::*;
     use hbb_common::tokio::{
         self,
