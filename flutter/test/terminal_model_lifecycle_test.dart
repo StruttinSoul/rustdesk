@@ -50,6 +50,17 @@ void main() {
     expect(model.debugBufferedInputCount, 0);
   });
 
+  test('reviewed shell Run never buffers while terminal is unavailable',
+      () async {
+    final model = TerminalModel(_FakeFFI());
+    addTearDown(model.dispose);
+
+    final sent = await model.runReviewedText('echo one\necho two');
+
+    expect(sent, ReviewedShellSendResult.notSent);
+    expect(model.debugBufferedInputCount, 0);
+  });
+
   test('builds its terminal with the wheel button fix', () {
     final model = TerminalModel(_FakeFFI());
     addTearDown(model.dispose);

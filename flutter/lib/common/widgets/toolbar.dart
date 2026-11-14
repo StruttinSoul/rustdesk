@@ -553,7 +553,6 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
           bind.sessionToggleOption(
               sessionId: sessionId,
               value: '${blockInput.value ? 'un' : ''}block-input');
-          blockInput.value = !blockInput.value;
         }));
   }
   // switchSides

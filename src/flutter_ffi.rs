@@ -11,16 +11,13 @@ use crate::{
     input::*,
     ui_interface::{self, *},
 };
+use base::{config::keys, fs};
 use flutter_rust_bridge::{StreamSink, SyncReturn};
 use hbb_common::{
     config::{self, LocalConfig, PeerConfig, PeerInfoSerde},
     lazy_static, log,
     rendezvous_proto::ConnType,
     ResultType,
-};
-use base::{
-    config::keys,
-    fs,
 };
 use std::{
     collections::HashMap,
@@ -791,9 +788,29 @@ pub fn session_set_confirm_override_file(
     need_override: bool,
     remember: bool,
     is_upload: bool,
+    conflict_token: String,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.set_confirm_override_file(act_id, file_num, need_override, remember, is_upload);
+        session.set_confirm_override_file(
+            act_id,
+            file_num,
+            need_override,
+            remember,
+            is_upload,
+            conflict_token,
+        );
+    }
+}
+
+pub fn session_set_confirm_keep_both_file(
+    session_id: SessionID,
+    act_id: i32,
+    file_num: i32,
+    is_upload: bool,
+    conflict_token: String,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.set_confirm_keep_both_file(act_id, file_num, is_upload, conflict_token);
     }
 }
 
@@ -835,6 +852,12 @@ pub fn session_remove_all_empty_dirs(
 pub fn session_cancel_job(session_id: SessionID, act_id: i32) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.cancel_job(act_id);
+    }
+}
+
+pub fn session_pause_job(session_id: SessionID, act_id: i32) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.pause_job(act_id);
     }
 }
 
@@ -903,9 +926,10 @@ pub fn session_add_job(
     file_num: i32,
     include_hidden: bool,
     is_remote: bool,
+    ownership_token: String,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.add_job(
+        session.add_job_with_ownership_token(
             act_id,
             fs::JobType::Generic.into(),
             path,
@@ -913,6 +937,7 @@ pub fn session_add_job(
             file_num,
             include_hidden,
             is_remote,
+            ownership_token,
         );
     }
 }
@@ -2718,6 +2743,12 @@ pub fn main_get_common(key: String) -> String {
         return ui_interface::is_permanent_password_set().to_string();
     } else if key == "local-permanent-password-set" {
         return ui_interface::is_local_permanent_password_set().to_string();
+    } else if key == "bluestacks-inventory" {
+        #[cfg(target_os = "windows")]
+        return crate::server::emulator::bluestacks::management_inventory_json();
+        #[cfg(not(target_os = "windows"))]
+        return r#"{"ok":false,"error":"BlueStacks management is only available on Windows"}"#
+            .to_owned();
     } else {
         if key.starts_with("download-data-") {
             let id = key.replace("download-data-", "");
@@ -2774,6 +2805,30 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
 }
 
 pub fn main_set_common(_key: String, _value: String) {
+    #[cfg(target_os = "windows")]
+    if _key == "bluestacks-action" {
+        let payload = _value.clone();
+        std::thread::spawn(move || {
+            let result = crate::server::emulator::bluestacks::handle_action_json(&payload);
+            let result_value =
+                serde_json::from_str::<serde_json::Value>(&result).unwrap_or_else(|error| {
+                    serde_json::json!({
+                        "ok": false,
+                        "action": "invalid",
+                        "error": format!("failed to decode BlueStacks action result: {error}"),
+                    })
+                });
+            let data = HashMap::from([
+                ("name", serde_json::json!("bluestacks-action-result")),
+                ("result", result_value),
+            ]);
+            let _res = flutter::push_global_event(
+                flutter::APP_TYPE_MAIN,
+                serde_json::ser::to_string(&data).unwrap_or_default(),
+            );
+        });
+        return;
+    }
     #[cfg(target_os = "windows")]
     if _key == "install-printer" && crate::platform::is_win_10_or_greater() {
         std::thread::spawn(move || {
@@ -2902,11 +2957,463 @@ pub fn main_set_common(_key: String, _value: String) {
     }
 }
 
+fn codex_operation_scope(
+    payload: &serde_json::Value,
+) -> crate::ui_session_interface::CodexOperationScope {
+    crate::ui_session_interface::CodexOperationScope {
+        operation_id: payload
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        session_identity: payload
+            .get("session_identity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        target_identity: payload
+            .get("target_identity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        session_generation: payload
+            .get("session_generation")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default(),
+    }
+}
+
 pub fn session_set_common(session_id: SessionID, key: String, value: String) {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
-        if key == "continue-insecure-connection"
-        {
+        if key == "emulator-request" {
+            s.request_emulator(value);
+            return;
+        }
+        if key == "manual-clipboard-request" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let direction = payload
+                    .get("direction")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let target_identity = payload
+                    .get("target_identity")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                s.request_manual_clipboard(request_id, direction, text, target_identity);
+            }
+            return;
+        }
+        if key == "continue-insecure-connection" {
             s.continue_insecure_connection(value == "Y");
+            return;
+        }
+        if key == "codex-list-threads" {
+            s.request_codex_threads(value);
+            return;
+        }
+        if key == "codex-list-workspaces" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = payload
+                    .get("cursor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(50)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_workspaces(request_id, cursor, limit);
+            }
+            return;
+        }
+        if key == "codex-list-task-changes" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = payload
+                    .get("cursor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(25)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_task_changes(request_id, thread_id, cursor, limit);
+            }
+            return;
+        }
+        if key == "codex-read-task-diff" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let change_id = payload
+                    .get("change_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let offset = payload
+                    .get("offset")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(16 * 1024)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_task_diff(request_id, thread_id, change_id, offset, limit);
+            }
+            return;
+        }
+        if key == "codex-list-artifacts" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = payload
+                    .get("cursor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(25)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_artifacts(request_id, thread_id, cursor, limit);
+            }
+            return;
+        }
+        if key == "codex-read-artifact" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let artifact_id = payload
+                    .get("artifact_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let offset = payload
+                    .get("offset")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(16 * 1024)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_artifact(request_id, thread_id, artifact_id, offset, limit);
+            }
+            return;
+        }
+        if key == "codex-thread-history" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = payload
+                    .get("cursor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(50)
+                    .min(u32::MAX as u64) as u32;
+                s.request_codex_history(request_id, thread_id, cursor, limit);
+            }
+            return;
+        }
+        if key == "codex-event-subscription" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let subscribe = payload
+                    .get("subscribe")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                s.subscribe_codex_events(request_id, thread_id, subscribe);
+            }
+            return;
+        }
+        if key == "codex-list-approvals" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                s.request_codex_approvals(request_id, thread_id);
+            }
+            return;
+        }
+        if key == "codex-resume-thread" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let scope = codex_operation_scope(&payload);
+                s.resume_codex_thread(request_id, thread_id, scope);
+            }
+            return;
+        }
+        if key == "codex-start-thread" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let workspace_id = payload
+                    .get("workspace_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let workspace_thread_id = payload
+                    .get("workspace_thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let scope = codex_operation_scope(&payload);
+                s.start_codex_thread(request_id, workspace_id, workspace_thread_id, scope);
+            }
+            return;
+        }
+        if key == "codex-start-turn" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let scope = codex_operation_scope(&payload);
+                s.start_codex_turn(request_id, thread_id, text, scope);
+            }
+            return;
+        }
+        if key == "codex-steer-turn" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let scope = codex_operation_scope(&payload);
+                s.steer_codex_turn(request_id, thread_id, turn_id, text, scope);
+            }
+            return;
+        }
+        if key == "codex-queue-turn" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let scope = codex_operation_scope(&payload);
+                s.queue_codex_turn(request_id, thread_id, turn_id, text, scope);
+            }
+            return;
+        }
+        if key == "codex-interrupt-turn" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let scope = codex_operation_scope(&payload);
+                s.interrupt_codex_turn(request_id, thread_id, turn_id, scope);
+            }
+            return;
+        }
+        if key == "codex-respond-approval" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let approval_id = payload
+                    .get("approval_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let item_id = payload
+                    .get("item_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let approve = payload
+                    .get("decision")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|decision| decision == "approve")
+                    .unwrap_or(false);
+                let scope = codex_operation_scope(&payload);
+                s.respond_codex_approval(
+                    request_id,
+                    approval_id,
+                    thread_id,
+                    turn_id,
+                    item_id,
+                    approve,
+                    scope,
+                );
+            }
+            return;
+        }
+        if key == "codex-open-windows-app" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                s.open_codex_windows_app(request_id, thread_id);
+            }
             return;
         }
     }

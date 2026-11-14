@@ -40,6 +40,7 @@ import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'models/model.dart';
 import 'models/platform_model.dart';
+import 'models/task_notification_policy.dart';
 
 import 'package:flutter_hbb/native/win32.dart'
     if (dart.library.html) 'package:flutter_hbb/web/win32.dart';
@@ -2474,6 +2475,12 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
   var queryParameters =
       uri.queryParameters.map((k, v) => MapEntry(k.toLowerCase(), v));
 
+  if (isMobile &&
+      id != null &&
+      (queryParameters['codex_thread']?.trim().isNotEmpty ?? false)) {
+    TaskNotificationDeepLinkStore.remember(uri);
+  }
+
   var key = queryParameters["key"];
   if (id != null) {
     if (key != null) {
@@ -2647,6 +2654,7 @@ connect(BuildContext context, String id,
                 id: id,
                 password: password,
                 isSharedPassword: isSharedPassword,
+                connToken: connToken,
                 forceRelay: forceRelay),
           ),
         );
@@ -2687,6 +2695,7 @@ connect(BuildContext context, String id,
             password: password,
             isSharedPassword: isSharedPassword,
             forceRelay: forceRelay,
+            connToken: connToken,
           ),
         ),
       );

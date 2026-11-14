@@ -27,6 +27,8 @@ enum SortBy {
   }
 }
 
+enum TransferConflictDecision { cancel, keepBoth, skip, replace }
+
 class JobID {
   int _count = 0;
   int next() {
@@ -48,6 +50,15 @@ typedef GetSessionID = SessionID Function();
 typedef GetDialogManager = OverlayDialogManager? Function();
 typedef ReadRemoteDirectory = Future<void> Function(
     SessionID sessionId, String path, bool includeHidden);
+typedef PauseTransferJob = Future<void> Function(
+    SessionID sessionId, int jobId);
+typedef ResumeTransferJob = Future<void> Function(
+    SessionID sessionId, int jobId, bool isRemote);
+typedef CancelTransferJob = Future<void> Function(
+    SessionID sessionId, int jobId);
+typedef AddTransferJob = Future<void> Function(SessionID sessionId, int jobId,
+    String path, String to, int fileNum, bool includeHidden, bool isRemote,
+    String ownershipToken);
 
 const _kRemoteReadDirTimeout = Duration(seconds: 30);
 const _kRemoteSessionChangedError =
@@ -55,6 +66,7 @@ const _kRemoteSessionChangedError =
 
 class FileModel {
   final WeakReference<FFI> parent;
+  final Map<int, String> _activeConflictTokens = <int, String>{};
   // late final String sessionId;
   late final FileFetcher fileFetcher;
   late final JobController jobController;
@@ -97,6 +109,7 @@ class FileModel {
   }
 
   Future<void> close() async {
+    _activeConflictTokens.clear();
     await evtLoop.close();
     parent.target?.dialogManager.dismissAll();
     await localController.close();
@@ -139,6 +152,7 @@ class FileModel {
   void handleJobError(Map<String, dynamic> evt) {
     final id = int.tryParse(evt['id']?.toString() ?? '');
     if (id != null) {
+      _activeConflictTokens.remove(id);
       final err = evt['err']?.toString() ?? 'Unknown error';
       if (id == 0) {
         fileFetcher.tryCompleteRemoteTaskWithError(err);
@@ -158,6 +172,10 @@ class FileModel {
       debugPrint("Ignore stale override confirm event: $evt");
       return;
     }
+    final conflictToken = evt['conflict_token']?.toString() ?? '';
+    if (conflictToken.isNotEmpty) {
+      _activeConflictTokens[id] = conflictToken;
+    }
     evtLoop.pushEvent(
         _FileDialogEvent(WeakReference(this), FileDialogType.overwrite, evt));
   }
@@ -169,45 +187,91 @@ class FileModel {
       debugPrint("Ignore override confirm for inactive job: $evt");
       return;
     }
-    // If `skip == true`, it means to skip this file without showing dialog.
-    // Because `resp` may be null after the user operation or the last remembered operation,
-    // and we should distinguish them.
-    final resp = overrideConfirm ??
-        (!skip
-            ? await showFileConfirmDialog(translate("Overwrite"),
-                "${evt['read_path']}", true, evt['is_identical'] == "true")
-            : null);
-    if (!jobController.hasTransferConflictJob(id)) {
+    final isUpload = evt['is_upload'] == 'true';
+    final fileNum = int.parse(evt['file_num']);
+    final conflictToken = evt['conflict_token']?.toString() ?? '';
+    final expectedSession = sessionId;
+    final jobIndex = jobController.getJob(id);
+    final job = jobIndex >= 0 ? jobController.jobTable[jobIndex] : null;
+    final keepBothAvailable = !isUpload ||
+        (parent.target?.ffiModel.pi.features.fileKeepBoth ?? false);
+    final decision = skip
+        ? TransferConflictDecision.skip
+        : overrideConfirm == true
+            ? TransferConflictDecision.replace
+            : await showTransferConflictDialog(
+                job: job,
+                fallbackPath: '${evt['read_path']}',
+                isIdentical: evt['is_identical'] == 'true',
+                keepBothAvailable: keepBothAvailable,
+              );
+    if (sessionId != expectedSession ||
+        parent.target?.ffiModel.permissions['file'] == false) {
+      debugPrint("Ignore override confirm result after session/permission change: $evt");
+      return;
+    }
+    final currentJobIndex = jobController.getJob(id);
+    final conflictStillCurrent = conflictToken.isNotEmpty
+        ? _activeConflictTokens[id] == conflictToken
+        : currentJobIndex >= 0 &&
+            jobController.jobTable[currentJobIndex].fileNum == fileNum;
+    if (!jobController.hasTransferConflictJob(id) ||
+        currentJobIndex < 0 ||
+        !conflictStillCurrent) {
       debugPrint("Ignore override confirm result for inactive job: $evt");
       return;
     }
-    if (false == resp) {
-      await jobController.cancelTransferConflictBatch(id);
-    } else {
-      var need_override = false;
-      if (resp == null) {
-        // skip
-        need_override = false;
-      } else {
-        // overwrite
-        need_override = true;
-      }
-      // Update the loop config.
-      if (fileConfirmCheckboxRemember) {
-        jobController.rememberTransferConflictBatch(id, resp);
-        evtLoop.setSkip(!need_override);
-      }
-      await bind.sessionSetConfirmOverrideFile(
+    switch (decision ?? TransferConflictDecision.cancel) {
+      case TransferConflictDecision.cancel:
+        await jobController.cancelTransferConflictBatch(id);
+        _forgetConflictToken(id, conflictToken);
+        break;
+      case TransferConflictDecision.keepBoth:
+        if (!keepBothAvailable) {
+          debugPrint('Keep both was requested for an unsupported peer');
+          return;
+        }
+        await bind.sessionSetConfirmKeepBothFile(
           sessionId: sessionId,
           actId: id,
-          fileNum: int.parse(evt['file_num']),
-          needOverride: need_override,
-          remember: fileConfirmCheckboxRemember,
-          isUpload: evt['is_upload'] == "true");
+          fileNum: fileNum,
+          isUpload: isUpload,
+          conflictToken: conflictToken,
+        );
+        _forgetConflictToken(id, conflictToken);
+        break;
+      case TransferConflictDecision.skip:
+        await bind.sessionSetConfirmOverrideFile(
+          sessionId: sessionId,
+          actId: id,
+          fileNum: fileNum,
+          needOverride: false,
+          remember: false,
+          isUpload: isUpload,
+          conflictToken: conflictToken,
+        );
+        _forgetConflictToken(id, conflictToken);
+        break;
+      case TransferConflictDecision.replace:
+        // Replace is deliberately scoped to this conflict. It is never saved
+        // as a batch/default choice from the mobile conflict sheet.
+        await bind.sessionSetConfirmOverrideFile(
+          sessionId: sessionId,
+          actId: id,
+          fileNum: fileNum,
+          needOverride: true,
+          remember: false,
+          isUpload: isUpload,
+          conflictToken: conflictToken,
+        );
+        _forgetConflictToken(id, conflictToken);
+        break;
     }
-    // Update the loop config.
-    if (fileConfirmCheckboxRemember) {
-      evtLoop.setOverrideConfirm(resp);
+  }
+
+  void _forgetConflictToken(int id, String conflictToken) {
+    if (conflictToken.isNotEmpty && _activeConflictTokens[id] == conflictToken) {
+      _activeConflictTokens.remove(id);
     }
   }
 
@@ -291,6 +355,76 @@ class FileModel {
     }, useAnimation: false);
   }
 
+  Future<TransferConflictDecision?> showTransferConflictDialog({
+    required JobProgress? job,
+    required String fallbackPath,
+    required bool isIdentical,
+    required bool keepBothAvailable,
+  }) async {
+    final isRemoteToLocal = job?.isRemoteToLocal ?? false;
+    final destination =
+        job == null ? fallbackPath : (isRemoteToLocal ? job.to : job.remote);
+    final direction =
+        isRemoteToLocal ? 'Remote → This device' : 'This device → Remote';
+    return parent.target?.dialogManager.show<TransferConflictDecision>(
+      (setState, Function(TransferConflictDecision? value) close, context) {
+        final safeDefault = keepBothAvailable
+            ? TransferConflictDecision.keepBoth
+            : TransferConflictDecision.skip;
+        return CustomAlertDialog(
+          title: Row(children: [
+            const Icon(Icons.warning_amber_rounded),
+            const SizedBox(width: 10),
+            const Text('File already exists'),
+          ]),
+          contentBoxConstraints: const BoxConstraints(
+              minHeight: 120, minWidth: 400, maxWidth: 480),
+          content: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(direction,
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              const Text('Destination'),
+              SelectableText(destination.isEmpty ? fallbackPath : destination),
+              if (isIdentical) ...[
+                const SizedBox(height: 10),
+                Text(translate('identical_file_tip')),
+              ],
+              if (!keepBothAvailable) ...[
+                const SizedBox(height: 10),
+                const Text(
+                    'Keep both is unavailable with this peer. Skip is the safe default.'),
+              ],
+            ],
+          ),
+          actions: [
+            dialogButton('Cancel',
+                icon: const Icon(Icons.close_rounded),
+                onPressed: () => close(TransferConflictDecision.cancel),
+                isOutline: true),
+            dialogButton('Skip',
+                icon: const Icon(Icons.navigate_next_rounded),
+                onPressed: () => close(TransferConflictDecision.skip),
+                isOutline: true),
+            dialogButton('Replace',
+                icon: const Icon(Icons.delete_outline_rounded),
+                onPressed: () => close(TransferConflictDecision.replace),
+                isOutline: true),
+            if (keepBothAvailable)
+              dialogButton('Keep both',
+                  icon: const Icon(Icons.copy_all_rounded),
+                  onPressed: () => close(TransferConflictDecision.keepBoth)),
+          ],
+          onSubmit: () => close(safeDefault),
+          onCancel: () => close(TransferConflictDecision.cancel),
+        );
+      },
+      useAnimation: false,
+    );
+  }
+
   void onSelectedFiles(dynamic obj) {
     localController.selectedItems.clear();
 
@@ -303,14 +437,16 @@ class FileModel {
       final toPath = otherSideData.directory.path;
       final isWindows = otherSideData.options.isWindows;
       final showHidden = otherSideData.options.showHidden;
-      final jobID = jobController.addTransferJob(entry, false);
+      final destination = PathUtil.join(toPath, entry.name, isWindows);
+      final jobID = jobController.addTransferJob(entry, false,
+          destinationPath: destination);
       jobController.registerTransferConflictBatch([jobID],
           batchId: int.tryParse(obj['batchId']?.toString() ?? ''));
       webSendLocalFiles(
         handleIndex: handleIndex,
         actId: jobID,
         path: entry.path,
-        to: PathUtil.join(toPath, entry.name, isWindows),
+        to: destination,
         fileNum: 0,
         includeHidden: showHidden,
         isRemote: false,
@@ -378,7 +514,7 @@ class FileController {
       required this.getOtherSideDirectoryData});
 
   String get homePath => options.value.home;
-  void set homePath(String path) => options.value.home = path;
+  set homePath(String path) => options.value.home = path;
   OverlayDialogManager? get dialogManager => rootState.target?.dialogManager;
 
   bool _isPathAllowed(String candidate) {
@@ -427,7 +563,7 @@ class FileController {
     if (savedDir.isNotEmpty && !_isPathAllowed(savedDir)) {
       savedDir = options.value.home;
       await bind.sessionPeerOption(
-        sessionId: sessionId, name: "local_dir", value: savedDir);
+          sessionId: sessionId, name: "local_dir", value: savedDir);
     }
     Future<bool> tryOpenReadyDirs() async {
       final dirs = <String>{
@@ -626,17 +762,20 @@ class FileController {
     final transferJobs = <(Entry, int)>[];
     final transferJobIds = <int>[];
     for (var from in items.items) {
-      final jobID = jobController.addTransferJob(from, isRemoteToLocal);
+      final destination = PathUtil.join(toPath, from.name, isWindows);
+      final jobID = jobController.addTransferJob(from, isRemoteToLocal,
+          destinationPath: destination);
       transferJobs.add((from, jobID));
       transferJobIds.add(jobID);
     }
     jobController.registerTransferConflictBatch(transferJobIds);
     for (final (from, jobID) in transferJobs) {
+      final destination = PathUtil.join(toPath, from.name, isWindows);
       bind.sessionSendFiles(
           sessionId: sessionId,
           actId: jobID,
           path: from.path,
-          to: PathUtil.join(toPath, from.name, isWindows),
+          to: destination,
           fileNum: 0,
           includeHidden: showHidden,
           isRemote: isRemoteToLocal,
@@ -983,11 +1122,43 @@ class JobController {
   bool? _transferConflictRememberOverrideConfirm;
   final GetSessionID getSessionID;
   final GetDialogManager getDialogManager;
+  final PauseTransferJob _pauseTransferJob;
+  final ResumeTransferJob _resumeTransferJob;
+  final CancelTransferJob _cancelTransferJob;
+  final AddTransferJob _addTransferJob;
   SessionID get sessionId => getSessionID();
   OverlayDialogManager? get alogManager => getDialogManager();
   int _lastTimeShowMsgbox = DateTime.now().millisecondsSinceEpoch;
 
-  JobController(this.getSessionID, this.getDialogManager);
+  JobController(
+    this.getSessionID,
+    this.getDialogManager, {
+    PauseTransferJob? pauseTransferJob,
+    ResumeTransferJob? resumeTransferJob,
+    CancelTransferJob? cancelTransferJob,
+    AddTransferJob? addTransferJob,
+  })  : _pauseTransferJob = pauseTransferJob ??
+            ((sessionId, jobId) =>
+                bind.sessionPauseJob(sessionId: sessionId, actId: jobId)),
+        _resumeTransferJob = resumeTransferJob ??
+            ((sessionId, jobId, isRemote) => bind.sessionResumeJob(
+                sessionId: sessionId, actId: jobId, isRemote: isRemote)),
+        _cancelTransferJob = cancelTransferJob ??
+            ((sessionId, jobId) =>
+                bind.sessionCancelJob(sessionId: sessionId, actId: jobId)),
+        _addTransferJob = addTransferJob ??
+            ((sessionId, jobId, path, to, fileNum, includeHidden, isRemote,
+                    ownershipToken) =>
+                bind.sessionAddJob(
+                  sessionId: sessionId,
+                  actId: jobId,
+                  path: path,
+                  to: to,
+                  fileNum: fileNum,
+                  includeHidden: includeHidden,
+                  isRemote: isRemote,
+                  ownershipToken: ownershipToken,
+                ));
 
   int getJob(int id) {
     return jobTable.indexWhere((element) => element.id == id);
@@ -1045,16 +1216,27 @@ class JobController {
   }
 
   // return jobID
-  int addTransferJob(Entry from, bool isRemoteToLocal) {
+  int addTransferJob(Entry from, bool isRemoteToLocal,
+      {String? destinationPath}) {
     final jobID = JobController.jobID.next();
-    jobTable.add(JobProgress()
+    final job = JobProgress()
       ..type = JobType.transfer
       ..fileName = path.basename(from.path)
       ..jobName = from.path
       ..totalSize = from.size
       ..state = JobState.inProgress
       ..id = jobID
-      ..isRemoteToLocal = isRemoteToLocal);
+      ..isRemoteToLocal = isRemoteToLocal;
+    if (destinationPath != null) {
+      if (isRemoteToLocal) {
+        job.remote = from.path;
+        job.to = destinationPath;
+      } else {
+        job.remote = destinationPath;
+        job.to = from.path;
+      }
+    }
+    jobTable.add(job);
     return jobID;
   }
 
@@ -1092,6 +1274,16 @@ class JobController {
       final jobIndex = getJob(id);
       if (jobIndex >= 0 && jobTable.length > jobIndex) {
         final job = jobTable[jobIndex];
+        if (job.state == JobState.pauseRequested ||
+            job.state == JobState.paused ||
+            job.state == JobState.interrupted ||
+            job.state == JobState.cancelRequested ||
+            job.state == JobState.cancelled) {
+          return;
+        }
+        if (job.state == JobState.resumeRequested) {
+          job.state = JobState.inProgress;
+        }
         job.fileNum = int.parse(evt['file_num']);
         job.speed = double.parse(evt['speed']);
         job.finishedSize = int.parse(evt['finished_size']);
@@ -1120,6 +1312,11 @@ class JobController {
       return true;
     }
     final job = jobTable[jobIndex];
+    if (job.type == JobType.transfer &&
+        (job.state == JobState.cancelRequested ||
+            job.state == JobState.cancelled)) {
+      return true;
+    }
     job.recvJobRes = true;
     if (job.type == JobType.deleteFile) {
       job.state = JobState.done;
@@ -1164,6 +1361,7 @@ class JobController {
     int jobIndex = getJob(id);
     if (jobIndex != -1) {
       final job = jobTable[jobIndex];
+      if (job.state == JobState.cancelled) return;
       if (job.state == JobState.done && job.err == "cancel") return;
       job.state = JobState.error;
       job.err = err;
@@ -1229,7 +1427,106 @@ class JobController {
 
   Future<void> cancelJob(int id) async {
     unregisterTransferConflictJob(id);
-    await bind.sessionCancelJob(sessionId: sessionId, actId: id);
+    final jobIndex = getJob(id);
+    if (jobIndex == -1) return;
+    final job = jobTable[jobIndex];
+    if (job.type != JobType.transfer ||
+        job.state == JobState.done ||
+        job.state == JobState.cancelled ||
+        job.state == JobState.error ||
+        job.state == JobState.cancelRequested) {
+      return;
+    }
+    job.state = JobState.cancelRequested;
+    job.err = '';
+    job.speed = 0;
+    jobTable.refresh();
+    try {
+      await _cancelTransferJob(sessionId, id);
+    } catch (e) {
+      if (job.type == JobType.transfer && job.state == JobState.cancelRequested) {
+        job.state = JobState.error;
+        job.err = e.toString();
+        jobTable.refresh();
+      }
+    }
+  }
+
+  void jobCancelled(Map<String, dynamic> evt) {
+    final id = int.tryParse(evt['id']?.toString() ?? '');
+    if (id == null) return;
+    final jobIndex = getJob(id);
+    if (jobIndex == -1) {
+      unregisterTransferConflictJob(id);
+      return;
+    }
+    final job = jobTable[jobIndex];
+    if (job.type != JobType.transfer) return;
+    final applied = evt['applied']?.toString() == 'true';
+    final confirmed = evt['confirmed']?.toString() == 'true';
+    final error = evt['error']?.toString() ?? '';
+    job.speed = 0;
+    job.recvJobRes = true;
+    if (applied) {
+      job.state = JobState.cancelled;
+      job.err = confirmed ? '' : error;
+    } else if (error.startsWith('cancel_request_failed:')) {
+      job.state = JobState.inProgress;
+      job.err = error.replaceFirst('cancel_request_failed: ', '');
+    } else {
+      job.state = JobState.interrupted;
+      job.err = error.isEmpty ? 'Cancel was not applied' : error;
+    }
+    unregisterTransferConflictJob(id);
+    jobTable.refresh();
+  }
+
+  Future<bool> pauseJob(int id, {required bool supported}) async {
+    final jobIndex = getJob(id);
+    if (!supported || jobIndex == -1) return false;
+    final job = jobTable[jobIndex];
+    if (job.type != JobType.transfer || job.state != JobState.inProgress) {
+      return false;
+    }
+    job.state = JobState.pauseRequested;
+    job.err = '';
+    jobTable.refresh();
+    try {
+      await _pauseTransferJob(sessionId, id);
+      return true;
+    } catch (e) {
+      job.state = JobState.inProgress;
+      job.err = e.toString();
+      jobTable.refresh();
+      return false;
+    }
+  }
+
+  void jobPaused(Map<String, dynamic> evt) {
+    final id = int.tryParse(evt['id']?.toString() ?? '');
+    if (id == null) return;
+    final jobIndex = getJob(id);
+    if (jobIndex == -1) return;
+    final job = jobTable[jobIndex];
+    final resolvingUnknownPause = job.state == JobState.interrupted &&
+        job.err.startsWith('pause_outcome_unknown:');
+    if (job.state != JobState.pauseRequested && !resolvingUnknownPause) return;
+    final accepted = evt['accepted']?.toString() == 'true';
+    if (accepted) {
+      job.state = JobState.paused;
+      job.speed = 0;
+      job.err = '';
+    } else {
+      final error = evt['error']?.toString() ?? 'Pause was rejected';
+      if (error.startsWith('pause_outcome_unknown:') ||
+          error.startsWith('pause_local_flush_failed:')) {
+        job.state = JobState.interrupted;
+      } else {
+        job.state = JobState.inProgress;
+      }
+      job.err = error;
+    }
+    jobTable.refresh();
   }
 
   Future<void> cancelTransferConflictBatch(int jobId) async {
@@ -1245,22 +1542,8 @@ class JobController {
         unregisterTransferConflictJob(id);
       }
     }
-    final jobIdsToCancel = batchJobIds.toSet();
-    for (final job in jobTable) {
-      if (!jobIdsToCancel.contains(job.id) || job.state == JobState.done) {
-        continue;
-      }
-      job.state = JobState.done;
-      job.err = "cancel";
-      job.recvJobRes = true;
-    }
-    jobTable.refresh();
     for (final id in batchJobIds) {
-      try {
-        await bind.sessionCancelJob(sessionId: sessionId, actId: id);
-      } catch (e) {
-        debugPrint("Failed to cancel transfer job $id in conflict batch: $e");
-      }
+      await cancelJob(id);
     }
   }
 
@@ -1272,71 +1555,70 @@ class JobController {
     bool showHidden = jobDetail['show_hidden'];
     int fileNum = jobDetail['file_num'];
     bool isRemote = jobDetail['is_remote'];
-    bool isAutoStart = jobDetail['auto_start'] == true;
-    int currJobId = -1;
-    if (isAutoStart) {
-      // Ensure jobDetail['id'] exists and is an int
-      if (jobDetail.containsKey('id') &&
-          jobDetail['id'] != null &&
-          jobDetail['id'] is int) {
-        currJobId = jobDetail['id'];
-      }
-    }
-    if (currJobId < 0) {
-      // If id is missing or invalid, disable auto-start and assign a new job id
-      isAutoStart = false;
-      currJobId = JobController.jobID.next();
-    }
-
-    if (!isAutoStart) {
-      if (!(isDesktop || isWebDesktop)) {
-        // Don't add to job table if not auto start on mobile.
-        // Because mobile does not support job list view now.
-        return;
-      }
-
-      // Add to job table if not auto start on desktop.
-      String fileName = path.basename(isRemote ? remote : to);
-      final jobProgress = JobProgress()
-        ..type = JobType.transfer
-        ..fileName = fileName
-        ..jobName = isRemote ? remote : to
-        ..id = currJobId
-        ..isRemoteToLocal = isRemote
-        ..fileNum = fileNum
-        ..remote = remote
-        ..to = to
-        ..showHidden = showHidden
-        ..state = JobState.paused;
-      jobTable.add(jobProgress);
-    }
+    final ownershipToken = jobDetail['ownership_token'] is String
+        ? jobDetail['ownership_token'] as String
+        : '';
+    // Saved Flutter transfers are always explicit-resume. A reconnect can
+    // happen after the peer accepted the previous request, so replaying a
+    // saved job automatically can duplicate an upload/download.
+    final currJobId = JobController.jobID.next();
+    // Keep interrupted jobs visible on every client. Reconnect never resumes
+    // a transfer automatically because the peer may already have accepted
+    // the previous request. A fresh local id also prevents a late response
+    // from the previous transport generation from completing this job.
+    String fileName = path.basename(isRemote ? remote : to);
+    final jobProgress = JobProgress()
+      ..type = JobType.transfer
+      ..fileName = fileName
+      ..jobName = isRemote ? remote : to
+      ..id = currJobId
+      ..isRemoteToLocal = isRemote
+      ..fileNum = fileNum
+      ..remote = remote
+      ..to = to
+      ..showHidden = showHidden
+      ..state = JobState.interrupted;
+    jobTable.add(jobProgress);
     registerTransferConflictBatch([currJobId]);
-    await bind.sessionAddJob(
-      sessionId: sessionId,
-      isRemote: isRemote,
-      includeHidden: showHidden,
-      actId: currJobId,
-      path: isRemote ? remote : to,
-      to: isRemote ? to : remote,
-      fileNum: fileNum,
+    await _addTransferJob(
+      sessionId,
+      currJobId,
+      isRemote ? remote : to,
+      isRemote ? to : remote,
+      fileNum,
+      showHidden,
+      isRemote,
+      ownershipToken,
     );
-
-    if (isAutoStart) {
-      await bind.sessionResumeJob(
-          sessionId: sessionId, actId: currJobId, isRemote: isRemote);
-    }
   }
 
-  void resumeJob(int jobId) {
+  Future<bool> resumeJob(int jobId) async {
     final jobIndex = getJob(jobId);
     if (jobIndex != -1) {
       final job = jobTable[jobIndex];
-      bind.sessionResumeJob(
-          sessionId: sessionId, actId: job.id, isRemote: job.isRemoteToLocal);
-      job.state = JobState.inProgress;
+      if (job.type != JobType.transfer ||
+          (job.state != JobState.paused && job.state != JobState.interrupted)) {
+        return false;
+      }
+      if (job.err.startsWith('pause_outcome_unknown:') ||
+          job.err.startsWith('cancel_outcome_unknown:')) {
+        return false;
+      }
+      job.state = JobState.resumeRequested;
+      job.err = '';
       jobTable.refresh();
+      try {
+        await _resumeTransferJob(sessionId, job.id, job.isRemoteToLocal);
+        return true;
+      } catch (e) {
+        job.state = JobState.interrupted;
+        job.err = e.toString();
+        jobTable.refresh();
+        return false;
+      }
     } else {
       debugPrint("jobId $jobId is not exists");
+      return false;
     }
   }
 
@@ -1710,7 +1992,18 @@ class Entry {
   }
 }
 
-enum JobState { none, inProgress, done, error, paused }
+enum JobState {
+  none,
+  inProgress,
+  pauseRequested,
+  paused,
+  resumeRequested,
+  interrupted,
+  cancelRequested,
+  done,
+  cancelled,
+  error,
+}
 
 extension JobStateDisplay on JobState {
   String display() {
@@ -1719,12 +2012,22 @@ extension JobStateDisplay on JobState {
         return translate("Waiting");
       case JobState.inProgress:
         return translate("Transfer file");
+      case JobState.pauseRequested:
+        return 'Pausing…';
+      case JobState.paused:
+        return translate('Paused');
+      case JobState.resumeRequested:
+        return 'Resuming…';
+      case JobState.interrupted:
+        return 'Interrupted';
+      case JobState.cancelRequested:
+        return 'Cancelling…';
       case JobState.done:
         return translate("Finished");
+      case JobState.cancelled:
+        return translate('Cancel');
       case JobState.error:
         return translate("Error");
-      default:
-        return "";
     }
   }
 }

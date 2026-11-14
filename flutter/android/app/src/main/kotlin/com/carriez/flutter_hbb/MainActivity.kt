@@ -10,11 +10,16 @@ package com.carriez.flutter_hbb
 import ffi.FFI
 
 import android.app.Activity
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.ClipboardManager
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
@@ -31,6 +36,8 @@ import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import android.util.DisplayMetrics
 import androidx.annotation.RequiresApi
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import com.hjq.permissions.XXPermissions
@@ -353,6 +360,9 @@ class MainActivity : FlutterActivity() {
                     } else {
                         result.success(true)
                     }
+                }
+                "show_task_notification" -> {
+                    result.success(showTaskNotification(call.arguments))
                 }
                 "enable_soft_keyboard" -> {
                     // https://blog.csdn.net/hanye2020/article/details/105553780
@@ -993,6 +1003,79 @@ class MainActivity : FlutterActivity() {
         } else {
             Log.d(logTag, "onVoiceCallClosed success")
         }
+    }
+
+    private fun showTaskNotification(arguments: Any?): Boolean {
+        val args = arguments as? Map<*, *> ?: return false
+        val eventId = args["event_id"] as? String ?: return false
+        val title = args["title"] as? String ?: return false
+        val body = args["body"] as? String ?: return false
+        val deepLink = args["deep_link"] as? String ?: return false
+        val hideSensitive = args["hide_sensitive_content"] as? Boolean ?: true
+        if (eventId.isBlank() || title.isBlank() || deepLink.isBlank()) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+
+        val channelId = "mirpg_codex_tasks"
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    channelId,
+                    "Codex task alerts",
+                    NotificationManager.IMPORTANCE_DEFAULT
+                ).apply {
+                    description = "Actionable Codex approvals, failures, and review-ready tasks"
+                    lockscreenVisibility = if (hideSensitive) {
+                        android.app.Notification.VISIBILITY_PRIVATE
+                    } else {
+                        android.app.Notification.VISIBILITY_PUBLIC
+                    }
+                }
+            )
+            if (manager.getNotificationChannel(channelId)?.importance == NotificationManager.IMPORTANCE_NONE) {
+                return false
+            }
+        }
+
+        val openIntent = Intent(Intent.ACTION_VIEW, Uri.parse(deepLink), this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val requestCode = eventId.hashCode() and 0x3fffffff
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            requestCode,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val builder = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setVisibility(
+                if (hideSensitive) NotificationCompat.VISIBILITY_PRIVATE
+                else NotificationCompat.VISIBILITY_PUBLIC
+            )
+        if (hideSensitive) {
+            builder.setPublicVersion(
+                NotificationCompat.Builder(this, channelId)
+                    .setSmallIcon(R.mipmap.ic_launcher)
+                    .setContentTitle("Codex task update")
+                    .setContentText("Open MIRPG Remote to view details.")
+                    .build()
+            )
+        }
+        manager.notify(20_000 + requestCode % 10_000, builder.build())
+        return true
     }
 
     override fun onStop() {

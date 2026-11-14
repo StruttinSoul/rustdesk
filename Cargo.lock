@@ -7140,6 +7140,7 @@ dependencies = [
  "libxdo-sys",
  "mac_address",
  "magnum-opus",
+ "native-tls",
  "nix 0.29.0",
  "num_cpus",
  "objc",

@@ -101,6 +101,14 @@ message Features {
   bool privacy_mode = 1;
   bool terminal = 2;
   bool port_forward_mux = 3;
+  bool codex = 4;
+  bool emulator = 5;
+  bool target_dashboard = 6;
+  bool host_management = 7;
+  bool manual_clipboard = 8;
+  bool file_pause = 9;
+  bool file_keep_both = 10;
+  bool file_cancel_ack = 11;
 }
 
 message CodecAbility {
@@ -414,10 +422,32 @@ message FileAction {
     FileTransferSendConfirmRequest send_confirm = 9;
     FileRename rename = 10;
     ReadEmptyDirs read_empty_dirs = 11;
+    FileTransferPause pause = 12;
   }
 }
 
-message FileTransferCancel { int32 id = 1; }
+message FileTransferCancel {
+  int32 id = 1;
+  uint64 request_id = 2;
+}
+message FileTransferPause {
+  int32 id = 1;
+  // Correlates the acknowledgment with one specific pause attempt. A job id
+  // can survive reconnect/resume cycles, so it is not sufficient by itself.
+  uint64 request_id = 2;
+}
+message FileTransferPauseResponse {
+  int32 id = 1;
+  bool accepted = 2;
+  string error = 3;
+  uint64 request_id = 4;
+}
+message FileTransferCancelResponse {
+  int32 id = 1;
+  bool accepted = 2;
+  string error = 3;
+  uint64 request_id = 4;
+}
 
 message FileResponse {
   oneof union {
@@ -427,6 +457,8 @@ message FileResponse {
     FileTransferDone done = 4;
     FileTransferDigest digest = 5;
     ReadEmptyDirsResponse empty_dirs = 6;
+    FileTransferPauseResponse pause = 7;
+    FileTransferCancelResponse cancel = 8;
   }
 }
 
@@ -442,6 +474,12 @@ message FileTransferDigest {
                                // `is_resume` can let the controlled side know whether to check the `.digest` file.
                                // When `is_resume` is false, `.digest` exists, the same file does not exist,
                                // the controlled side should not check `.digest`, it should confirm with a new transfer request.
+  // Optional strong source-content identity. New peers require a 32-byte
+  // SHA-256 match before reusing a partial; older peers simply omit it.
+  bytes content_sha256 = 9;
+  // Opaque identity for the exact destination conflict snapshot presented to
+  // the sender. Destructive conflict decisions must echo this value.
+  string conflict_token = 10;
 }
 
 message FileTransferBlock {
@@ -477,7 +515,13 @@ message FileTransferSendConfirmRequest {
   oneof union {
     bool skip = 3;
     uint32 offset_blk = 4;
+    // Preserve the existing destination under a unique sibling name before
+    // accepting this file at the original destination path.
+    bool keep_both = 5;
   }
+  // Echoes FileTransferDigest.conflict_token for Replace/Keep-both decisions.
+  // Empty for non-conflict confirmations and legacy peers.
+  string conflict_token = 6;
 }
 
 message FileTransferDone {
@@ -491,6 +535,9 @@ message FileTransferReceiveRequest {
   repeated FileEntry files = 3;
   int32 file_num = 4;
   uint64 total_size = 5;
+  // Stable per-transfer capability used only to reclaim partial artifacts
+  // created by the same logical transfer after a reconnect/new job id.
+  string ownership_token = 6;
 }
 
 message FileRemoveDir {
@@ -997,6 +1044,571 @@ message PortForwardChannel {
   }
 }
 
+// Typed Codex control plane. The Windows peer translates these typed
+// requests to its local Codex app-server; raw app-server JSON-RPC is never
+// transported to the controller.
+enum CodexState {
+  CodexUnavailable = 0;
+  CodexStarting = 1;
+  CodexReady = 2;
+  CodexResumable = 3;
+  CodexIdle = 4;
+  CodexWorking = 5;
+  CodexWaitingForApproval = 6;
+  CodexWaitingForInput = 7;
+  CodexCompleted = 8;
+  CodexFailed = 9;
+  CodexDisconnected = 10;
+  CodexInterrupting = 11;
+}
+
+enum CodexHistoryKind {
+  CodexHistoryUnknown = 0;
+  CodexHistoryUserMessage = 1;
+  CodexHistoryAgentMessage = 2;
+  CodexHistoryPlan = 3;
+  CodexHistoryReasoning = 4;
+  CodexHistoryCommand = 5;
+  CodexHistoryFileChange = 6;
+  CodexHistoryTool = 7;
+  CodexHistoryWebSearch = 8;
+  CodexHistoryStatus = 9;
+}
+
+enum CodexEventKind {
+  CodexEventUnknown = 0;
+  CodexEventThreadState = 1;
+  CodexEventItemStarted = 2;
+  CodexEventItemUpdated = 3;
+  CodexEventItemCompleted = 4;
+  CodexEventTurnStarted = 5;
+  CodexEventTurnCompleted = 6;
+}
+
+message CodexListThreadsRequest {}
+
+message CodexThreadHistoryRequest {
+  string thread_id = 1;
+  string cursor = 2;
+  uint32 limit = 3;
+}
+
+message CodexEventSubscriptionRequest {
+  string thread_id = 1;
+  bool subscribe = 2;
+}
+
+message CodexListApprovalsRequest {
+  string thread_id = 1;
+}
+
+message CodexListWorkspacesRequest {
+  string cursor = 1;
+  uint32 limit = 2;
+}
+
+message CodexListTaskChangesRequest {
+  string thread_id = 1;
+  string cursor = 2;
+  uint32 limit = 3;
+}
+
+message CodexReadTaskDiffRequest {
+  string thread_id = 1;
+  string change_id = 2;
+  uint64 offset = 3;
+  uint32 limit = 4;
+}
+
+message CodexListArtifactsRequest {
+  string thread_id = 1;
+  string cursor = 2;
+  uint32 limit = 3;
+}
+
+message CodexReadArtifactRequest {
+  string thread_id = 1;
+  string artifact_id = 2;
+  uint64 offset = 3;
+  uint32 limit = 4;
+}
+
+message CodexReadRequest {
+  string request_id = 1;
+  oneof union {
+    CodexListThreadsRequest list_threads = 2;
+    CodexThreadHistoryRequest thread_history = 3;
+    CodexEventSubscriptionRequest event_subscription = 4;
+    CodexListApprovalsRequest list_approvals = 5;
+    CodexListWorkspacesRequest list_workspaces = 6;
+    CodexListTaskChangesRequest list_task_changes = 7;
+    CodexReadTaskDiffRequest read_task_diff = 8;
+    CodexListArtifactsRequest list_artifacts = 9;
+    CodexReadArtifactRequest read_artifact = 10;
+  }
+}
+
+message CodexWorkspaceInfo {
+  string id = 1;
+  string name = 2;
+  string path = 3;
+  bool accessible = 4;
+  string status = 5;
+}
+
+message CodexWorkspaceListResponse {
+  repeated CodexWorkspaceInfo workspaces = 1;
+  string next_cursor = 2;
+}
+
+message CodexTaskChangeInfo {
+  string change_id = 1;
+  string artifact_id = 2;
+  string path = 3;
+  string kind = 4;
+  bool binary = 5;
+  bool large = 6;
+  uint64 size_bytes = 7;
+  bool diff_available = 8;
+  string fallback_reason = 9;
+}
+
+message CodexTaskChangeListResponse {
+  string thread_id = 1;
+  repeated CodexTaskChangeInfo changes = 2;
+  string next_cursor = 3;
+}
+
+message CodexArtifactInfo {
+  string artifact_id = 1;
+  string path = 2;
+  uint64 size_bytes = 3;
+  bool binary = 4;
+  bool large = 5;
+  bool readable = 6;
+  string fallback_reason = 7;
+}
+
+message CodexArtifactListResponse {
+  string thread_id = 1;
+  repeated CodexArtifactInfo artifacts = 2;
+  string next_cursor = 3;
+}
+
+message CodexReviewTextResponse {
+  string thread_id = 1;
+  string id = 2;
+  string text = 3;
+  uint64 offset = 4;
+  uint64 next_offset = 5;
+  bool complete = 6;
+  string fallback_reason = 7;
+}
+
+message CodexThreadInfo {
+  string id = 1;
+  string title = 2;
+  string project = 3;
+  string originator = 4;
+  int64 updated_at = 5;
+  CodexState state = 6;
+}
+
+message CodexThreadListResponse {
+  repeated CodexThreadInfo threads = 1;
+  CodexState service_state = 2;
+  string codex_version = 3;
+  CodexControlCapabilities control = 4;
+  repeated string capabilities = 5;
+  string operation_session_identity = 6;
+  uint64 operation_generation = 7;
+}
+
+message CodexControlCapabilities {
+  bool resume_thread = 1;
+  bool start_thread = 2;
+  bool start_turn = 3;
+  bool steer_turn = 4;
+  bool interrupt_turn = 5;
+  bool approvals = 6;
+  bool open_windows_app = 7;
+  bool queue_turn = 8;
+}
+
+enum CodexApprovalKind {
+  CodexApprovalUnknown = 0;
+  CodexApprovalCommand = 1;
+  CodexApprovalFileChange = 2;
+  CodexApprovalPermissions = 3;
+}
+
+enum CodexApprovalDecision {
+  CodexApprovalDecisionUnknown = 0;
+  CodexApprovalApprove = 1;
+  CodexApprovalDeny = 2;
+}
+
+message CodexApprovalRequest {
+  string approval_id = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  string item_id = 4;
+  CodexApprovalKind kind = 5;
+  string title = 6;
+  string summary = 7;
+  string reason = 8;
+  int64 started_at_ms = 9;
+  bool actionable = 10;
+  string working_directory = 11;
+  string scope = 12;
+}
+
+message CodexApprovalListResponse {
+  string thread_id = 1;
+  repeated CodexApprovalRequest approvals = 2;
+}
+
+message CodexApprovalResolved {
+  string approval_id = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  CodexApprovalDecision decision = 4;
+}
+
+message CodexHistoryItem {
+  string id = 1;
+  string turn_id = 2;
+  CodexHistoryKind kind = 3;
+  string text = 4;
+  string detail = 5;
+  string status = 6;
+}
+
+message CodexThreadHistoryResponse {
+  string thread_id = 1;
+  repeated CodexHistoryItem items = 2;
+  string next_cursor = 3;
+}
+
+message CodexEvent {
+  string thread_id = 1;
+  string turn_id = 2;
+  string item_id = 3;
+  CodexEventKind kind = 4;
+  CodexState state = 5;
+  CodexHistoryKind history_kind = 6;
+  string text = 7;
+  string status = 8;
+  // Present for host-generated queuedStart events so the mobile queue can
+  // reconcile the exact operation even if the queue acknowledgment is late.
+  string operation_id = 9;
+}
+
+message CodexError {
+  string thread_id = 1;
+  string message = 2;
+  string error_code = 3;
+}
+
+message CodexReadResponse {
+  string request_id = 1;
+  oneof union {
+    CodexThreadListResponse thread_list = 2;
+    CodexThreadHistoryResponse thread_history = 3;
+    CodexEvent event = 4;
+    CodexError error = 5;
+    CodexApprovalRequest approval = 6;
+    CodexApprovalListResponse approval_list = 7;
+    CodexApprovalResolved approval_resolved = 8;
+    CodexWorkspaceListResponse workspace_list = 9;
+    CodexTaskChangeListResponse task_change_list = 10;
+    CodexReviewTextResponse task_diff = 11;
+    CodexArtifactListResponse artifact_list = 12;
+    CodexReviewTextResponse artifact = 13;
+  }
+}
+
+enum CodexControlAction {
+  CodexControlUnknown = 0;
+  CodexControlThreadResumed = 1;
+  CodexControlThreadStarted = 2;
+  CodexControlTurnStarted = 3;
+  CodexControlTurnSteered = 4;
+  CodexControlTurnInterrupted = 5;
+  CodexControlApprovalApproved = 6;
+  CodexControlApprovalDenied = 7;
+  CodexControlWindowsAppOpened = 8;
+  CodexControlTurnQueued = 9;
+}
+
+message CodexResumeThreadRequest {
+  string thread_id = 1;
+}
+
+// Start a fresh Codex thread. New peers use the host-issued workspace_id.
+// workspace_thread_id remains only for compatibility with older peers.
+message CodexStartThreadRequest {
+  string workspace_thread_id = 1;
+  string workspace_id = 2;
+}
+
+message CodexStartTurnRequest {
+  string thread_id = 1;
+  string text = 2;
+}
+
+message CodexSteerTurnRequest {
+  string thread_id = 1;
+  string turn_id = 2;
+  string text = 3;
+}
+
+message CodexQueueTurnRequest {
+  string thread_id = 1;
+  string turn_id = 2;
+  string text = 3;
+}
+
+message CodexInterruptTurnRequest {
+  string thread_id = 1;
+  string turn_id = 2;
+}
+
+message CodexRespondApprovalRequest {
+  string approval_id = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  CodexApprovalDecision decision = 4;
+  string item_id = 5;
+}
+
+message CodexOpenWindowsAppRequest {
+  string thread_id = 1;
+}
+
+message CodexControlRequest {
+  string request_id = 1;
+  oneof union {
+    CodexResumeThreadRequest resume_thread = 2;
+    CodexStartThreadRequest start_thread = 3;
+    CodexStartTurnRequest start_turn = 4;
+    CodexSteerTurnRequest steer_turn = 5;
+    CodexInterruptTurnRequest interrupt_turn = 6;
+    CodexRespondApprovalRequest respond_approval = 7;
+    CodexOpenWindowsAppRequest open_windows_app = 8;
+    CodexQueueTurnRequest queue_turn = 13;
+  }
+  string operation_id = 9;
+  string session_identity = 10;
+  string target_identity = 11;
+  uint64 session_generation = 12;
+}
+
+message CodexControlResult {
+  CodexControlAction action = 1;
+  string thread_id = 2;
+  string turn_id = 3;
+  CodexState state = 4;
+  // Resume returns the host's authoritative pending queue for this owned
+  // thread. Older peers simply ignore this additive field.
+  repeated string queued_operation_ids = 5;
+}
+
+message CodexControlResponse {
+  string request_id = 1;
+  oneof union {
+    CodexControlResult result = 2;
+    CodexError error = 3;
+  }
+  string operation_id = 4;
+  string session_identity = 5;
+  string target_identity = 6;
+  uint64 session_generation = 7;
+  bool accepted = 8;
+  bool applied = 9;
+  string error_code = 10;
+}
+
+message EmulatorListRequest {}
+
+message EmulatorSelectRequest {
+  string target_id = 1;
+  bool start_if_stopped = 2;
+  bool launch_default_app = 3;
+}
+
+message EmulatorDesktopRequest {}
+
+message EmulatorPreviewRequest {
+  bool enabled = 1;
+  repeated string target_ids = 2;
+  repeated uint32 displays = 3;
+}
+
+message EmulatorPreviewState {
+  bool enabled = 1;
+  repeated uint64 session_ids = 2;
+  repeated uint32 displays = 3;
+}
+
+enum EmulatorNavigation {
+  EmulatorNavigationUnknown = 0;
+  EmulatorBack = 1;
+  EmulatorHome = 2;
+  EmulatorRecents = 3;
+}
+
+message EmulatorTouch {
+  uint32 action = 1;
+  uint64 pointer_id = 2;
+  uint32 x = 3;
+  uint32 y = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+}
+
+message EmulatorKey {
+  uint32 keycode = 1;
+  bool down = 2;
+}
+
+message EmulatorText {
+  string text = 1;
+}
+
+message EmulatorHostRequest {
+  string action = 1;
+  uint32 pid = 2;
+  string component = 3;
+  string operation_id = 4;
+  string session_identity = 5;
+  string target_identity = 6;
+  uint64 session_generation = 7;
+  uint64 process_start_time_secs = 8;
+  uint64 process_creation_time_100ns = 9;
+  string window_id = 10;
+  uint64 desktop_generation = 11;
+  uint32 display_width = 12;
+  uint32 display_height = 13;
+  uint32 display_dpi = 14;
+  string display_orientation = 15;
+  string owned_display_id = 16;
+  bool gateway_enabled = 17;
+  string gateway_expected_process_identity = 18;
+  uint32 gateway_confirmed_active_sessions = 19;
+  bool gateway_active_sessions_known = 20;
+}
+
+message EmulatorHostResponse {
+  string json = 1;
+}
+
+message EmulatorVideoRefreshRequest {}
+
+message EmulatorRequest {
+  uint64 request_id = 1;
+  uint32 protocol_version = 2;
+  uint64 session_id = 3;
+  oneof union {
+    EmulatorListRequest list = 4;
+    EmulatorSelectRequest select = 5;
+    EmulatorDesktopRequest desktop = 6;
+    EmulatorNavigation navigation = 7;
+    EmulatorTouch touch = 8;
+    EmulatorKey key = 9;
+    EmulatorPreviewRequest previews = 10;
+    EmulatorHostRequest host = 11;
+    EmulatorText text = 12;
+    EmulatorVideoRefreshRequest refresh_video = 13;
+  }
+}
+
+message EmulatorInstance {
+  string target_id = 1;
+  string provider = 2;
+  string name = 3;
+  string state = 4;
+  string android_version = 5;
+  string default_package = 6;
+  string last_error = 7;
+}
+
+message EmulatorInventory {
+  repeated EmulatorInstance instances = 1;
+  repeated string provider_errors = 2;
+  bool dashboard = 3;
+  repeated string capabilities = 4;
+  string operation_session_identity = 5;
+  uint64 operation_generation = 6;
+}
+
+enum EmulatorSessionState {
+  EmulatorSessionUnknown = 0;
+  EmulatorStarting = 1;
+  EmulatorStreaming = 2;
+  EmulatorDesktop = 3;
+  EmulatorFailed = 4;
+}
+
+message EmulatorSessionStatus {
+  uint64 session_id = 1;
+  string target_id = 2;
+  EmulatorSessionState state = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  string error = 6;
+  bool preview = 7;
+  string phase = 8;
+}
+
+message EmulatorResponse {
+  uint64 request_id = 1;
+  uint32 protocol_version = 2;
+  oneof union {
+    EmulatorInventory inventory = 3;
+    EmulatorSessionStatus status = 4;
+    string error = 5;
+    EmulatorPreviewState previews = 6;
+    EmulatorHostResponse host = 7;
+  }
+}
+
+message EmulatorVideoFrame {
+  uint64 session_id = 1;
+  bytes data = 2;
+  bool key = 3;
+  int64 pts = 4;
+}
+
+message VideoStreamHeartbeat {
+  uint32 display = 1;
+  uint64 sequence = 2;
+}
+
+enum ManualClipboardDirection {
+  ManualClipboardUnknown = 0;
+  ManualClipboardPhoneToHost = 1;
+  ManualClipboardHostToPhone = 2;
+}
+
+message ManualClipboardRequest {
+  string request_id = 1;
+  ManualClipboardDirection direction = 2;
+  string text = 3;
+  string target_identity = 4;
+}
+
+message ManualClipboardResponse {
+  string request_id = 1;
+  ManualClipboardDirection direction = 2;
+  bool accepted = 3;
+  bool applied = 4;
+  string text = 5;
+  string error_code = 6;
+  string error = 7;
+  string target_identity = 8;
+}
+
 message Message {
   oneof union {
     SignedId signed_id = 3;
@@ -1030,5 +1642,15 @@ message Message {
     TerminalAction terminal_action = 31;
     TerminalResponse terminal_response = 32;
     PortForwardChannel port_forward_channel = 33;
+    CodexReadRequest codex_read_request = 34;
+    CodexReadResponse codex_read_response = 35;
+    CodexControlRequest codex_control_request = 36;
+    CodexControlResponse codex_control_response = 37;
+    EmulatorRequest emulator_request = 38;
+    EmulatorResponse emulator_response = 39;
+    EmulatorVideoFrame emulator_video_frame = 40;
+    VideoStreamHeartbeat video_stream_heartbeat = 41;
+    ManualClipboardRequest manual_clipboard_request = 42;
+    ManualClipboardResponse manual_clipboard_response = 43;
   }
 }
