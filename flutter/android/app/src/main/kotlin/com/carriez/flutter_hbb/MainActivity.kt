@@ -16,9 +16,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Build
+import android.os.Environment
 import android.os.IBinder
 import android.util.Log
 import android.view.WindowManager
@@ -29,6 +31,7 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import android.util.DisplayMetrics
@@ -632,6 +635,24 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                 }
+                PUBLISH_TO_DOWNLOADS -> {
+                    val path = (call.arguments as? Map<*, *>)?.get("path") as? String
+                    val source = path?.let { canonicalExportSource(it) }
+                    if (source == null || isAppScopedRoot(source)) {
+                        result.success(mapOf("published" to 0, "failed" to 0))
+                    } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                        // Without MediaStore.Downloads the file stays in the app;
+                        // Save as / Export still work.
+                        result.success(mapOf("published" to 0, "failed" to 0))
+                    } else {
+                        thread {
+                            val (published, failed) = moveToDownloads(source)
+                            runOnUiThread {
+                                result.success(mapOf("published" to published, "failed" to failed))
+                            }
+                        }
+                    }
+                }
                 GET_VALUE -> {
                     if (call.arguments is String) {
                         if (call.arguments == KEY_IS_SUPPORT_VOICE_CALL) {
@@ -665,6 +686,75 @@ class MainActivity : FlutterActivity() {
             allowedRoots.any { root ->
                 candidate == root || candidate.path.startsWith(root.path + File.separator)
             }
+        }
+    }
+
+    private fun isAppScopedRoot(file: File): Boolean =
+        listOfNotNull(filesDir, getExternalFilesDir(null)).any {
+            runCatching { it.canonicalFile }.getOrNull() == file
+        }
+
+    // Moves a received file or folder into Download/, keeping the folder layout.
+    // Each file is deleted from app storage only after its copy is complete, so
+    // a failure leaves that file where it was.
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun moveToDownloads(source: File): Pair<Int, Int> {
+        val base = source.parentFile ?: return Pair(0, 1)
+        var published = 0
+        var failed = 0
+        val files = source.walkTopDown().filter { it.isFile }.toList()
+        for (file in files) {
+            val safe = canonicalExportSource(file.path)
+            if (safe == null || !safe.isFile) {
+                failed++
+                continue
+            }
+            val relativeDir = safe.parentFile?.relativeTo(base)?.path.orEmpty()
+            if (publishFileToDownloads(safe, relativeDir)) {
+                if (!safe.delete()) Log.w(logTag, "Saved to Downloads but could not remove app copy")
+                published++
+            } else {
+                failed++
+            }
+        }
+        if (source.isDirectory) {
+            source.walkBottomUp().filter { it.isDirectory }.forEach { dir ->
+                if (dir.listFiles()?.isEmpty() == true) dir.delete()
+            }
+        }
+        return Pair(published, failed)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun publishFileToDownloads(file: File, relativeDir: String): Boolean {
+        val subPath = relativeDir.replace(File.separatorChar, '/').trim('/')
+        val mimeType = MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(file.extension.lowercase())
+            ?: "application/octet-stream"
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, file.name)
+            put(MediaStore.Downloads.MIME_TYPE, mimeType)
+            put(
+                MediaStore.Downloads.RELATIVE_PATH,
+                if (subPath.isEmpty()) Environment.DIRECTORY_DOWNLOADS
+                else "${Environment.DIRECTORY_DOWNLOADS}/$subPath"
+            )
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val resolver = contentResolver
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: return false
+        return try {
+            val output = resolver.openOutputStream(uri) ?: throw IllegalStateException("no output stream")
+            output.use { out -> FileInputStream(file).use { it.copyTo(out) } }
+            resolver.update(uri, ContentValues().apply {
+                put(MediaStore.Downloads.IS_PENDING, 0)
+            }, null, null)
+            true
+        } catch (e: Exception) {
+            Log.e(logTag, "Failed to save to Downloads", e)
+            runCatching { resolver.delete(uri, null, null) }
+            false
         }
     }
 

@@ -60,6 +60,10 @@ typedef AddTransferJob = Future<void> Function(SessionID sessionId, int jobId,
     String path, String to, int fileNum, bool includeHidden, bool isRemote,
     String ownershipToken);
 
+/// Moves a file or folder the PC just sent to this device somewhere the user
+/// can find it (Android: the shared Downloads folder).
+typedef PublishReceivedTransfer = Future<void> Function(String localPath);
+
 const _kRemoteReadDirTimeout = Duration(seconds: 30);
 const _kRemoteSessionChangedError =
     'Remote directory read cancelled because the session changed';
@@ -83,7 +87,8 @@ class FileModel {
     getSessionID = () => parent.target!.sessionId;
     getDialogManager = () => parent.target?.dialogManager;
     fileFetcher = FileFetcher(getSessionID);
-    jobController = JobController(getSessionID, getDialogManager);
+    jobController = JobController(getSessionID, getDialogManager,
+        publishReceivedTransfer: isAndroid ? _publishToAndroidDownloads : null);
     localController = FileController(
         isLocal: true,
         getSessionID: getSessionID,
@@ -99,6 +104,23 @@ class FileModel {
         fileFetcher: fileFetcher,
         getOtherSideDirectoryData: () => localController.directoryData());
     evtLoop = FileDialogEventLoop();
+  }
+
+  // Files from the PC land in app-scoped storage first; Android then moves
+  // them into the shared Downloads folder (no storage permission needed).
+  Future<void> _publishToAndroidDownloads(String localPath) async {
+    final result = await platformFFI.invokeMethodWithResult<Map>(
+        AndroidChannel.kPublishToDownloads, {'path': localPath});
+    final published = (result?['published'] as int?) ?? 0;
+    final failed = (result?['failed'] as int?) ?? 0;
+    if (published > 0) {
+      await localController.refresh();
+    }
+    if (failed > 0) {
+      showToast(translate('Some files could not be saved to Downloads'));
+    } else if (published > 0) {
+      showToast(translate('Saved to Downloads'));
+    }
   }
 
   Future<void> onReady() async {
@@ -1126,6 +1148,7 @@ class JobController {
   final ResumeTransferJob _resumeTransferJob;
   final CancelTransferJob _cancelTransferJob;
   final AddTransferJob _addTransferJob;
+  final PublishReceivedTransfer? _publishReceivedTransfer;
   SessionID get sessionId => getSessionID();
   OverlayDialogManager? get alogManager => getDialogManager();
   int _lastTimeShowMsgbox = DateTime.now().millisecondsSinceEpoch;
@@ -1137,7 +1160,9 @@ class JobController {
     ResumeTransferJob? resumeTransferJob,
     CancelTransferJob? cancelTransferJob,
     AddTransferJob? addTransferJob,
-  })  : _pauseTransferJob = pauseTransferJob ??
+    PublishReceivedTransfer? publishReceivedTransfer,
+  })  : _publishReceivedTransfer = publishReceivedTransfer,
+        _pauseTransferJob = pauseTransferJob ??
             ((sessionId, jobId) =>
                 bind.sessionPauseJob(sessionId: sessionId, actId: jobId)),
         _resumeTransferJob = resumeTransferJob ??
@@ -1339,6 +1364,9 @@ class JobController {
       if (fileNum != null) job.fileNum = fileNum;
       if (speed != null) job.speed = speed;
       job.state = JobState.done;
+      if (job.type == JobType.transfer && job.isRemoteToLocal) {
+        _publishReceived(job.to);
+      }
     }
     jobTable.refresh();
     if (job.state == JobState.done || job.state == JobState.error) {
@@ -1349,6 +1377,14 @@ class JobController {
     } else {
       return true;
     }
+  }
+
+  void _publishReceived(String localPath) {
+    final publish = _publishReceivedTransfer;
+    if (publish == null || localPath.isEmpty) return;
+    unawaited(publish(localPath).catchError((Object e) {
+      debugPrint('Failed to publish received transfer: $e');
+    }));
   }
 
   void jobError(Map<String, dynamic> evt) {
