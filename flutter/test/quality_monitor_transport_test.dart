@@ -53,4 +53,24 @@ void main() {
 
     expect(ffi.ffiModel.reconnectGeneration, 1);
   });
+
+  test('the per-second status fills FPS, codec and chroma', () {
+    final ffi = _FakeFFI();
+    final model = QualityMonitorModel(WeakReference(ffi));
+
+    // As the io_loop sends it every second (src/flutter.rs).
+    model.updateQualityStatus({
+      'speed': '512.00kB/s',
+      'fps': '{"0":30}',
+      'delay': '',
+      'target_bitrate': '',
+      'codec_format': 'H265',
+      'chroma': '4:2:0',
+    });
+
+    expect(model.data.fps, '30');
+    expect(model.data.codecFormat, 'H265');
+    expect(model.data.chroma, '4:2:0');
+  });
 }
+

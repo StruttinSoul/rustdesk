@@ -708,28 +708,9 @@ impl InvokeUiSession for FlutterHandler {
     fn close_success(&self) {}
 
     fn update_quality_status(&self, status: QualityStatus) {
-        const NULL: String = String::new();
-        self.push_event(
-            "update_quality_status",
-            &[
-                ("speed", &status.speed.map_or(NULL, |it| it)),
-                (
-                    "fps",
-                    &serde_json::ser::to_string(&status.fps).unwrap_or(NULL.to_owned()),
-                ),
-                ("delay", &status.delay.map_or(NULL, |it| it.to_string())),
-                (
-                    "target_bitrate",
-                    &status.target_bitrate.map_or(NULL, |it| it.to_string()),
-                ),
-                (
-                    "codec_format",
-                    &status.codec_format.map_or(NULL, |it| it.to_string()),
-                ),
-                ("chroma", &status.chroma.map_or(NULL, |it| it.to_string())),
-            ],
-            &[],
-        );
+        let fields = quality_status_fields(status);
+        let fields: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.push_event("update_quality_status", &fields, &[]);
     }
 
     fn update_stream_liveness(&self, display: usize, sequence: u64) {
@@ -2665,5 +2646,70 @@ pub(super) mod async_tasks {
             super::APP_TYPE_MAIN,
             serde_json::ser::to_string(&data).unwrap_or("".to_owned()),
         );
+    }
+}
+
+/// Only the metrics a status actually carries. The per-second video status and
+/// the host's delay report are sent separately, and a blank field would make
+/// the app drop the value the other one last reported.
+fn quality_status_fields(status: QualityStatus) -> Vec<(&'static str, String)> {
+    let mut fields = Vec::new();
+    if let Some(speed) = status.speed {
+        fields.push(("speed", speed));
+    }
+    if !status.fps.is_empty() {
+        if let Ok(fps) = serde_json::ser::to_string(&status.fps) {
+            fields.push(("fps", fps));
+        }
+    }
+    if let Some(delay) = status.delay {
+        fields.push(("delay", delay.to_string()));
+    }
+    if let Some(bitrate) = status.target_bitrate {
+        fields.push(("target_bitrate", bitrate.to_string()));
+    }
+    if let Some(codec) = status.codec_format {
+        fields.push(("codec_format", codec.to_string()));
+    }
+    if let Some(chroma) = status.chroma {
+        fields.push(("chroma", chroma));
+    }
+    fields
+}
+
+#[cfg(test)]
+mod quality_status_tests {
+    use super::*;
+    use scrap::CodecFormat;
+    use std::collections::HashMap;
+
+    fn keys(fields: &[(&'static str, String)]) -> Vec<&'static str> {
+        fields.iter().map(|(k, _)| *k).collect()
+    }
+
+    // The per-second video status and the host's delay report arrive separately;
+    // neither may blank what only the other one carries.
+    #[test]
+    fn delay_report_leaves_video_metrics_alone() {
+        let fields = quality_status_fields(QualityStatus {
+            delay: Some(12),
+            target_bitrate: Some(4000),
+            ..Default::default()
+        });
+        assert_eq!(keys(&fields), vec!["delay", "target_bitrate"]);
+    }
+
+    #[test]
+    fn video_status_leaves_delay_alone() {
+        let fields = quality_status_fields(QualityStatus {
+            speed: Some("512.00kB/s".to_owned()),
+            fps: HashMap::from([(0, 30)]),
+            codec_format: Some(CodecFormat::H265),
+            chroma: Some("4:2:0".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(keys(&fields), vec!["speed", "fps", "codec_format", "chroma"]);
+        assert!(fields.contains(&("fps", r#"{"0":30}"#.to_owned())));
+        assert!(fields.contains(&("codec_format", "H265".to_owned())));
     }
 }
