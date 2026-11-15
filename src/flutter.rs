@@ -1257,7 +1257,7 @@ impl InvokeUiSession for FlutterHandler {
         match response.union {
             Some(emulator_response::Union::Inventory(inventory)) => {
                 event.push(("type", json!("inventory")));
-                event.push(("instances", json!(inventory.instances.into_iter().map(|instance| json!({"target_id": instance.target_id, "provider": instance.provider, "name": instance.name, "state": instance.state, "android_version": instance.android_version, "default_package": instance.default_package, "last_error": instance.last_error})).collect::<Vec<_>>())));
+                event.push(("instances", json!(inventory.instances.into_iter().map(|instance| json!({"target_id": instance.target_id, "provider": instance.provider, "name": instance.name, "state": instance.state, "android_version": instance.android_version, "default_package": instance.default_package, "last_error": instance.last_error, "progress_percent": instance.progress_percent, "window_visible": instance.window_visible})).collect::<Vec<_>>())));
                 event.push(("provider_errors", json!(inventory.provider_errors)));
                 event.push(("dashboard", json!(inventory.dashboard)));
                 event.push(("capabilities", json!(inventory.capabilities)));

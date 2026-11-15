@@ -98,6 +98,20 @@ pub fn inventory(
             last_error: local.target.last_error.unwrap_or_default(),
             ..Default::default()
             };
+            if let Some(percent) = local.target.progress_percent {
+                // An emulator still being copied: nothing but its progress.
+                instance.state = "cloning".to_owned();
+                instance.progress_percent = percent;
+                instance.last_error.clear();
+            } else if instance.provider == "avd"
+                && !matches!(
+                    local.target.state,
+                    EmulatorState::Stopped | EmulatorState::Unknown
+                )
+            {
+                instance.window_visible =
+                    super::avd_launch_windows::window_visible(&local.target.provider_instance_id);
+            }
             super::shutdown_windows::annotate(&mut instance);
             instance
         })
@@ -213,6 +227,9 @@ fn adb_executable() -> ResultType<PathBuf> {
         std::env::var_os("ANDROID_HOME"),
         std::env::var_os("LOCALAPPDATA")
             .map(|path| PathBuf::from(path).join("Android/Sdk").into_os_string()),
+        // The SYSTEM service's own LOCALAPPDATA is not the signed-in user's.
+        crate::platform::get_active_user_home()
+            .map(|home| home.join(r"AppData\Local\Android\Sdk").into_os_string()),
     ]
     .into_iter()
     .flatten()

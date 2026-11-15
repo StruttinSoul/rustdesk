@@ -172,6 +172,8 @@ pub fn core_main() -> Option<Vec<String>> {
     if crate::server::emulator::shutdown_windows::handle_helper_args(&args) { return None; }
     #[cfg(windows)]
     if crate::server::emulator::shell_windows::handle_helper_args(&args) { return None; }
+    #[cfg(windows)]
+    if crate::server::emulator::avd_launch_windows::handle_helper_args(&args) { return None; }
 
     // linux uni (url) go here.
     #[cfg(all(target_os = "linux", feature = "flutter"))]

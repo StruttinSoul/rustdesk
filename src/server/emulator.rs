@@ -8,6 +8,8 @@ pub mod avd;
 #[cfg(windows)]
 pub mod avd_files;
 #[cfg(windows)]
+pub mod avd_launch_windows;
+#[cfg(windows)]
 pub mod bluestacks;
 #[cfg(windows)]
 pub mod boot_windows;
@@ -174,6 +176,8 @@ pub struct EmulatorTarget {
     pub capabilities: EmulatorCapabilities,
     pub thumbnail_state: ThumbnailState,
     pub last_error: Option<String>,
+    /// Set while the instance is being created (an emulator copy); 0-100.
+    pub progress_percent: Option<u32>,
 }
 
 impl EmulatorTarget {
@@ -198,6 +202,7 @@ impl EmulatorTarget {
             capabilities: EmulatorCapabilities::default(),
             thumbnail_state: ThumbnailState::Unavailable,
             last_error: None,
+            progress_percent: None,
         }
     }
 }

@@ -1166,6 +1166,8 @@ message EmulatorInstance {
   string android_version = 5;
   string default_package = 6;
   string last_error = 7;
+  uint32 progress_percent = 8;
+  bool window_visible = 9;
 }
 
 message EmulatorInventory {
