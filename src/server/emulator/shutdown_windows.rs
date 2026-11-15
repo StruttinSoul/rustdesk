@@ -66,7 +66,7 @@ fn jobs() -> &'static Mutex<BTreeMap<String, Arc<Mutex<Job>>>> {
     JOBS.get_or_init(Default::default)
 }
 
-/// Stops a managed Android emulator through its provider (blocking).
+/// Stops a managed Android emulator through its provider on a background thread.
 fn stop_avd(target: &str, name: &str) -> ResultType<String> {
     let provider = AvdProvider::detect()?
         .ok_or_else(|| hbb_common::anyhow::anyhow!("Aperture's emulator folder does not exist"))?;
@@ -78,9 +78,51 @@ fn stop_avd(target: &str, name: &str) -> ResultType<String> {
     if instance.state == EmulatorState::Stopped {
         return Ok("Emulator is already stopped.".to_owned());
     }
-    provider.stop(&instance)?;
-    log::info!("Stopped managed emulator {name} on request");
-    Ok("Emulator stopped.".to_owned())
+    let mut all = jobs()
+        .lock()
+        .map_err(|_| hbb_common::anyhow::anyhow!("Shutdown state is unavailable"))?;
+    all.retain(|_, job| {
+        job.lock()
+            .map(|j| matches!(j.state, State::Pending) || j.updated.elapsed().as_secs() < 120)
+            .unwrap_or(true)
+    });
+    if all
+        .get(target)
+        .map(|job| job.lock().map(|j| matches!(j.state, State::Pending)).unwrap_or(true))
+        .unwrap_or(false)
+    {
+        bail!("This emulator is already shutting down")
+    }
+    if all.len() >= 64 && !all.contains_key(target) {
+        bail!("Too many emulator shutdown requests")
+    }
+    let job = Arc::new(Mutex::new(Job {
+        state: State::Pending,
+        updated: Instant::now(),
+    }));
+    let worker = job.clone();
+    let worker_name = name.to_owned();
+    // The stop waits up to ~24 s for the emulator; the host worker answers now.
+    thread::Builder::new()
+        .name("avd-shutdown".into())
+        .spawn(move || {
+            let result = provider.stop(&instance);
+            match &result {
+                Ok(()) => log::info!("Stopped managed emulator {worker_name} on request"),
+                Err(error) => {
+                    log::warn!("Stopping managed emulator {worker_name} failed: {error}")
+                }
+            }
+            if let Ok(mut state) = worker.lock() {
+                state.state = match result {
+                    Ok(()) => State::Done,
+                    Err(error) => State::Failed(error.to_string()),
+                };
+                state.updated = Instant::now();
+            }
+        })?;
+    all.insert(target.to_owned(), job);
+    Ok(format!("Shutdown requested for {}.", name.replace('_', " ")))
 }
 
 pub fn request(target: &str) -> ResultType<String> {

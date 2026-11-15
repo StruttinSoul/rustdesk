@@ -13,13 +13,26 @@ pub fn valid_shutdown_target(target: &str) -> bool {
         id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')).unwrap_or(false)
 }
 /// A managed Android emulator name: 1-64 of `[A-Za-z0-9._-]`, not starting with `.`.
+/// Plain names only: no path separators, drive colons, dots-first names or
+/// Windows device names (which would address a device instead of a file).
+/// The one definition; `avd_files::valid_avd_name` calls it.
 pub fn valid_avd_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && !name.starts_with('.')
-        && name
+    if name.is_empty()
+        || name.len() > 64
+        || name.starts_with('.')
+        || !name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return false;
+    }
+    // Windows treats "CON.txt" like "CON": judge the part before the first dot.
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .map_or(false, |n| matches!(n.as_bytes(), [b'1'..=b'9']))
+    };
+    !(matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT"))
 }
 /// Whether a host management request names a valid emulator (`avd:<name>`) and,
 /// where the action takes one, a valid new name.
@@ -731,6 +744,15 @@ mod tests {
         assert!(authorize_host_operation(&wrong, "scope-a", 4).is_err());
         let invalid = avd_host_request("avd_create", "", ".hidden", "emulator:avd:.hidden");
         assert!(authorize_request(&invalid, true, true, None).is_err());
+        for bad in ["CON", "nul", "COM1", "Aux.txt", "a:b", "a\\b"] {
+            let create = avd_host_request("avd_create", "", bad, &format!("emulator:avd:{bad}"));
+            assert!(authorize_request(&create, true, true, None).is_err(), "create {bad}");
+            let component = format!("avd:{bad}");
+            let delete = avd_host_request("avd_delete", &component, "", &format!("emulator:{component}"));
+            assert!(authorize_request(&delete, true, true, None).is_err(), "delete {bad}");
+            let clone = avd_host_request("avd_clone", "avd:Maple_1", bad, "emulator:avd:Maple_1");
+            assert!(authorize_request(&clone, true, true, None).is_err(), "clone to {bad}");
+        }
     }
 
     #[test]
@@ -749,6 +771,10 @@ mod tests {
         assert!(!valid_shutdown_target("avd:../x"));
         assert!(!valid_shutdown_target("avd:"));
         assert!(!valid_shutdown_target("avd:.hidden"));
+        for bad in ["avd:CON", "avd:nul", "avd:COM1", "avd:Aux.txt", "avd:a:b", "avd:a\\b"] {
+            assert!(!valid_shutdown_target(bad), "{bad}");
+        }
+        assert!(valid_shutdown_target("avd:COM10"));
     }
 
     #[test]

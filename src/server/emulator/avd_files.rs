@@ -16,12 +16,10 @@ use std::{
 
 const OPTION_AVD_HOME: &str = "aperture-avd-home";
 const DEFAULT_ROOT: &str = r"D:\Aperture\Emulators";
-const MAX_AVD_NAME_LEN: usize = 64;
 const CLONE_MARKER: &str = "aperture-clone.json";
 const CLONE_HEADROOM_BYTES: u64 = 4 << 30;
 const COPY_CHUNK_BYTES: usize = 8 << 20;
 const MARKER_INTERVAL: Duration = Duration::from_millis(500);
-const RESERVED_NAMES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
 
 /// The trial AVD's `config.ini` with the values new emulators get. `AvdId` and
 /// `avd.ini.displayname` are filled from the name when the AVD is written.
@@ -169,22 +167,7 @@ PlayStore.enabled=true
 /// Plain AVD names only: no path separators, drive colons, dots-first names or
 /// Windows device names (which would address a device instead of a file).
 pub fn valid_avd_name(name: &str) -> bool {
-    if name.is_empty()
-        || name.len() > MAX_AVD_NAME_LEN
-        || name.starts_with('.')
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
-        return false;
-    }
-    // Windows treats "CON.txt" like "CON": judge the part before the first dot.
-    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
-    let numbered = |prefix: &str| {
-        stem.strip_prefix(prefix)
-            .map_or(false, |n| matches!(n.as_bytes(), [b'1'..=b'9']))
-    };
-    !(RESERVED_NAMES.contains(&stem.as_str()) || numbered("COM") || numbered("LPT"))
+    super::remote::valid_avd_name(name)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

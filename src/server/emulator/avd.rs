@@ -40,6 +40,11 @@ type StartReservation = (Instant, String, u32);
 /// Host-wide: starts are serialised and recent starts reserve their RAM.
 static START_LOCK: Mutex<Vec<StartReservation>> = Mutex::new(Vec::new());
 
+/// Lower-cased names of AVDs a clone in progress reads or writes. Only changed
+/// while the start lock is held to check, so a start or a management action
+/// never slips in between a clone's checks and its marker file.
+static CLONING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
 /// Online `emulator-N` serials from `adb devices` output.
 fn parse_emulator_serials(output: &str) -> Vec<String> {
     output
@@ -210,7 +215,24 @@ pub struct AvdProvider {
     home: AvdHome,
     system: Arc<dyn AvdSystem>,
     starts: &'static Mutex<Vec<StartReservation>>,
+    cloning: &'static Mutex<BTreeSet<String>>,
     kill_grace: Duration,
+}
+
+/// Holds the source and destination of a clone against start, rename, delete
+/// and create until dropped (when the copy ends, however it ends).
+pub struct CloneReservation {
+    set: &'static Mutex<BTreeSet<String>>,
+    names: [String; 2],
+}
+
+impl Drop for CloneReservation {
+    fn drop(&mut self) {
+        let mut set = self.set.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for name in &self.names {
+            set.remove(name);
+        }
+    }
 }
 
 impl AvdProvider {
@@ -225,6 +247,7 @@ impl AvdProvider {
             home: AvdHome::new(root),
             system: Arc::new(HostSystem),
             starts: &START_LOCK,
+            cloning: &CLONING,
             kill_grace: KILL_GRACE,
         }))
     }
@@ -236,6 +259,7 @@ impl AvdProvider {
             home: AvdHome::new(AvdHome::default_root()),
             system: Arc::new(HostSystem),
             starts: &START_LOCK,
+            cloning: &CLONING,
             kill_grace: KILL_GRACE,
         }
     }
@@ -246,6 +270,7 @@ impl AvdProvider {
             home,
             system,
             starts: Box::leak(Box::new(Mutex::new(Vec::new()))),
+            cloning: Box::leak(Box::new(Mutex::new(BTreeSet::new()))),
             kill_grace: Duration::from_millis(50),
         }
     }
@@ -254,12 +279,29 @@ impl AvdProvider {
         &self.home
     }
 
-    /// Fails unless `name` exists and nothing uses it: not running, not being
-    /// copied, not the source of a copy in progress.
-    pub fn ensure_idle(&self, name: &str) -> ResultType<()> {
+    fn cloning_names(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.cloning.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn check_not_cloning(&self, name: &str) -> ResultType<()> {
+        if self.cloning_names().contains(&name.to_ascii_lowercase()) {
+            bail!("{name} is being copied; wait for the copy in progress to finish")
+        }
+        Ok(())
+    }
+
+    /// Fails unless `name` exists and nothing uses it: not running, not just
+    /// started (qemu may not be listed yet), not being copied, not a clone source.
+    fn check_idle(&self, starts: &[StartReservation], name: &str) -> ResultType<()> {
         let (instance, others) = self.instance(name)?;
         if instance.running {
             bail!("{name} is running; stop it first")
+        }
+        if starts
+            .iter()
+            .any(|(at, started, _)| started == name && at.elapsed() < START_RESERVATION)
+        {
+            bail!("{name} was just started and is running; stop it first")
         }
         if instance.entry.clone.is_some()
             || others
@@ -268,7 +310,42 @@ impl AvdProvider {
         {
             bail!("{name} is being copied; wait for the copy in progress to finish")
         }
-        Ok(())
+        self.check_not_cloning(name)
+    }
+
+    /// Runs a create, rename or delete while no start can begin and nothing
+    /// uses `name` (which must be idle) or `other` (not being copied).
+    pub fn exclusive<T>(
+        &self,
+        name: Option<&str>,
+        other: Option<&str>,
+        action: impl FnOnce() -> ResultType<T>,
+    ) -> ResultType<T> {
+        let starts = self.reservations();
+        if let Some(name) = name {
+            self.check_idle(&starts, name)?;
+        }
+        if let Some(other) = other {
+            self.check_not_cloning(other)?;
+        }
+        action()
+    }
+
+    /// Reserves `source` and `to` for a clone about to run. Refused unless
+    /// `source` is idle; the reservation lasts until the result is dropped.
+    pub fn begin_clone(&self, source: &str, to: &str) -> ResultType<CloneReservation> {
+        let starts = self.reservations();
+        self.check_idle(&starts, source)?;
+        self.check_not_cloning(to)?;
+        if self.home.list()?.iter().any(|entry| entry.name.eq_ignore_ascii_case(to)) {
+            bail!("An emulator named {to} already exists")
+        }
+        let names = [source.to_ascii_lowercase(), to.to_ascii_lowercase()];
+        self.cloning_names().extend(names.iter().cloned());
+        Ok(CloneReservation {
+            set: self.cloning,
+            names,
+        })
     }
 
     /// Shows or hides the window of a running emulator on the PC.
@@ -419,6 +496,7 @@ impl EmulatorProvider for AvdProvider {
         if instance.running {
             bail!("{name} is already running")
         }
+        self.check_not_cloning(name)?;
         starts.retain(|(at, _, _)| at.elapsed() < START_RESERVATION);
         let reserved = starts.iter().map(|(_, _, mb)| u64::from(*mb)).sum();
         let ram_mb = match instance.entry.ram_mb {

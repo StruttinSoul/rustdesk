@@ -307,15 +307,17 @@ fn avd_create(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider)
     if !super::avd_files::valid_avd_name(name) {
         bail!("Invalid emulator name")
     }
-    let free = provider.free_disk_bytes()?;
-    if free < AVD_CREATE_MIN_FREE_BYTES {
-        bail!(
-            "Not enough free space on the PC to create an emulator: {} GB needed, {} GB free",
-            gigabytes(AVD_CREATE_MIN_FREE_BYTES),
-            free >> 30
-        )
-    }
-    provider.home().create(name, super::avd_files::NEW_AVD_TEMPLATE)?;
+    provider.exclusive(None, Some(name), || {
+        let free = provider.free_disk_bytes()?;
+        if free < AVD_CREATE_MIN_FREE_BYTES {
+            bail!(
+                "Not enough free space on the PC to create an emulator: {} GB needed, {} GB free",
+                gigabytes(AVD_CREATE_MIN_FREE_BYTES),
+                free >> 30
+            )
+        }
+        provider.home().create(name, super::avd_files::NEW_AVD_TEMPLATE)
+    })?;
     hbb_common::log::info!("Created managed emulator {name}");
     Ok(format!("Created {name}"))
 }
@@ -326,15 +328,8 @@ fn avd_clone(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) 
     if !super::avd_files::valid_avd_name(target) {
         bail!("Invalid emulator name")
     }
-    provider.ensure_idle(source)?;
-    if provider
-        .home()
-        .list()?
-        .iter()
-        .any(|entry| entry.name.eq_ignore_ascii_case(target))
-    {
-        bail!("An emulator named {target} already exists")
-    }
+    // Held until the copy ends: start, rename and delete of both names are refused.
+    let reservation = provider.begin_clone(source, target)?;
     let required = provider.home().required_free_bytes_for_clone(source)?;
     let free = provider.free_disk_bytes()?;
     if free < required {
@@ -349,6 +344,7 @@ fn avd_clone(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) 
     thread::Builder::new()
         .name("aperture-avd-clone".to_owned())
         .spawn(move || {
+            let _reservation = reservation;
             // Progress is read from the clone's marker file by the inventory.
             match home.clone_avd(&from, &to, std::process::id(), |_, _| {}) {
                 Ok(()) => hbb_common::log::info!("Copied managed emulator {from} to {to}"),
@@ -373,16 +369,16 @@ fn avd_value(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) 
             Err(error) => avd_failure("avd_clone_failed", error),
         },
         "avd_rename" => match avd_name(&request.component).and_then(|name| {
-            provider.ensure_idle(name)?;
-            provider.home().rename(name, &request.new_name)?;
+            provider.exclusive(Some(name), Some(&request.new_name), || {
+                provider.home().rename(name, &request.new_name)
+            })?;
             Ok(format!("Renamed {name} to {}", request.new_name))
         }) {
             Ok(message) => ok(message),
             Err(error) => avd_failure("avd_rename_failed", error),
         },
         "avd_delete" => match avd_name(&request.component).and_then(|name| {
-            provider.ensure_idle(name)?;
-            provider.home().delete(name)?;
+            provider.exclusive(Some(name), None, || provider.home().delete(name))?;
             Ok(format!("Deleted {name}"))
         }) {
             Ok(message) => ok(message),
@@ -878,6 +874,64 @@ mod tests {
         let value = avd_value(&avd_request("avd_delete", "avd:Maple_1", ""), &avd_provider(&root, &idle));
         assert_eq!(value["ok"], true, "{value}");
         assert!(!root.0.join("Maple_1.avd").exists());
+    }
+
+    fn avd_target(name: &str) -> super::super::EmulatorTarget {
+        super::super::EmulatorTarget::new(
+            super::super::ProviderId::new("avd"),
+            format!("avd:{name}"),
+            name,
+            name,
+        )
+    }
+
+    #[test]
+    fn management_is_refused_right_after_a_start() {
+        use super::super::{avd::tests::{create, temp_root, FakeSystem}, EmulatorProvider};
+        let root = temp_root("host-after-start");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        let provider = avd_provider(&root, &system);
+        // Launched, but qemu is not in the process list yet.
+        provider.start(&avd_target("Maple_1")).unwrap();
+        for request in [
+            avd_request("avd_delete", "avd:Maple_1", ""),
+            avd_request("avd_rename", "avd:Maple_1", "Maple_9"),
+            avd_request("avd_clone", "avd:Maple_1", "Maple_9"),
+        ] {
+            let value = avd_value(&request, &provider);
+            assert_eq!(value["ok"], false, "{value}");
+        }
+        assert!(root.0.join("Maple_1.avd").is_dir());
+        assert!(!root.0.join("Maple_9.avd").exists());
+    }
+
+    #[test]
+    fn a_clone_in_progress_reserves_source_and_destination() {
+        use super::super::{avd::tests::{create, temp_root, FakeSystem}, EmulatorProvider};
+        let root = temp_root("host-clone-reserve");
+        create(&root, "Maple_1");
+        create(&root, "Maple_3");
+        let system = FakeSystem::new(64_000);
+        let provider = avd_provider(&root, &system);
+        let guard = provider.begin_clone("Maple_1", "Maple_2").unwrap();
+        assert!(provider.start(&avd_target("Maple_1")).is_err());
+        assert!(provider.begin_clone("Maple_1", "Maple_4").is_err());
+        for request in [
+            avd_request("avd_rename", "avd:Maple_1", "Maple_9"),
+            avd_request("avd_delete", "avd:Maple_1", ""),
+            avd_request("avd_rename", "avd:Maple_3", "Maple_2"),
+            avd_request("avd_create", "", "Maple_2"),
+        ] {
+            let value = avd_value(&request, &provider);
+            assert_eq!(value["ok"], false, "{value}");
+            assert!(value["error"].as_str().unwrap().contains("copied"), "{value}");
+        }
+        assert!(root.0.join("Maple_1.avd").is_dir());
+        drop(guard);
+        provider.start(&avd_target("Maple_1")).unwrap();
+        let value = avd_value(&avd_request("avd_delete", "avd:Maple_3", ""), &provider);
+        assert_eq!(value["ok"], true, "{value}");
     }
 
     #[test]
