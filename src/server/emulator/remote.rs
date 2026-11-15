@@ -6,19 +6,37 @@ use std::collections::VecDeque;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub fn valid_shutdown_target(target: &str) -> bool {
+    if let Some(name) = target.strip_prefix("avd:") {
+        return valid_avd_name(name);
+    }
     target.strip_prefix("bluestacks:").map(|id| !id.is_empty() && id.len() <= 64 &&
         id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')).unwrap_or(false)
+}
+/// A managed Android emulator name: 1-64 of `[A-Za-z0-9._-]`, not starting with `.`.
+pub fn valid_avd_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+/// Whether a host management request names a valid emulator (`avd:<name>`) and,
+/// where the action takes one, a valid new name.
+pub fn valid_avd_management(host: &base::message_proto::EmulatorHostRequest) -> bool {
+    let component = host.component.strip_prefix("avd:").map(valid_avd_name);
+    match host.action.as_str() {
+        "avd_create" => host.component.is_empty() && valid_avd_name(&host.new_name),
+        "avd_clone" | "avd_rename" => component == Some(true) && valid_avd_name(&host.new_name),
+        "avd_delete" | "avd_window" => component == Some(true),
+        _ => false,
+    }
 }
 /// Dashboard previews: a BlueStacks instance, or a running Google Android
 /// Emulator (`avd:<AVD name>`).
 pub fn valid_preview_target(id: &str) -> bool {
     if let Some(name) = id.strip_prefix("avd:") {
-        return !name.is_empty()
-            && name.len() <= 64
-            && !name.starts_with('.')
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+        return valid_avd_name(name);
     }
     id.starts_with("bluestacks:") && id.len() > 11 && id.len() <= 128
 }
@@ -168,6 +186,8 @@ pub fn authorize_request(
                 Ok(())
             }
             "emulator_shutdown" if control && valid_shutdown_target(&host.component) => Ok(()),
+            "avd_create" | "avd_clone" | "avd_rename" | "avd_delete" | "avd_window"
+                if control && valid_avd_management(host) => Ok(()),
             "recover" if control && host.component == "bluestacks_adb" => Ok(()),
             "window_focus"
                 if control
@@ -202,6 +222,11 @@ pub fn authorize_request(
                     && host.gateway_expected_process_identity.len() <= 128 => Ok(()),
             "process_end"
             | "emulator_shutdown"
+            | "avd_create"
+            | "avd_clone"
+            | "avd_rename"
+            | "avd_delete"
+            | "avd_window"
             | "recover"
             | "window_focus"
             | "phone_workspace_begin"
@@ -301,6 +326,11 @@ pub fn authorize_host_operation(
         host.action.as_str(),
         "process_end"
             | "emulator_shutdown"
+            | "avd_create"
+            | "avd_clone"
+            | "avd_rename"
+            | "avd_delete"
+            | "avd_window"
             | "recover"
             | "window_focus"
             | "phone_workspace_begin"
@@ -328,6 +358,10 @@ pub fn authorize_host_operation(
     let expected_target = match host.action.as_str() {
         "process_end" => format!("process:{}:{}", host.pid, host.process_creation_time_100ns),
         "emulator_shutdown" if valid_shutdown_target(&host.component) => format!("emulator:{}", host.component),
+        "avd_create" if valid_avd_management(host) => format!("emulator:avd:{}", host.new_name),
+        "avd_clone" | "avd_rename" | "avd_delete" | "avd_window" if valid_avd_management(host) => {
+            format!("emulator:{}", host.component)
+        }
         "recover" => format!("component:{}", host.component),
         "window_focus" => format!("window:{}:{}", host.window_id, host.desktop_generation),
         "phone_workspace_begin" => format!(
@@ -661,6 +695,60 @@ mod tests {
         for target in ["bluestacks:", "ldplayer:0", "windows:0", "bluestacks:../x", "bluestacks:a:b"] {
             assert!(!valid_shutdown_target(target));
         }
+    }
+
+    fn avd_host_request(action: &str, component: &str, new_name: &str, target: &str) -> EmulatorRequest {
+        let mut request = EmulatorRequest { protocol_version: PROTOCOL_VERSION, ..Default::default() };
+        request.set_host(EmulatorHostRequest { action: action.into(), component: component.into(),
+            new_name: new_name.into(), operation_id: "op-1".into(), session_identity: "scope-a".into(),
+            target_identity: target.into(), session_generation: 4, ..Default::default() });
+        request
+    }
+
+    #[test]
+    fn avd_management_needs_control_and_valid_names() {
+        let clone = avd_host_request("avd_clone", "avd:Maple_1", "Maple_2", "emulator:avd:Maple_1");
+        assert!(authorize_request(&clone, true, true, None).is_ok());
+        assert!(authorize_request(&clone, true, false, None).is_err());
+        assert!(authorize_host_operation(&clone, "scope-a", 4).is_ok());
+        let bad_name = avd_host_request("avd_clone", "avd:Maple_1", "../x", "emulator:avd:Maple_1");
+        assert!(authorize_request(&bad_name, true, true, None).is_err());
+        let other_provider = avd_host_request("avd_clone", "bluestacks:Tiramisu64", "Maple_2", "emulator:bluestacks:Tiramisu64");
+        assert!(authorize_request(&other_provider, true, true, None).is_err());
+        let rename = avd_host_request("avd_rename", "avd:Maple_1", "Maple_3", "emulator:avd:Maple_1");
+        assert!(authorize_request(&rename, true, true, None).is_ok());
+        assert!(authorize_request(&rename, true, false, None).is_err());
+        let delete = avd_host_request("avd_delete", "avd:Maple_1", "", "emulator:avd:Maple_1");
+        assert!(authorize_request(&delete, true, true, None).is_ok());
+        assert!(authorize_request(&delete, true, false, None).is_err());
+        let forged = avd_host_request("avd_delete", "avd:Maple_1", "", "emulator:avd:Other");
+        assert!(authorize_host_operation(&forged, "scope-a", 4).is_err());
+        let create = avd_host_request("avd_create", "", "Maple_2", "emulator:avd:Maple_2");
+        assert!(authorize_request(&create, true, true, None).is_ok());
+        assert!(authorize_request(&create, true, false, None).is_err());
+        assert!(authorize_host_operation(&create, "scope-a", 4).is_ok());
+        let wrong = avd_host_request("avd_create", "", "Maple_2", "emulator:avd:Maple_1");
+        assert!(authorize_host_operation(&wrong, "scope-a", 4).is_err());
+        let invalid = avd_host_request("avd_create", "", ".hidden", "emulator:avd:.hidden");
+        assert!(authorize_request(&invalid, true, true, None).is_err());
+    }
+
+    #[test]
+    fn avd_window_needs_control_and_a_running_target() {
+        let window = avd_host_request("avd_window", "avd:Maple_1", "", "emulator:avd:Maple_1");
+        assert!(authorize_request(&window, true, true, None).is_ok());
+        assert!(authorize_request(&window, true, false, None).is_err());
+        assert!(authorize_host_operation(&window, "scope-a", 4).is_ok());
+        let bad = avd_host_request("avd_window", "avd:../x", "", "emulator:avd:../x");
+        assert!(authorize_request(&bad, true, true, None).is_err());
+    }
+
+    #[test]
+    fn shutdown_accepts_android_emulator_targets() {
+        assert!(valid_shutdown_target("avd:Maple_1"));
+        assert!(!valid_shutdown_target("avd:../x"));
+        assert!(!valid_shutdown_target("avd:"));
+        assert!(!valid_shutdown_target("avd:.hidden"));
     }
 
     #[test]

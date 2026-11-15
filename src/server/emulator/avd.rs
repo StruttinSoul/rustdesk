@@ -229,8 +229,55 @@ impl AvdProvider {
         }))
     }
 
+    /// The provider for management (create, clone, rename, delete) even when
+    /// the folder does not exist yet; creating the first emulator makes it.
+    pub fn for_management() -> Self {
+        Self {
+            home: AvdHome::new(AvdHome::default_root()),
+            system: Arc::new(HostSystem),
+            starts: &START_LOCK,
+            kill_grace: KILL_GRACE,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(home: AvdHome, system: Arc<dyn AvdSystem>) -> Self {
+        Self {
+            home,
+            system,
+            starts: Box::leak(Box::new(Mutex::new(Vec::new()))),
+            kill_grace: Duration::from_millis(50),
+        }
+    }
+
     pub fn home(&self) -> &AvdHome {
         &self.home
+    }
+
+    /// Fails unless `name` exists and nothing uses it: not running, not being
+    /// copied, not the source of a copy in progress.
+    pub fn ensure_idle(&self, name: &str) -> ResultType<()> {
+        let (instance, others) = self.instance(name)?;
+        if instance.running {
+            bail!("{name} is running; stop it first")
+        }
+        if instance.entry.clone.is_some()
+            || others
+                .iter()
+                .any(|other| other.entry.clone.as_ref().map_or(false, |c| c.source == name))
+        {
+            bail!("{name} is being copied; wait for the copy in progress to finish")
+        }
+        Ok(())
+    }
+
+    /// Shows or hides the window of a running emulator on the PC.
+    pub fn set_window_visible(&self, name: &str, visible: bool) -> ResultType<()> {
+        let (instance, _) = self.instance(name)?;
+        if !instance.running {
+            bail!("{name} is not running")
+        }
+        avd_launch_windows::set_window_visible(name, visible)
     }
 
     pub fn free_disk_bytes(&self) -> ResultType<u64> {
@@ -430,7 +477,7 @@ impl EmulatorProvider for AvdProvider {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::server::emulator::avd_files::NEW_AVD_TEMPLATE;
     use std::path::PathBuf;
@@ -506,7 +553,7 @@ mod tests {
         assert!(!memory_allows(9000, 4096, 4096));
     }
 
-    struct FakeSystem {
+    pub(crate) struct FakeSystem {
         processes: Mutex<Vec<(String, Vec<String>)>>,
         guests: Mutex<Vec<(String, Probe)>>,
         memory_mb: u64,
@@ -515,10 +562,11 @@ mod tests {
         powered_off: Mutex<Vec<String>>,
         /// `emu kill` reports success but the emulator keeps running.
         kill_ignored: bool,
+        free_bytes: Mutex<u64>,
     }
 
     impl FakeSystem {
-        fn new(memory_mb: u64) -> Arc<Self> {
+        pub(crate) fn new(memory_mb: u64) -> Arc<Self> {
             Arc::new(Self {
                 processes: Mutex::new(Vec::new()),
                 guests: Mutex::new(Vec::new()),
@@ -527,6 +575,7 @@ mod tests {
                 killed: Mutex::new(Vec::new()),
                 powered_off: Mutex::new(Vec::new()),
                 kill_ignored: false,
+                free_bytes: Mutex::new(u64::MAX),
             })
         }
 
@@ -534,6 +583,10 @@ mod tests {
             let mut system = Arc::try_unwrap(Self::new(memory_mb)).ok().unwrap();
             system.kill_ignored = true;
             Arc::new(system)
+        }
+
+        pub(crate) fn set_free_bytes(&self, bytes: u64) {
+            *self.free_bytes.lock().unwrap() = bytes;
         }
 
         fn end(&self, serial: &str) {
@@ -550,7 +603,7 @@ mod tests {
                 .retain(|(_, cmd)| !names.iter().any(|name| cmd.contains(name)));
         }
 
-        fn run(&self, name: &str, serial: Option<&str>) {
+        pub(crate) fn run(&self, name: &str, serial: Option<&str>) {
             self.processes.lock().unwrap().push((
                 QEMU_PROCESS.to_owned(),
                 vec!["qemu".into(), "-avd".into(), name.into()],
@@ -579,7 +632,7 @@ mod tests {
             self.memory_mb
         }
         fn free_disk_bytes(&self, _path: &Path) -> ResultType<u64> {
-            Ok(u64::MAX)
+            Ok(*self.free_bytes.lock().unwrap())
         }
         fn launch(&self, name: &str) -> ResultType<()> {
             self.launched.lock().unwrap().push(name.to_owned());
@@ -599,7 +652,7 @@ mod tests {
         }
     }
 
-    struct TempRoot(PathBuf);
+    pub(crate) struct TempRoot(pub(crate) PathBuf);
 
     impl Drop for TempRoot {
         fn drop(&mut self) {
@@ -607,7 +660,7 @@ mod tests {
         }
     }
 
-    fn temp_root(suffix: &str) -> TempRoot {
+    pub(crate) fn temp_root(suffix: &str) -> TempRoot {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -618,15 +671,10 @@ mod tests {
     }
 
     fn provider(root: &TempRoot, system: &Arc<FakeSystem>) -> AvdProvider {
-        AvdProvider {
-            home: AvdHome::new(root.0.clone()),
-            system: system.clone(),
-            starts: Box::leak(Box::new(Mutex::new(Vec::new()))),
-            kill_grace: Duration::from_millis(50),
-        }
+        AvdProvider::for_test(AvdHome::new(root.0.clone()), system.clone())
     }
 
-    fn create(root: &TempRoot, name: &str) {
+    pub(crate) fn create(root: &TempRoot, name: &str) {
         AvdHome::new(root.0.clone())
             .create(name, NEW_AVD_TEMPLATE)
             .unwrap();

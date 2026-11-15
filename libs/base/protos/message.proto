@@ -1132,6 +1132,8 @@ message EmulatorHostRequest {
   string gateway_expected_process_identity = 18;
   uint32 gateway_confirmed_active_sessions = 19;
   bool gateway_active_sessions_known = 20;
+  string new_name = 21;
+  bool window_visible = 22;
 }
 
 message EmulatorHostResponse {

@@ -15,6 +15,8 @@ use std::{
 
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(20);
 const PROCESS_LIMIT: usize = 200;
+/// Free space a new emulator needs on the emulator folder's drive.
+const AVD_CREATE_MIN_FREE_BYTES: u64 = 16 << 30;
 
 #[derive(Clone, Debug, Default, Serialize)]
 struct ComponentHealth {
@@ -259,6 +261,10 @@ pub fn handle_request_scoped(
             ),
             "process_end_failed",
         ),
+        "avd_create" | "avd_clone" | "avd_rename" | "avd_delete" | "avd_window" => avd_value(
+            request,
+            &super::avd::AvdProvider::for_management(),
+        ),
         "emulator_shutdown" => match super::shutdown_windows::request(&request.component) {
             Ok(message) => serde_json::json!({"ok": true, "accepted": true, "message": message}),
             Err(error) => serde_json::json!({"ok": false, "accepted": true, "error_code": "emulator_shutdown_failed", "error": error.to_string()}),
@@ -279,6 +285,121 @@ pub fn handle_request_scoped(
         }),
     };
     host_response(request_id, request, value)
+}
+
+fn avd_failure(code: &'static str, error: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!({"ok": false, "accepted": true, "error_code": code, "error": error.to_string()})
+}
+
+fn avd_name(component: &str) -> ResultType<&str> {
+    match component.strip_prefix("avd:") {
+        Some(name) if super::avd_files::valid_avd_name(name) => Ok(name),
+        _ => bail!("Invalid emulator"),
+    }
+}
+
+fn gigabytes(bytes: u64) -> u64 {
+    bytes.div_ceil(1 << 30)
+}
+
+fn avd_create(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) -> ResultType<String> {
+    let name = request.new_name.as_str();
+    if !super::avd_files::valid_avd_name(name) {
+        bail!("Invalid emulator name")
+    }
+    let free = provider.free_disk_bytes()?;
+    if free < AVD_CREATE_MIN_FREE_BYTES {
+        bail!(
+            "Not enough free space on the PC to create an emulator: {} GB needed, {} GB free",
+            gigabytes(AVD_CREATE_MIN_FREE_BYTES),
+            free >> 30
+        )
+    }
+    provider.home().create(name, super::avd_files::NEW_AVD_TEMPLATE)?;
+    hbb_common::log::info!("Created managed emulator {name}");
+    Ok(format!("Created {name}"))
+}
+
+fn avd_clone(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) -> ResultType<String> {
+    let source = avd_name(&request.component)?;
+    let target = request.new_name.as_str();
+    if !super::avd_files::valid_avd_name(target) {
+        bail!("Invalid emulator name")
+    }
+    provider.ensure_idle(source)?;
+    if provider
+        .home()
+        .list()?
+        .iter()
+        .any(|entry| entry.name.eq_ignore_ascii_case(target))
+    {
+        bail!("An emulator named {target} already exists")
+    }
+    let required = provider.home().required_free_bytes_for_clone(source)?;
+    let free = provider.free_disk_bytes()?;
+    if free < required {
+        bail!(
+            "Not enough free space on the PC to copy {source}: {} GB needed, {} GB free",
+            gigabytes(required),
+            free >> 30
+        )
+    }
+    let home = provider.home().clone();
+    let (from, to) = (source.to_owned(), target.to_owned());
+    thread::Builder::new()
+        .name("aperture-avd-clone".to_owned())
+        .spawn(move || {
+            // Progress is read from the clone's marker file by the inventory.
+            match home.clone_avd(&from, &to, std::process::id(), |_, _| {}) {
+                Ok(()) => hbb_common::log::info!("Copied managed emulator {from} to {to}"),
+                Err(error) => {
+                    hbb_common::log::warn!("Copying managed emulator {from} to {to} failed: {error}")
+                }
+            }
+        })?;
+    Ok("Cloning\u{2026}".to_owned())
+}
+
+/// Runs one managed-emulator action against `provider`.
+fn avd_value(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) -> serde_json::Value {
+    let ok = |message: String| serde_json::json!({"ok": true, "accepted": true, "message": message});
+    match request.action.as_str() {
+        "avd_create" => match avd_create(request, provider) {
+            Ok(message) => ok(message),
+            Err(error) => avd_failure("avd_create_failed", error),
+        },
+        "avd_clone" => match avd_clone(request, provider) {
+            Ok(message) => ok(message),
+            Err(error) => avd_failure("avd_clone_failed", error),
+        },
+        "avd_rename" => match avd_name(&request.component).and_then(|name| {
+            provider.ensure_idle(name)?;
+            provider.home().rename(name, &request.new_name)?;
+            Ok(format!("Renamed {name} to {}", request.new_name))
+        }) {
+            Ok(message) => ok(message),
+            Err(error) => avd_failure("avd_rename_failed", error),
+        },
+        "avd_delete" => match avd_name(&request.component).and_then(|name| {
+            provider.ensure_idle(name)?;
+            provider.home().delete(name)?;
+            Ok(format!("Deleted {name}"))
+        }) {
+            Ok(message) => ok(message),
+            Err(error) => avd_failure("avd_delete_failed", error),
+        },
+        "avd_window" => match avd_name(&request.component)
+            .and_then(|name| provider.set_window_visible(name, request.window_visible))
+        {
+            Ok(()) => ok(if request.window_visible {
+                "Emulator window shown on the PC".to_owned()
+            } else {
+                "Emulator window hidden on the PC".to_owned()
+            }),
+            Err(error) => avd_failure("avd_window_failed", error),
+        },
+        _ => avd_failure("unsupported_action", "Unknown host management action"),
+    }
 }
 
 fn mutation_result(result: ResultType<String>, error_code: &'static str) -> serde_json::Value {
@@ -720,6 +841,131 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn avd_request(action: &str, component: &str, new_name: &str) -> EmulatorHostRequest {
+        EmulatorHostRequest {
+            action: action.to_owned(),
+            component: component.to_owned(),
+            new_name: new_name.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn avd_provider(
+        root: &super::super::avd::tests::TempRoot,
+        system: &Arc<super::super::avd::tests::FakeSystem>,
+    ) -> super::super::avd::AvdProvider {
+        super::super::avd::AvdProvider::for_test(
+            super::super::avd_files::AvdHome::new(root.0.clone()),
+            system.clone(),
+        )
+    }
+
+    #[test]
+    fn delete_refuses_running() {
+        use super::super::avd::tests::{create, temp_root, FakeSystem};
+        let root = temp_root("host-delete");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        system.run("Maple_1", None);
+        let provider = avd_provider(&root, &system);
+        let value = avd_value(&avd_request("avd_delete", "avd:Maple_1", ""), &provider);
+        assert_eq!(value["ok"], false);
+        assert!(value["error"].as_str().unwrap().contains("running"), "{value}");
+        assert!(root.0.join("Maple_1.avd").is_dir());
+        // Stopped: it goes.
+        let idle = FakeSystem::new(64_000);
+        let value = avd_value(&avd_request("avd_delete", "avd:Maple_1", ""), &avd_provider(&root, &idle));
+        assert_eq!(value["ok"], true, "{value}");
+        assert!(!root.0.join("Maple_1.avd").exists());
+    }
+
+    #[test]
+    fn rename_and_window_refuse_a_wrong_state() {
+        use super::super::avd::tests::{create, temp_root, FakeSystem};
+        let root = temp_root("host-rename");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        let provider = avd_provider(&root, &system);
+        let mut window = avd_request("avd_window", "avd:Maple_1", "");
+        window.window_visible = true;
+        let value = avd_value(&window, &provider);
+        assert_eq!(value["ok"], false);
+        assert!(value["error"].as_str().unwrap().contains("not running"), "{value}");
+        assert_eq!(value["error_code"], "avd_window_failed");
+        let value = avd_value(&avd_request("avd_rename", "avd:Maple_1", "Maple_9"), &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        assert!(root.0.join("Maple_9.avd").is_dir());
+        system.run("Maple_9", None);
+        let value = avd_value(&avd_request("avd_rename", "avd:Maple_9", "Maple_1"), &provider);
+        assert_eq!(value["ok"], false);
+        assert!(value["error"].as_str().unwrap().contains("running"), "{value}");
+    }
+
+    #[test]
+    fn create_needs_free_space_and_a_new_name() {
+        use super::super::avd::tests::{temp_root, FakeSystem};
+        let root = temp_root("host-create");
+        let system = FakeSystem::new(64_000);
+        system.set_free_bytes(AVD_CREATE_MIN_FREE_BYTES - 1);
+        let provider = avd_provider(&root, &system);
+        let value = avd_value(&avd_request("avd_create", "", "Maple_2"), &provider);
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error_code"], "avd_create_failed");
+        assert!(!root.0.join("Maple_2.avd").exists());
+        system.set_free_bytes(AVD_CREATE_MIN_FREE_BYTES);
+        let value = avd_value(&avd_request("avd_create", "", "Maple_2"), &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        assert!(root.0.join("Maple_2.avd").is_dir());
+        let again = avd_value(&avd_request("avd_create", "", "maple_2"), &provider);
+        assert_eq!(again["ok"], false);
+    }
+
+    #[test]
+    fn clone_reports_not_enough_space() {
+        use super::super::avd::tests::{create, temp_root, FakeSystem};
+        let root = temp_root("host-clone-space");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        system.set_free_bytes(1024);
+        let provider = avd_provider(&root, &system);
+        let value = avd_value(&avd_request("avd_clone", "avd:Maple_1", "Maple_2"), &provider);
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error_code"], "avd_clone_failed");
+        assert!(value["error"].as_str().unwrap().contains("space"), "{value}");
+        assert!(!root.0.join("Maple_2.avd").exists());
+    }
+
+    #[test]
+    fn clone_is_accepted_immediately_and_finishes_in_the_background() {
+        use super::super::avd::tests::{create, temp_root, FakeSystem};
+        let root = temp_root("host-clone-run");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        let provider = avd_provider(&root, &system);
+        let value = avd_value(&avd_request("avd_clone", "avd:Maple_1", "Maple_2"), &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        assert_eq!(value["accepted"], true);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let done = provider
+                .home()
+                .list()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name == "Maple_2" && entry.clone.is_none());
+            if done {
+                break;
+            }
+            assert!(Instant::now() < deadline, "clone did not finish");
+            thread::sleep(Duration::from_millis(50));
+        }
+        // A running source is refused.
+        system.run("Maple_1", None);
+        let value = avd_value(&avd_request("avd_clone", "avd:Maple_1", "Maple_3"), &provider);
+        assert_eq!(value["ok"], false);
+        assert!(value["error"].as_str().unwrap().contains("running"), "{value}");
+    }
 
     #[test]
     fn failed_host_mutation_ack_preserves_operation_identity() {

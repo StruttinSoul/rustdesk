@@ -1,5 +1,5 @@
 //! Instance-scoped, non-forcing Windows shutdown. Guest capture is not blocked.
-use super::{bluestacks::BlueStacksProvider, EmulatorProvider, EmulatorState};
+use super::{avd::AvdProvider, bluestacks::BlueStacksProvider, EmulatorProvider, EmulatorState};
 use base::message_proto::EmulatorInstance;
 use hbb_common::{bail, log, ResultType};
 use std::{
@@ -66,9 +66,29 @@ fn jobs() -> &'static Mutex<BTreeMap<String, Arc<Mutex<Job>>>> {
     JOBS.get_or_init(Default::default)
 }
 
+/// Stops a managed Android emulator through its provider (blocking).
+fn stop_avd(target: &str, name: &str) -> ResultType<String> {
+    let provider = AvdProvider::detect()?
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("Aperture's emulator folder does not exist"))?;
+    let instance = provider
+        .discover()?
+        .into_iter()
+        .find(|item| item.stable_id == target)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("This emulator no longer exists"))?;
+    if instance.state == EmulatorState::Stopped {
+        return Ok("Emulator is already stopped.".to_owned());
+    }
+    provider.stop(&instance)?;
+    log::info!("Stopped managed emulator {name} on request");
+    Ok("Emulator stopped.".to_owned())
+}
+
 pub fn request(target: &str) -> ResultType<String> {
     if !super::remote::valid_shutdown_target(target) {
         bail!("Invalid emulator shutdown target")
+    }
+    if let Some(name) = target.strip_prefix("avd:") {
+        return stop_avd(target, name);
     }
     let provider = BlueStacksProvider::detect()?
         .ok_or_else(|| hbb_common::anyhow::anyhow!("BlueStacks is not installed"))?;

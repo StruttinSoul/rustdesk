@@ -131,6 +131,7 @@ pub fn inventory(
             "host.windows.list.v1".to_owned(),
             "host.window_focus.v1".to_owned(),
             "host.emulator_shutdown.v1".to_owned(),
+            "host.avd_manage.v1".to_owned(),
             "host.process_end".to_owned(),
             "host.shell_restart.v1".to_owned(),
             "host.process_identity.v2".to_owned(),
