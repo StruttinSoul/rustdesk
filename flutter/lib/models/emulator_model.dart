@@ -85,7 +85,9 @@ class RemoteEmulator {
       required this.state,
       this.androidVersion = '',
       this.defaultPackage = '',
-      this.error = ''});
+      this.error = '',
+      this.progressPercent = 0,
+      this.windowVisible = false});
   final String id;
   final String name;
   final String provider;
@@ -93,6 +95,8 @@ class RemoteEmulator {
   final String androidVersion;
   final String defaultPackage;
   final String error;
+  final int progressPercent;
+  final bool windowVisible;
 
   /// A ready guest can be reselected without requesting that BlueStacks boot.
   bool get readyForReconnect => state == 'ready' || state == 'running';
@@ -102,6 +106,7 @@ class RemoteEmulator {
         'booting' || 'starting' => 'Starting',
         'adb_offline' => 'ADB offline',
         'stopped' => 'Stopped',
+        'cloning' => 'Cloning $progressPercent%',
         _ => 'Unknown',
       };
 }
@@ -184,13 +189,84 @@ class EmulatorModel extends ChangeNotifier {
   final Set<String> _shutdownPending = {};
   final Map<int, String> _shutdownRequests = {};
   Timer? _shutdownRefreshTimer;
+  Timer? _avdRefreshTimer;
 
   CapabilityStatus get emulatorShutdownCapability => _capabilities.status('host.emulator_shutdown.v1');
   bool isEmulatorShuttingDown(String id) => _shutdownPending.contains(id) ||
       instances.any((item) => item.id == id && item.state == 'stopping');
   bool canShutdownEmulator(String id) => _canMutateHost('host.emulator_shutdown.v1') &&
       !isEmulatorShuttingDown(id) && instances.any((item) => item.id == id &&
-          item.provider == 'bluestacks' && item.state != 'stopped');
+          (item.provider == 'bluestacks' || item.provider == 'avd') && item.state != 'stopped');
+
+  bool get canManageAvds => _canMutateHost('host.avd_manage.v1');
+
+  /// Why a managed-emulator action is unavailable right now, or null.
+  String? avdActionBlocker(String id, String action) {
+    final matches = instances.where((item) => item.id == id);
+    if (matches.isEmpty) return null;
+    final item = matches.first;
+    if (item.state == 'cloning') return 'Copy in progress';
+    if (action == 'avd_window') return null;
+    if (item.state != 'stopped') return 'Stop it first';
+    return null;
+  }
+
+  String suggestAvdName(String base) {
+    final taken = instances.where((item) => item.provider == 'avd')
+        .map((item) => item.id.replaceFirst('avd:', '').toLowerCase()).toSet();
+    var candidate = base;
+    for (var n = 2; taken.contains(candidate.toLowerCase()); n++) {
+      candidate = '${base}_$n';
+    }
+    return candidate;
+  }
+
+  Future<void> createAvd(String name) =>
+      _sendAvdAction('avd_create', 'emulator:avd:$name', {'new_name': name});
+  Future<void> cloneAvd(String id, String name) => _sendAvdAction(
+      'avd_clone', 'emulator:$id', {'component': id, 'new_name': name}, id: id);
+  Future<void> renameAvd(String id, String name) => _sendAvdAction(
+      'avd_rename', 'emulator:$id', {'component': id, 'new_name': name}, id: id);
+  Future<void> deleteAvd(String id) =>
+      _sendAvdAction('avd_delete', 'emulator:$id', {'component': id}, id: id);
+  Future<void> setAvdWindowVisible(String id, bool visible) => _sendAvdAction(
+      'avd_window', 'emulator:$id', {'component': id, 'window_visible': visible}, id: id);
+
+  Future<void> _sendAvdAction(
+      String action, String targetIdentity, Map<String, dynamic> fields,
+      {String? id}) async {
+    if (!canManageAvds) return;
+    if (id != null) {
+      if (!instances.any((item) => item.id == id && item.provider == 'avd')) return;
+      final blocker = avdActionBlocker(id, action);
+      if (blocker != null) {
+        hostError = blocker;
+        if (!_disposed) notifyListeners();
+        return;
+      }
+    }
+    final requestId = ++_sequence;
+    final operationId = const Uuid().v4();
+    hostError = hostMessage = '';
+    _beginHostOperation(requestId: requestId, operationId: operationId,
+        targetIdentity: targetIdentity, action: action);
+    _avdRefreshTimer ??= Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (_disposed || !hostConnectionCurrent) { timer.cancel(); _avdRefreshTimer = null; return; }
+      final busy = instances.any((item) => item.state == 'cloning') ||
+          _pendingHostOperations.any((request) =>
+              _hostOperations.operationForRequest(request)?.action.startsWith('avd_') ?? false);
+      if (!busy) { timer.cancel(); _avdRefreshTimer = null; return; }
+      if (!loading && !connecting) unawaited(refresh());
+    });
+    notifyListeners();
+    await _sendHostOperation({
+      'action': action, 'request_id': requestId, ...fields,
+      'operation_id': operationId, 'session_identity': _operationSessionIdentity,
+      'target_identity': targetIdentity, 'session_generation': _operationGeneration,
+    }, requestId: requestId, capability: 'host.avd_manage.v1',
+      stillValid: () => hostConnectionCurrent &&
+          (id == null || instances.any((item) => item.id == id)));
+  }
 
   Future<void> shutdownEmulator(String id) async {
     if (isEmulatorShuttingDown(id)) return;
@@ -225,6 +301,7 @@ class EmulatorModel extends ChangeNotifier {
 
   void _clearShutdownState() {
     _shutdownRefreshTimer?.cancel(); _shutdownRefreshTimer = null;
+    _avdRefreshTimer?.cancel(); _avdRefreshTimer = null;
     _shutdownPending.clear(); _shutdownRequests.clear();
   }
 
@@ -1511,6 +1588,7 @@ class EmulatorModel extends ChangeNotifier {
         if (host['ok'] != true) _shutdownPending.remove(shutdownTarget);
         if (hostConnectionCurrent) unawaited(refresh());
       }
+      if (operation.action.startsWith('avd_') && hostConnectionCurrent) unawaited(refresh());
       _pendingHostOperations.remove(id);
       final requestStartedMonotonicMs =
           _hostOperationStartedMonotonicMs.remove(id) ?? -1;
@@ -1685,7 +1763,9 @@ class EmulatorModel extends ChangeNotifier {
               state: item['state']?.toString() ?? '',
               androidVersion: item['android_version']?.toString() ?? '',
               defaultPackage: item['default_package']?.toString() ?? '',
-              error: item['last_error']?.toString() ?? ''))
+              error: item['last_error']?.toString() ?? '',
+              progressPercent: (item['progress_percent'] as num?)?.toInt() ?? 0,
+              windowVisible: item['window_visible'] == true))
           .toList();
       loading = false;
       error = (response['provider_errors'] as List? ?? []).join('\n');

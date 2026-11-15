@@ -2262,4 +2262,168 @@ void main() {
       expect(emulatorProviderLabel('ldplayer'), 'ldplayer');
     });
   });
+
+  group('managed emulators', () {
+    const caps = [
+      'operation.identity.v1',
+      'operation.ack.v1',
+      'host.emulator_shutdown.v1',
+      'host.avd_manage.v1',
+    ];
+    Map<String, dynamic> inst(String name, String state,
+            {int progress = 0, bool window = false}) =>
+        {
+          'target_id': 'avd:$name',
+          'provider': 'avd',
+          'name': name.replaceAll('_', ' '),
+          'state': state,
+          'progress_percent': progress,
+          'window_visible': window,
+        };
+    Future<EmulatorModel> connected(List<Map<String, dynamic>> sent,
+        List<Map<String, dynamic>> instances,
+        {List<String> capabilities = caps}) async {
+      final model = EmulatorModel(Uuid().v4obj(),
+          commandSender: (_, value) async => sent.add(jsonDecode(value)));
+      await model.refresh();
+      model.handleResponse({
+        'type': 'inventory',
+        'request_id': sent.single['request_id'],
+        'protocol_version': 1,
+        'instances': instances,
+        'provider_errors': const [],
+        'capabilities': capabilities,
+        'operation_session_identity': 'scope-avd',
+        'operation_generation': 2,
+      });
+      return model;
+    }
+
+    test('parses progress and window state and labels a clone', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [
+        inst('Maple_1_copy', 'cloning', progress: 42),
+        inst('Maple_1', 'ready', window: true),
+      ]);
+      final cloning = model.instances.first;
+      expect(cloning.progressPercent, 42);
+      expect(cloning.runtimeLabel, 'Cloning 42%');
+      expect(cloning.windowVisible, isFalse);
+      expect(model.instances.last.windowVisible, isTrue);
+      expect(model.canManageAvds, isTrue);
+      model.dispose();
+    });
+
+    test('cloneAvd sends an identified request', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [inst('Maple_1', 'stopped')]);
+      await model.cloneAvd('avd:Maple_1', 'Maple_1_copy');
+      final request = Map<String, dynamic>.from(sent.last);
+      expect(request['action'], 'avd_clone');
+      expect(request['component'], 'avd:Maple_1');
+      expect(request['new_name'], 'Maple_1_copy');
+      expect(request['target_identity'], 'emulator:avd:Maple_1');
+      expect(request['session_identity'], 'scope-avd');
+      expect(request['session_generation'], 2);
+      expect((request['operation_id'] as String).isNotEmpty, isTrue);
+      model.dispose();
+    });
+
+    test('create, rename, delete and window requests', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent,
+          [inst('Maple_1', 'stopped'), inst('Oak', 'ready', window: true)]);
+      await model.createAvd('Fresh');
+      var request = Map<String, dynamic>.from(sent.last);
+      expect(request['action'], 'avd_create');
+      expect(request['new_name'], 'Fresh');
+      expect(request['target_identity'], 'emulator:avd:Fresh');
+      expect(request.containsKey('component'), isFalse);
+
+      await model.renameAvd('avd:Maple_1', 'Maple_9');
+      request = Map<String, dynamic>.from(sent.last);
+      expect(request['action'], 'avd_rename');
+      expect(request['component'], 'avd:Maple_1');
+      expect(request['new_name'], 'Maple_9');
+      expect(request['target_identity'], 'emulator:avd:Maple_1');
+
+      await model.deleteAvd('avd:Maple_1');
+      request = Map<String, dynamic>.from(sent.last);
+      expect(request['action'], 'avd_delete');
+      expect(request['component'], 'avd:Maple_1');
+      expect(request['target_identity'], 'emulator:avd:Maple_1');
+
+      await model.setAvdWindowVisible('avd:Oak', false);
+      request = Map<String, dynamic>.from(sent.last);
+      expect(request['action'], 'avd_window');
+      expect(request['component'], 'avd:Oak');
+      expect(request['window_visible'], false);
+      expect(request['target_identity'], 'emulator:avd:Oak');
+      model.dispose();
+    });
+
+    test('avdActionBlocker explains disabled actions', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [
+        inst('Ready', 'ready'),
+        inst('Idle', 'stopped'),
+        inst('Busy_copy', 'cloning', progress: 5),
+        inst('Going', 'stopping'),
+      ]);
+      expect(model.avdActionBlocker('avd:Ready', 'avd_delete'),
+          'Stop it first');
+      expect(model.avdActionBlocker('avd:Going', 'avd_rename'),
+          'Stop it first');
+      expect(model.avdActionBlocker('avd:Idle', 'avd_delete'), isNull);
+      expect(model.avdActionBlocker('avd:Idle', 'avd_clone'), isNull);
+      expect(model.avdActionBlocker('avd:Busy_copy', 'avd_delete'),
+          'Copy in progress');
+      expect(model.avdActionBlocker('avd:Busy_copy', 'avd_clone'),
+          'Copy in progress');
+      expect(model.avdActionBlocker('avd:Ready', 'avd_window'), isNull);
+      model.dispose();
+    });
+
+    test('a blocked action is not sent', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [inst('Ready', 'ready')]);
+      final before = sent.length;
+      await model.deleteAvd('avd:Ready');
+      expect(sent.length, before);
+      model.dispose();
+    });
+
+    test('actions are no-ops without the capability', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [inst('Maple_1', 'stopped')],
+          capabilities: const ['operation.identity.v1', 'operation.ack.v1']);
+      expect(model.canManageAvds, isFalse);
+      final before = sent.length;
+      await model.createAvd('Fresh');
+      await model.cloneAvd('avd:Maple_1', 'Maple_1_copy');
+      await model.renameAvd('avd:Maple_1', 'Other');
+      await model.deleteAvd('avd:Maple_1');
+      await model.setAvdWindowVisible('avd:Maple_1', true);
+      expect(sent.length, before);
+      model.dispose();
+    });
+
+    test('suggestAvdName returns the first free name', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(
+          sent, [inst('Maple', 'stopped'), inst('Maple_2', 'stopped')]);
+      expect(model.suggestAvdName('Maple'), 'Maple_3');
+      expect(model.suggestAvdName('Birch'), 'Birch');
+      model.dispose();
+    });
+
+    test('canShutdownEmulator is true for a ready avd', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(
+          sent, [inst('Maple', 'ready'), inst('Idle', 'stopped')]);
+      expect(model.canShutdownEmulator('avd:Maple'), isTrue);
+      expect(model.canShutdownEmulator('avd:Idle'), isFalse);
+      model.dispose();
+    });
+  });
 }
