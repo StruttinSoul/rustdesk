@@ -2417,6 +2417,30 @@ void main() {
       model.dispose();
     });
 
+    test('suggestAvdName keeps names valid', () async {
+      final sent = <Map<String, dynamic>>[];
+      final long = 'A' * 64;
+      final model = await connected(sent, [
+        inst(long, 'stopped'),
+        inst('Maple', 'stopped'),
+      ]);
+      final valid = RegExp(r'^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$');
+      final suggested = model.suggestAvdName(long);
+      expect(suggested.length, lessThanOrEqualTo(64));
+      expect(suggested, isNot(long));
+      expect(valid.hasMatch(suggested), isTrue);
+      expect(model.suggestAvdName('A' * 80).length, lessThanOrEqualTo(64));
+      expect(valid.hasMatch(model.suggestAvdName('My phone!')), isTrue);
+      expect(model.suggestAvdName('My phone!'), 'My_phone_');
+      expect(valid.hasMatch(model.suggestAvdName('..hidden')), isTrue);
+      expect(model.suggestAvdName(''), 'Emulator');
+      expect(model.suggestAvdName('...'), 'Emulator');
+      expect(model.suggestAvdName('maple'), 'maple_2');
+      expect(valid.hasMatch(model.suggestAvdName('CON')), isTrue);
+      expect(model.suggestAvdName('CON').toUpperCase(), isNot('CON'));
+      model.dispose();
+    });
+
     test('canShutdownEmulator is true for a ready avd', () async {
       final sent = <Map<String, dynamic>>[];
       final model = await connected(

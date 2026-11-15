@@ -214,9 +214,14 @@ class EmulatorModel extends ChangeNotifier {
   String suggestAvdName(String base) {
     final taken = instances.where((item) => item.provider == 'avd')
         .map((item) => item.id.replaceFirst('avd:', '').toLowerCase()).toSet();
-    var candidate = base;
-    for (var n = 2; taken.contains(candidate.toLowerCase()); n++) {
-      candidate = '${base}_$n';
+    var clean = base.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_').replaceFirst(RegExp(r'^\.+'), '');
+    if (clean.isEmpty) clean = 'Emulator';
+    if (clean.length > 64) clean = clean.substring(0, 64);
+    final reserved = RegExp(r'^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\..*)?$', caseSensitive: false);
+    var candidate = clean;
+    for (var n = 2; taken.contains(candidate.toLowerCase()) || reserved.hasMatch(candidate); n++) {
+      final suffix = '_$n';
+      candidate = '${clean.substring(0, math.min(clean.length, 64 - suffix.length))}$suffix';
     }
     return candidate;
   }
