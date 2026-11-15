@@ -429,6 +429,12 @@ impl AvdHome {
                 continue;
             }
             let dir = self.avd_dir(name);
+            if dir.exists() {
+                if let Err(e) = self.ensure_inside(&dir) {
+                    log::warn!("Skipping emulator {name}: {e}");
+                    continue;
+                }
+            }
             let clone = read_marker(&dir);
             let config = fs::read_to_string(dir.join("config.ini"));
             if config.is_err() && clone.is_none() {
@@ -465,17 +471,22 @@ impl AvdHome {
     }
 
     /// Removes a folder and `.ini` this module created, logging what it cannot.
-    fn remove_quietly(&self, name: &str) {
+    /// Returns whether everything was removed.
+    fn remove_quietly(&self, name: &str) -> bool {
+        let mut clean = true;
         if let Err(e) = fs::remove_dir_all(self.avd_dir(name)) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("Cannot remove partial AVD {name}: {e}");
+                clean = false;
             }
         }
         if let Err(e) = fs::remove_file(self.ini_path(name)) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("Cannot remove partial AVD {name}.ini: {e}");
+                clean = false;
             }
         }
+        clean
     }
 
     pub fn rename(&self, from: &str, to: &str) -> ResultType<()> {
@@ -568,6 +579,9 @@ impl AvdHome {
         }
         if self.exists(to) {
             bail!("An emulator named {to} already exists");
+        }
+        if read_marker(&src).is_some() {
+            bail!("Emulator {from} is being cloned");
         }
         self.ensure_inside(&src)?;
         let (dirs, files) = plan_copy(&src, &self.avd_dir(to))?;
@@ -663,10 +677,14 @@ impl AvdHome {
             if read_marker(&path).map_or(false, |m| m.host_pid == current_pid) {
                 continue;
             }
-            self.ensure_inside(&path)?;
+            if let Err(e) = self.ensure_inside(&path) {
+                log::warn!("Skipping unfinished emulator clone {name}: {e}");
+                continue;
+            }
             log::info!("Removing unfinished emulator clone {name}");
-            self.remove_quietly(name);
-            removed.push(name.to_owned());
+            if self.remove_quietly(name) {
+                removed.push(name.to_owned());
+            }
         }
         removed.sort();
         Ok(removed)
@@ -872,6 +890,77 @@ mod tests {
         assert!(!home.root().join("C.avd").exists());
         assert!(!home.root().join("C.ini").exists());
         assert!(home.root().join("E.avd").exists());
+        cleanup(home);
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "mklink failed");
+    }
+
+    fn outside_dir(suffix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aperture-outside-{suffix}-{nonce}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn list_skips_avd_folders_that_resolve_outside_the_root() {
+        let home = temp_home("listjunction");
+        home.create("A", NEW_AVD_TEMPLATE).unwrap();
+        let outside = outside_dir("list");
+        fs::write(outside.join("config.ini"), "hw.ramSize=1
+").unwrap();
+        fs::write(home.root().join("X.ini"), "target=android-35
+").unwrap();
+        junction(&home.root().join("X.avd"), &outside);
+        let names: Vec<_> = home.list().unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["A".to_owned()]);
+        fs::remove_dir(home.root().join("X.avd")).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+        cleanup(home);
+    }
+
+    #[test]
+    fn clone_refuses_a_source_that_is_being_cloned() {
+        let home = temp_home("clonemarker");
+        make_source(&home, "A");
+        fs::write(
+            home.root().join("A.avd").join("aperture-clone.json"),
+            r#"{"source":"Z","total_bytes":2,"copied_bytes":1,"host_pid":1,"started":1}"#,
+        )
+        .unwrap();
+        assert!(home.clone_avd("A", "B", 1, |_, _| {}).is_err());
+        assert!(!home.root().join("B.avd").exists());
+        assert!(!home.root().join("B.ini").exists());
+        cleanup(home);
+    }
+
+    #[test]
+    fn cleanup_skips_bad_entries_and_reports_only_real_removals() {
+        let home = temp_home("cleanupbad");
+        let marker = r#"{"source":"A","total_bytes":2,"copied_bytes":1,"host_pid":1,"started":1}"#;
+        let outside = outside_dir("cleanup");
+        fs::write(outside.join("aperture-clone.json"), marker).unwrap();
+        fs::write(home.root().join("B.ini"), "target=android-35
+").unwrap();
+        junction(&home.root().join("B.avd"), &outside);
+        home.create("C", NEW_AVD_TEMPLATE).unwrap();
+        fs::write(home.root().join("C.avd").join("aperture-clone.json"), marker).unwrap();
+        assert_eq!(home.cleanup_stale_clones(2).unwrap(), vec!["C".to_owned()]);
+        assert!(outside.join("aperture-clone.json").exists());
+        assert!(!home.root().join("C.avd").exists());
+        fs::remove_dir(home.root().join("B.avd")).unwrap();
+        fs::remove_dir_all(outside).unwrap();
         cleanup(home);
     }
 }
