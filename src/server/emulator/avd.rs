@@ -31,6 +31,8 @@ const START_RESERVATION: Duration = Duration::from_secs(120);
 const DEFAULT_RAM_MB: u32 = 2048;
 const STOP_WAIT: Duration = Duration::from_secs(20);
 const STOP_POLL: Duration = Duration::from_millis(500);
+/// How long the console `kill` gets before Android is powered off instead.
+const KILL_GRACE: Duration = Duration::from_secs(4);
 
 /// A start that still counts against free memory: when, which AVD, its RAM.
 type StartReservation = (Instant, String, u32);
@@ -126,8 +128,10 @@ pub(crate) trait AvdSystem: Send + Sync {
     fn free_disk_bytes(&self, path: &Path) -> ResultType<u64>;
     /// Starts the emulator in the signed-in user's session.
     fn launch(&self, name: &str) -> ResultType<()>;
-    /// Asks the emulator behind `serial` to quit.
+    /// Asks the emulator behind `serial` to quit through its console.
     fn kill(&self, serial: &str) -> ResultType<()>;
+    /// Powers Android off, which ends the emulator too.
+    fn power_off(&self, serial: &str) -> ResultType<()>;
 }
 
 /// The real PC: sysinfo processes, the default ADB server, Windows memory.
@@ -179,15 +183,18 @@ impl AvdSystem for HostSystem {
         let Some(adb) = super::remote_windows::running_adb_server() else {
             bail!("ADB is not running on the PC")
         };
-        // `emu kill` goes through the emulator console, which can refuse an
-        // unauthenticated client; then power Android off, which ends the
-        // emulator too.
-        let console = adb_command(&adb, serial, &["emu", "kill"]);
-        match &console {
-            Ok(output) if !output.trim_start().starts_with("KO") => return Ok(()),
-            Ok(output) => log::info!("Emulator console refused kill for {serial}: {}", output.trim()),
-            Err(error) => log::info!("Emulator console kill of {serial} failed: {error}"),
+        // The console may refuse this SYSTEM client (no auth token) with
+        // output that cannot be told from success; `stop` checks the outcome.
+        if let Err(error) = adb_command(&adb, serial, &["emu", "kill"]) {
+            log::info!("Emulator console kill of {serial} failed: {error}");
         }
+        Ok(())
+    }
+
+    fn power_off(&self, serial: &str) -> ResultType<()> {
+        let Some(adb) = super::remote_windows::running_adb_server() else {
+            bail!("ADB is not running on the PC")
+        };
         adb_command(&adb, serial, &["shell", "reboot", "-p"]).map(|_| ())
     }
 }
@@ -203,6 +210,7 @@ pub struct AvdProvider {
     home: AvdHome,
     system: Arc<dyn AvdSystem>,
     starts: &'static Mutex<Vec<StartReservation>>,
+    kill_grace: Duration,
 }
 
 impl AvdProvider {
@@ -217,6 +225,7 @@ impl AvdProvider {
             home: AvdHome::new(root),
             system: Arc::new(HostSystem),
             starts: &START_LOCK,
+            kill_grace: KILL_GRACE,
         }))
     }
 
@@ -275,6 +284,20 @@ impl AvdProvider {
             Some((serial, _)) => Ok(serial),
             None if instance.running => bail!("{name} is still starting"),
             None => bail!("{name} is not running"),
+        }
+    }
+
+    /// Polls until no emulator process runs `name`; false after `wait`.
+    fn wait_until_stopped(&self, name: &str, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            if !running_avd_names(&self.system.processes()).contains(name) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(STOP_POLL.min(wait));
         }
     }
 
@@ -368,12 +391,14 @@ impl EmulatorProvider for AvdProvider {
         let name = target.provider_instance_id.as_str();
         let serial = self.serial(target)?;
         self.system.kill(&serial)?;
-        let deadline = Instant::now() + STOP_WAIT;
-        while running_avd_names(&self.system.processes()).contains(name) {
-            if Instant::now() >= deadline {
+        if !self.wait_until_stopped(name, self.kill_grace) {
+            // The console kill did nothing (typically refused for lack of the
+            // user's console token): power Android off instead.
+            log::info!("Android Emulator {name} ignored the console kill; powering it off");
+            self.system.power_off(&serial)?;
+            if !self.wait_until_stopped(name, STOP_WAIT) {
                 bail!("{name} did not stop within 20 seconds")
             }
-            thread::sleep(STOP_POLL);
         }
         // Its RAM is free again, so a restart need not wait out the reservation.
         self.reservations().retain(|(_, started, _)| started != name);
@@ -487,6 +512,9 @@ mod tests {
         memory_mb: u64,
         launched: Mutex<Vec<String>>,
         killed: Mutex<Vec<String>>,
+        powered_off: Mutex<Vec<String>>,
+        /// `emu kill` reports success but the emulator keeps running.
+        kill_ignored: bool,
     }
 
     impl FakeSystem {
@@ -497,7 +525,29 @@ mod tests {
                 memory_mb,
                 launched: Mutex::new(Vec::new()),
                 killed: Mutex::new(Vec::new()),
+                powered_off: Mutex::new(Vec::new()),
+                kill_ignored: false,
             })
+        }
+
+        fn ignoring_kill(memory_mb: u64) -> Arc<Self> {
+            let mut system = Arc::try_unwrap(Self::new(memory_mb)).ok().unwrap();
+            system.kill_ignored = true;
+            Arc::new(system)
+        }
+
+        fn end(&self, serial: &str) {
+            let mut guests = self.guests.lock().unwrap();
+            let names: Vec<String> = guests
+                .iter()
+                .filter(|(s, _)| s == serial)
+                .map(|(_, probe)| probe.name.clone())
+                .collect();
+            guests.retain(|(s, _)| s != serial);
+            self.processes
+                .lock()
+                .unwrap()
+                .retain(|(_, cmd)| !names.iter().any(|name| cmd.contains(name)));
         }
 
         fn run(&self, name: &str, serial: Option<&str>) {
@@ -537,17 +587,14 @@ mod tests {
         }
         fn kill(&self, serial: &str) -> ResultType<()> {
             self.killed.lock().unwrap().push(serial.to_owned());
-            let mut guests = self.guests.lock().unwrap();
-            let names: Vec<String> = guests
-                .iter()
-                .filter(|(s, _)| s == serial)
-                .map(|(_, probe)| probe.name.clone())
-                .collect();
-            guests.retain(|(s, _)| s != serial);
-            self.processes
-                .lock()
-                .unwrap()
-                .retain(|(_, cmd)| !names.iter().any(|name| cmd.contains(name)));
+            if !self.kill_ignored {
+                self.end(serial);
+            }
+            Ok(())
+        }
+        fn power_off(&self, serial: &str) -> ResultType<()> {
+            self.powered_off.lock().unwrap().push(serial.to_owned());
+            self.end(serial);
             Ok(())
         }
     }
@@ -575,6 +622,7 @@ mod tests {
             home: AvdHome::new(root.0.clone()),
             system: system.clone(),
             starts: Box::leak(Box::new(Mutex::new(Vec::new()))),
+            kill_grace: Duration::from_millis(50),
         }
     }
 
@@ -699,6 +747,28 @@ mod tests {
             vec!["emulator-5554", "emulator-5556"]
         );
         assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_1"]);
+    }
+
+    #[test]
+    fn stop_powers_off_when_the_console_kill_leaves_the_emulator_running() {
+        let root = temp_root("fallback");
+        create(&root, "Maple_1");
+        let system = FakeSystem::ignoring_kill(64_000);
+        system.run("Maple_1", Some("emulator-5554"));
+        let provider = provider(&root, &system);
+        provider.stop(&target("Maple_1")).unwrap();
+        assert_eq!(*system.killed.lock().unwrap(), vec!["emulator-5554"]);
+        assert_eq!(*system.powered_off.lock().unwrap(), vec!["emulator-5554"]);
+    }
+
+    #[test]
+    fn stop_does_not_power_off_when_the_console_kill_worked() {
+        let root = temp_root("nofallback");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        system.run("Maple_1", Some("emulator-5554"));
+        provider(&root, &system).stop(&target("Maple_1")).unwrap();
+        assert!(system.powered_off.lock().unwrap().is_empty());
     }
 
     #[test]

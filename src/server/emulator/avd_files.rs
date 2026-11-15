@@ -6,9 +6,11 @@
 
 use hbb_common::{anyhow::Context, bail, config::Config, log, ResultType};
 use std::{
+    collections::BTreeSet,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -213,6 +215,9 @@ pub struct AvdEntry {
 #[derive(Debug, Clone)]
 pub struct AvdHome {
     root: PathBuf,
+    /// Stale clones that could not be removed and were already logged, so the
+    /// 10 s inventory scan retries them silently. Shared by clones of this value.
+    unremovable: Arc<Mutex<BTreeSet<String>>>,
 }
 
 /// The value of `key=` in an ini text, if present.
@@ -351,7 +356,29 @@ fn write_marker(avd_dir: &Path, progress: &CloneProgress, started: u64) -> Resul
 
 impl AvdHome {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            unremovable: Arc::default(),
+        }
+    }
+
+    fn unremovable_set(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        // A plain set: a panicking holder leaves nothing half-updated.
+        self.unremovable
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Records a failed stale-clone removal; true only the first time, when it
+    /// is to be logged.
+    fn note_cleanup_failure(&self, name: &str) -> bool {
+        self.unremovable_set().insert(name.to_owned())
+    }
+
+    /// Stale clones that could not be removed (still retried every scan).
+    #[cfg(test)]
+    fn unremovable_clones(&self) -> Vec<String> {
+        self.unremovable_set().iter().cloned().collect()
     }
 
     pub fn default_root() -> PathBuf {
@@ -464,7 +491,7 @@ impl AvdHome {
             .map_err(Into::into)
             .and_then(|()| fs::write(self.ini_path(name), self.ini_text(name)).map_err(Into::into));
         if let Err(e) = written {
-            self.remove_quietly(name);
+            self.remove_quietly(name, true);
             return Err(e);
         }
         Ok(())
@@ -472,17 +499,21 @@ impl AvdHome {
 
     /// Removes a folder and `.ini` this module created, logging what it cannot.
     /// Returns whether everything was removed.
-    fn remove_quietly(&self, name: &str) -> bool {
+    fn remove_quietly(&self, name: &str, report: bool) -> bool {
         let mut clean = true;
         if let Err(e) = fs::remove_dir_all(self.avd_dir(name)) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("Cannot remove partial AVD {name}: {e}");
+                if report {
+                    log::warn!("Cannot remove partial AVD {name}: {e}");
+                }
                 clean = false;
             }
         }
         if let Err(e) = fs::remove_file(self.ini_path(name)) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("Cannot remove partial AVD {name}.ini: {e}");
+                if report {
+                    log::warn!("Cannot remove partial AVD {name}.ini: {e}");
+                }
                 clean = false;
             }
         }
@@ -590,7 +621,7 @@ impl AvdHome {
         fs::create_dir(self.avd_dir(to))?;
         let result = self.copy_into(from, to, host_pid, &dirs, &files, total, &mut progress);
         if let Err(e) = result {
-            self.remove_quietly(to);
+            self.remove_quietly(to, true);
             return Err(e);
         }
         Ok(())
@@ -661,6 +692,7 @@ impl AvdHome {
             Err(e) => return Err(e.into()),
         };
         let mut removed = Vec::new();
+        let mut failing = BTreeSet::new();
         for item in reader {
             let path = item?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("avd") || !path.is_dir() {
@@ -681,11 +713,21 @@ impl AvdHome {
                 log::warn!("Skipping unfinished emulator clone {name}: {e}");
                 continue;
             }
-            log::info!("Removing unfinished emulator clone {name}");
-            if self.remove_quietly(name) {
+            // A removal that already failed is retried without logging again.
+            let reported = self.unremovable_set().contains(name);
+            if !reported {
+                log::info!("Removing unfinished emulator clone {name}");
+            }
+            if self.remove_quietly(name, !reported) {
+                self.unremovable_set().remove(name);
                 removed.push(name.to_owned());
+            } else {
+                self.note_cleanup_failure(name);
+                failing.insert(name.to_owned());
             }
         }
+        // Forget names that are gone or no longer stale, so a later failure logs again.
+        self.unremovable_set().retain(|name| failing.contains(name));
         removed.sort();
         Ok(removed)
     }
@@ -834,6 +876,35 @@ mod tests {
         assert!(home.clone_avd("A", "../x", 1, |_, _| {}).is_err());
         assert!(home.clone_avd("../x", "D", 1, |_, _| {}).is_err());
         cleanup(home);
+    }
+
+    #[test]
+    fn unremovable_stale_clone_is_reported_once_and_retried() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let home = temp_home("locked");
+        home.create("B", NEW_AVD_TEMPLATE).unwrap();
+        let dir = home.root().join("B.avd");
+        fs::write(
+            dir.join("aperture-clone.json"),
+            r#"{"source":"A","total_bytes":200,"copied_bytes":50,"host_pid":1,"started":1}"#,
+        )
+        .unwrap();
+        // An exclusive handle on the marker keeps Windows from deleting it, so
+        // every scan finds the clone stale and fails to remove it.
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .open(dir.join("aperture-clone.json"))
+            .unwrap();
+        for _ in 0..3 {
+            assert!(home.cleanup_stale_clones(2).unwrap().is_empty());
+        }
+        assert_eq!(home.unremovable_clones(), vec!["B".to_owned()]);
+        assert!(home.note_cleanup_failure("C"));
+        assert!(!home.note_cleanup_failure("C"));
+        drop(lock);
+        assert_eq!(home.cleanup_stale_clones(2).unwrap(), vec!["B".to_owned()]);
+        assert!(home.unremovable_clones().is_empty());
     }
 
     #[test]
