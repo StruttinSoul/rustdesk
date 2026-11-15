@@ -577,4 +577,108 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Retry preview'), findsOneWidget);
   });
+
+  group('managed emulator menu', () {
+    Widget host(Widget child) => MaterialApp(
+        home: Scaffold(body: SizedBox(width: 360, height: 280, child: child)));
+
+    for (final asRow in [false, true]) {
+      final label = asRow ? 'row' : 'card';
+      Widget build(AvdCardActions actions,
+              {bool stopped = false, void Function()? onOpen}) =>
+          host(asRow
+              ? TargetScreenRow(
+                  name: 'Phone 2',
+                  type: 'Android 15',
+                  stopped: stopped,
+                  live: !stopped,
+                  onOpen: onOpen,
+                  avd: actions)
+              : TargetPreviewCard(
+                  name: 'Phone 2',
+                  type: 'Android 15',
+                  stopped: stopped,
+                  live: !stopped,
+                  onOpen: onOpen,
+                  avd: actions));
+
+      testWidgets('running avd $label offers Stop and a blocked Delete',
+          (tester) async {
+        var stops = 0;
+        var toggles = 0;
+        await tester.pumpWidget(build(AvdCardActions(
+          running: true,
+          windowVisible: false,
+          blocker: 'Stop it first',
+          onStop: () => stops++,
+          onToggleWindow: () => toggles++,
+          onClone: () {},
+          onRename: () {},
+          onDelete: () {},
+        )));
+        await tester.tap(find.byTooltip('More Phone 2 actions'));
+        await tester.pumpAndSettle();
+        expect(find.text('Show on PC'), findsOneWidget);
+        expect(find.text('Hide on PC'), findsNothing);
+        expect(find.text('Restart'), findsNothing);
+        expect(find.text('Stop it first'), findsNWidgets(3));
+        final stop = tester.widget<PopupMenuItem<String>>(
+            find.widgetWithText(PopupMenuItem<String>, 'Stop'));
+        expect(stop.enabled, isTrue);
+        final delete = tester.widget<PopupMenuItem<String>>(
+            find.ancestor(
+                of: find.text('Delete'),
+                matching: find.byType(PopupMenuItem<String>)));
+        expect(delete.enabled, isFalse);
+        await tester.tap(find.text('Show on PC'));
+        await tester.pumpAndSettle();
+        expect(toggles, 1);
+        await tester.tap(find.byTooltip('More Phone 2 actions'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Stop'));
+        await tester.pumpAndSettle();
+        expect(stops, 1);
+      });
+
+      testWidgets('stopped avd $label can clone, rename and delete',
+          (tester) async {
+        final calls = <String>[];
+        await tester.pumpWidget(build(
+            AvdCardActions(
+              running: false,
+              onClone: () => calls.add('clone'),
+              onRename: () => calls.add('rename'),
+              onDelete: () => calls.add('delete'),
+            ),
+            stopped: true));
+        for (final item in ['Clone', 'Rename', 'Delete']) {
+          await tester.tap(find.byTooltip('More Phone 2 actions'));
+          await tester.pumpAndSettle();
+          expect(find.text('Stop'), findsNothing);
+          expect(find.text('Show on PC'), findsNothing);
+          expect(find.text('Hide on PC'), findsNothing);
+          await tester.tap(find.text(item));
+          await tester.pumpAndSettle();
+        }
+        expect(calls, ['clone', 'rename', 'delete']);
+      });
+
+      testWidgets('visible window avd $label offers Hide on PC',
+          (tester) async {
+        await tester.pumpWidget(build(AvdCardActions(
+            running: true, windowVisible: true, onToggleWindow: () {})));
+        await tester.tap(find.byTooltip('More Phone 2 actions'));
+        await tester.pumpAndSettle();
+        expect(find.text('Hide on PC'), findsOneWidget);
+      });
+
+      testWidgets('cloning avd $label shows progress and no menu',
+          (tester) async {
+        await tester.pumpWidget(
+            build(const AvdCardActions(cloningLabel: 'Cloning 42%')));
+        expect(find.text('Cloning 42%'), findsWidgets);
+        expect(find.byTooltip('More Phone 2 actions'), findsNothing);
+      });
+    }
+  });
 }

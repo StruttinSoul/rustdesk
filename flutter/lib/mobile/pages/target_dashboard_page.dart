@@ -20,6 +20,7 @@ import 'settings_page.dart';
 import 'terminal_page.dart';
 import '../widgets/mirpg_remote_theme.dart';
 import '../../common/widgets/aperture_brand.dart';
+import '../widgets/avd_manage_sheets.dart';
 import '../widgets/clipboard_transfer_sheet.dart';
 import '../widgets/monitor_control_view.dart';
 import '../widgets/monitor_key_sender.dart';
@@ -604,6 +605,70 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     if (mounted && model.hostError.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(model.hostError)));
     }
+  }
+
+  String _avdRawName(String id) => id.replaceFirst('avd:', '');
+
+  bool _avdNameTaken(String name, {String? except}) {
+    final lower = name.toLowerCase();
+    return model.instances.any((item) =>
+        item.provider == 'avd' &&
+        item.id != except &&
+        _avdRawName(item.id).toLowerCase() == lower);
+  }
+
+  void _reportAvdResult() {
+    if (mounted && model.hostError.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(model.hostError)));
+    }
+  }
+
+  Future<void> _newAvd() async {
+    final name = await showAvdNameSheet(context,
+        title: 'New emulator',
+        initialName: model.suggestAvdName('Emulator'),
+        note: 'Android 15 · 4 GB · 4 cores · about 12 GB on D after setup',
+        isTaken: _avdNameTaken);
+    if (name == null || !mounted) return;
+    await model.createAvd(name);
+    _reportAvdResult();
+  }
+
+  Future<void> _cloneAvd(_Target target) async {
+    final raw = _avdRawName(target.id);
+    final name = await showAvdNameSheet(context,
+        title: 'Clone ${target.name}',
+        initialName: model.suggestAvdName('${raw}_copy'),
+        note: 'Exact copy, including Google and game sign-ins. The game will see it as the same device.',
+        isTaken: _avdNameTaken,
+        confirmLabel: 'Clone');
+    if (name == null || !mounted) return;
+    await model.cloneAvd(target.id, name);
+    _reportAvdResult();
+  }
+
+  Future<void> _renameAvd(_Target target) async {
+    final raw = _avdRawName(target.id);
+    final name = await showAvdNameSheet(context,
+        title: 'Rename ${target.name}',
+        initialName: raw,
+        note: 'Only the name changes. The emulator keeps everything in it.',
+        isTaken: (candidate) => _avdNameTaken(candidate, except: target.id),
+        confirmLabel: 'Rename');
+    if (name == null || name == raw || !mounted) return;
+    await model.renameAvd(target.id, name);
+    _reportAvdResult();
+  }
+
+  Future<void> _deleteAvd(_Target target) async {
+    if (!await confirmAvdDelete(context, target.name) || !mounted) return;
+    await model.deleteAvd(target.id);
+    _reportAvdResult();
+  }
+
+  Future<void> _toggleAvdWindow(_Target target) async {
+    await model.setAvdWindowVisible(target.id, !(target.instance?.windowVisible ?? false));
+    _reportAvdResult();
   }
 
   Future<void> _dashboard() async {
@@ -1329,12 +1394,14 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         ];
 
         void addTargetGroup(
-            String title, String subtitle, List<_Target> group) {
-          if (group.isEmpty) return;
+            String title, String subtitle, List<_Target> group,
+            {Widget? trailing}) {
+          if (group.isEmpty && trailing == null) return;
           slivers.add(SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-              child: MirpgSectionHeader(title: title, subtitle: subtitle),
+              child: MirpgSectionHeader(
+                  title: title, subtitle: subtitle, trailing: trailing),
             ),
           ));
           slivers.add(SliverPadding(
@@ -1363,6 +1430,13 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             'Android · ${androidTargets.length}',
             'BlueStacks instances and boot controls',
             androidTargets,
+            trailing: model.canManageAvds
+                ? TextButton.icon(
+                    onPressed: () => unawaited(_newAvd()),
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('New'),
+                  )
+                : null,
           );
         }
 
@@ -1426,6 +1500,27 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                   model.emulatorShutdownCapability == CapabilityStatus.supported &&
                   widget.ffi.ffiModel.keyboard && !widget.ffi.ffiModel.viewOnly
               ? () => unawaited(_shutdownEmulator(target)) : null;
+          final instance = target.instance;
+          final cloning = instance?.state == 'cloning';
+          final avdActions = instance != null &&
+                  instance.provider == 'avd' &&
+                  model.canManageAvds &&
+                  widget.ffi.ffiModel.keyboard &&
+                  !widget.ffi.ffiModel.viewOnly
+              ? AvdCardActions(
+                  cloningLabel: cloning ? instance.runtimeLabel : null,
+                  running: !stopped && !cloning,
+                  windowVisible: instance.windowVisible,
+                  blocker: model.avdActionBlocker(target.id, 'avd_delete'),
+                  onToggleWindow: () => unawaited(_toggleAvdWindow(target)),
+                  onStop: model.canShutdownEmulator(target.id)
+                      ? () => unawaited(_shutdownEmulator(target))
+                      : null,
+                  onClone: () => unawaited(_cloneAvd(target)),
+                  onRename: () => unawaited(_renameAvd(target)),
+                  onDelete: () => unawaited(_deleteAvd(target)),
+                )
+              : null;
           final updatedAt = channel == null
               ? null
               : widget.ffi.imageModel.dashboardImageUpdatedAt(channel);
@@ -1469,7 +1564,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               : (streamDisconnected
                   ? model.guestFailures[target.id] ?? ''
                   : target.instance?.error ?? '');
-          final openAction = model.connecting ||
+          final openAction = model.connecting || cloning ||
                   (target.instance != null &&
                       (!widget.ffi.ffiModel.keyboard ||
                           widget.ffi.ffiModel.viewOnly))
@@ -1500,6 +1595,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               onRetry: retry,
               onShutdown: shutdownAction,
               shuttingDown: shuttingDown,
+              avd: avdActions,
             );
           }
           return TargetPreviewCard(
@@ -1517,6 +1613,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             onRetry: retry,
             onShutdown: shutdownAction,
             shuttingDown: shuttingDown,
+            avd: avdActions,
           );
         },
       );
@@ -2201,6 +2298,79 @@ class TargetSwitcherCards extends StatelessWidget {
       );
 }
 
+/// Managed Android emulator actions shown in a card's overflow menu.
+class AvdCardActions {
+  const AvdCardActions({
+    this.cloningLabel,
+    this.running = false,
+    this.windowVisible = false,
+    this.blocker,
+    this.onToggleWindow,
+    this.onStop,
+    this.onClone,
+    this.onRename,
+    this.onDelete,
+  });
+
+  /// Set while the emulator is being copied; the card then has no menu.
+  final String? cloningLabel;
+  final bool running;
+  final bool windowVisible;
+
+  /// Why clone, rename and delete are unavailable right now, if they are.
+  final String? blocker;
+  final VoidCallback? onToggleWindow;
+  final VoidCallback? onStop;
+  final VoidCallback? onClone;
+  final VoidCallback? onRename;
+  final VoidCallback? onDelete;
+
+  bool get hasMenu => cloningLabel == null;
+
+  List<PopupMenuEntry<String>> menuEntries(BuildContext context, bool shuttingDown) {
+    PopupMenuItem<String> item(String value, String label, VoidCallback? action,
+            {String? subtitle}) =>
+        PopupMenuItem<String>(
+          value: value,
+          enabled: !shuttingDown && action != null && subtitle == null,
+          child: subtitle == null
+              ? Text(label)
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label),
+                    Text(subtitle,
+                        style: Theme.of(context).textTheme.bodySmall),
+                  ],
+                ),
+        );
+    return [
+      if (running && onToggleWindow != null)
+        item('avd_window', windowVisible ? 'Hide on PC' : 'Show on PC', onToggleWindow),
+      if (running) item('avd_stop', 'Stop', onStop),
+      item('avd_clone', 'Clone', onClone, subtitle: blocker),
+      item('avd_rename', 'Rename', onRename, subtitle: blocker),
+      item('avd_delete', 'Delete', onDelete, subtitle: blocker),
+    ];
+  }
+
+  void select(String value) {
+    switch (value) {
+      case 'avd_window':
+        onToggleWindow?.call();
+      case 'avd_stop':
+        onStop?.call();
+      case 'avd_clone':
+        onClone?.call();
+      case 'avd_rename':
+        onRename?.call();
+      case 'avd_delete':
+        onDelete?.call();
+    }
+  }
+}
+
 /// A dense, accessible screen-picker row for Studio V4's All screens page.
 /// The full preview card remains available on Home and in the view switcher.
 class TargetScreenRow extends StatelessWidget {
@@ -2219,8 +2389,10 @@ class TargetScreenRow extends StatelessWidget {
     this.onRetry,
     this.onShutdown,
     this.shuttingDown = false,
+    this.avd,
   });
 
+  final AvdCardActions? avd;
   final String name;
   final String type;
   final bool stopped;
@@ -2246,6 +2418,8 @@ class TargetScreenRow extends StatelessWidget {
             : 'Open';
     final status = shuttingDown
         ? 'Shutting down…'
+        : avd?.cloningLabel != null
+        ? avd!.cloningLabel!
         : stopped
         ? 'Stopped'
         : streamDisconnected
@@ -2317,7 +2491,7 @@ class TargetScreenRow extends StatelessWidget {
                 ),
               ),
               if ((!stopped && type != 'Windows' && onShutdown != null) || onLaunchGame != null ||
-                  (!stopped && !live && onRetry != null))
+                  (!stopped && !live && onRetry != null) || avd?.hasMenu == true)
                 PopupMenuButton<String>(
                   tooltip: 'More $name actions',
                   icon: const Icon(Icons.more_vert_rounded),
@@ -2326,6 +2500,7 @@ class TargetScreenRow extends StatelessWidget {
                     if (value == 'shutdown') onShutdown?.call();
                     if (value == 'game') onLaunchGame?.call();
                     if (value == 'retry') onRetry?.call();
+                    avd?.select(value);
                   },
                   itemBuilder: (_) => [
                     if (onLaunchGame != null)
@@ -2334,6 +2509,7 @@ class TargetScreenRow extends StatelessWidget {
                     if (!stopped && !live && onRetry != null)
                       PopupMenuItem(
                           value: 'retry', enabled: !shuttingDown, child: Text('Retry preview')),
+                    if (avd?.hasMenu == true) ...avd!.menuEntries(context, shuttingDown),
                     if (!stopped && type != 'Windows' && onShutdown != null)
                       PopupMenuItem(value: 'shutdown', enabled: !shuttingDown,
                         child: Text(shuttingDown ? 'Shutting down…' : 'Shut down emulator')),
@@ -2372,7 +2548,9 @@ class TargetPreviewCard extends StatelessWidget {
       this.onLaunchGame,
       this.onRetry,
       this.onShutdown,
-      this.shuttingDown = false});
+      this.shuttingDown = false,
+      this.avd});
+  final AvdCardActions? avd;
   final String name;
   final String type;
   final bool stopped;
@@ -2395,6 +2573,8 @@ class TargetPreviewCard extends StatelessWidget {
         : '${instanceState[0].toUpperCase()}${instanceState.substring(1)}';
     final stateLabel = shuttingDown
         ? 'Shutting down…'
+        : avd?.cloningLabel != null
+        ? avd!.cloningLabel!
         : stopped
         ? 'Stopped'
         : streamDisconnected
@@ -2406,7 +2586,7 @@ class TargetPreviewCard extends StatelessWidget {
                     : error.isNotEmpty
                         ? 'Attention'
                         : 'Connecting';
-    final stateTone = stopped || shuttingDown
+    final stateTone = stopped || shuttingDown || avd?.cloningLabel != null
         ? MirpgStatusTone.neutral
         : streamDisconnected || streamStalled
             ? MirpgStatusTone.error
@@ -2618,9 +2798,9 @@ class TargetPreviewCard extends StatelessWidget {
                                           ? palette.good
                                           : palette.textSecondary)),
                         ),
-                        if (!stopped && type != 'Windows' && onShutdown != null)
+                        if (avd?.hasMenu == true || (!stopped && type != 'Windows' && onShutdown != null))
                           _EmulatorShutdownMenu(name: name, shuttingDown: shuttingDown,
-                            onShutdown: onShutdown!, onLaunchGame: onLaunchGame)
+                            onShutdown: onShutdown, onLaunchGame: onLaunchGame, avd: avd)
                         else if (onLaunchGame != null)
                           IconButton(
                             onPressed: onLaunchGame,
@@ -2658,9 +2838,9 @@ class TargetPreviewCard extends StatelessWidget {
                       ],
                     ),
                   ),
-                  if (!stopped && type != 'Windows' && onShutdown != null)
+                  if (avd?.hasMenu == true || (!stopped && type != 'Windows' && onShutdown != null))
                     _EmulatorShutdownMenu(name: name, shuttingDown: shuttingDown,
-                      onShutdown: onShutdown!, onLaunchGame: onLaunchGame)
+                      onShutdown: onShutdown, onLaunchGame: onLaunchGame, avd: avd)
                   else if (onLaunchGame != null)
                     if (compact)
                       IconButton(
@@ -2716,9 +2896,10 @@ Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name)
 
 class _EmulatorShutdownMenu extends StatelessWidget {
   const _EmulatorShutdownMenu({required this.name, required this.onShutdown,
-    required this.shuttingDown, this.onLaunchGame});
+    required this.shuttingDown, this.onLaunchGame, this.avd});
   final String name;
-  final VoidCallback onShutdown;
+  final AvdCardActions? avd;
+  final VoidCallback? onShutdown;
   final VoidCallback? onLaunchGame;
   final bool shuttingDown;
   @override
@@ -2726,13 +2907,16 @@ class _EmulatorShutdownMenu extends StatelessWidget {
     tooltip: 'More $name actions',
     onSelected: (value) {
       if (shuttingDown) return;
-      if (value == 'shutdown') onShutdown();
+      if (value == 'shutdown') onShutdown?.call();
       if (value == 'game') onLaunchGame?.call();
+      avd?.select(value);
     },
-    itemBuilder: (_) => [
+    itemBuilder: (context) => [
       if (onLaunchGame != null) PopupMenuItem(value: 'game', enabled: !shuttingDown, child: const Text('Launch game')),
-      PopupMenuItem(value: 'shutdown', enabled: !shuttingDown,
-        child: Text(shuttingDown ? 'Shutting down…' : 'Shut down emulator')),
+      if (avd?.hasMenu == true) ...avd!.menuEntries(context, shuttingDown),
+      if (onShutdown != null)
+        PopupMenuItem(value: 'shutdown', enabled: !shuttingDown,
+          child: Text(shuttingDown ? 'Shutting down…' : 'Shut down emulator')),
     ],
   );
 }
