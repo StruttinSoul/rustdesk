@@ -5,7 +5,7 @@ The user plays the same game on **several accounts at once**. Google's Android E
 
 ## Goals
 - Aperture's emulators live in **`D:\Aperture\Emulators`** (user's choice of D drive; folder name is my call). Aperture lists and manages **only** emulators in that folder.
-- **Headless:** emulators run with no window on atlas; Aperture is the only way to see them.
+- **Headless by default, switchable live:** emulators start with their window hidden on atlas, and the phone can **Show on PC / Hide on PC** at any time without restarting (user request, added after approval).
 - **Full control from the phone:** Start, Stop, Restart per emulator; several can run at once.
 - **Create** a new emulator: Android 15 with Play Store, **4 GB RAM, 4 CPU cores** (user's defaults).
 - **Clone** an emulator: an **exact copy** (user chose A): installed apps, Google sign-in, game login, settings. The copy gets its own name.
@@ -37,7 +37,7 @@ The user plays the same game on **several accounts at once**. Google's Android E
 - Rust 1.75; no new dependencies expected. Project rules in AGENTS.md (no blocking in async, throttled logging, explicit errors).
 
 ## Approaches
-- **Chosen: Aperture's host drives Google's emulator tools directly, with emulators launched in the user's Windows session.** Start = `emulator -avd <name> -no-window` with `ANDROID_AVD_HOME=D:\Aperture\Emulators`, launched through an Aperture helper running as the signed-in user; stop = ADB `emu kill`; create = write the AVD files from a template; clone = copy the folder and rename; delete/rename = file operations. Keeps the RTX 3080 (host GPU) and avoids the socket-inheritance bug.
+- **Chosen: Aperture's host drives Google's emulator tools directly, with emulators launched in the user's Windows session.** Start = `emulator -avd <name>` (normal window, hidden right after it appears) with `ANDROID_AVD_HOME=D:\Aperture\Emulators`, launched through an Aperture helper running as the signed-in user; stop = ADB `emu kill`; create = write the AVD files from a template; clone = copy the folder and rename; delete/rename = file operations. Keeps the RTX 3080 (host GPU) and avoids the socket-inheritance bug.
 - Rejected: launching emulators as the SYSTEM service — would work at the sign-in screen, but the GPU is normally unavailable in session 0 (software graphics) and the emulator would inherit the service's sockets.
 - Rejected: `avdmanager` for create — needs Java on atlas and adds nothing over a template.
 - Rejected: the emulator's gRPC control channel — ADB already covers start/stop and is what Aperture uses.
@@ -51,7 +51,11 @@ The user plays the same game on **several accounts at once**. Google's Android E
 - Names: `[A-Za-z0-9._-]`, ≤ 64, not starting with `.` (existing `valid_avd_name`). Display name = name with `_` → space.
 
 **Start / restart**
-- `start`: refuse if already running or locked; check free RAM ≥ the AVD's `hw.ramSize` + 2 GB (else a clear error: "Not enough free memory on atlas to start <name>"). Then run the Aperture executable as the signed-in user with a helper flag (e.g. `--aperture-avd-start <name>`), which sets `ANDROID_AVD_HOME` and `ANDROID_SDK_ROOT` and spawns `emulator.exe -avd <name> -no-window -no-audio` detached (no inherited handles). If nobody is signed in, fail with "Sign in to Windows on atlas to start emulators".
+- `start`: refuse if already running or locked; check free RAM ≥ the AVD's `hw.ramSize` + 2 GB (else a clear error: "Not enough free memory on atlas to start <name>"). Then run the Aperture executable as the signed-in user with a helper flag (e.g. `--aperture-avd-start <name>`), which sets `ANDROID_AVD_HOME` and `ANDROID_SDK_ROOT` and spawns `emulator.exe -avd <name> -no-audio` detached (no inherited handles), waits up to 60 s for the emulator's top-level windows (process `qemu-system-x86_64.exe` with `-avd <name>`; titles `Android Emulator - <name>:<port>` and `Emulator`), and hides them (`ShowWindow SW_HIDE`).
+
+**Show / hide on PC** - host operation `avd_window` (`component`, `window_visible`): runs the helper `--aperture-avd-window <name> show|hide` in the user's session, which finds that emulator's top-level windows by process and calls `ShowWindow` (`SW_SHOW` + bring to front, or `SW_HIDE`). The host remembers the last state per emulator (hidden after start) and reports it as `EmulatorInstance.window_visible`. Closing a shown window on atlas stops the emulator, as usual.
+
+*Verified on atlas (2026-11-14, throwaway AVD):* `-no-window` and `-qt-hide-window` create no main window, so they cannot be shown later. A normal start whose windows are hidden with `SW_HIDE` keeps rendering on the RTX 3080, streams at the same speed hidden or shown (tap-to-frame 74-131 ms, frame gap 41-49 ms on a 2-core test AVD in both states), and redraws correctly when shown again. If nobody is signed in, fail with "Sign in to Windows on atlas to start emulators".
 - The existing selection path (`start_if_stopped`, 90 s boot wait) then streams it — the phone's **Boot** button works unchanged.
 - `stop`: `adb -s <serial> emu kill`, wait up to 20 s for it to leave `adb devices`.
 - `restart`: stop, wait, start.
@@ -67,7 +71,7 @@ The user plays the same game on **several accounts at once**. Google's Android E
 **Moving the trial emulator**: a one-time move of `Aperture_Trial_Play35` from `%USERPROFILE%\.android\avd` to the root (stopped first), keeping its 6 cores / 8 GB. Done by the builder at install time with the user's go-ahead, not by product code.
 
 ### Phone
-- Emulator cards for `avd` instances get **Start** (existing Boot), **Stop**, **Restart** (overflow menu), and **Clone / Rename / Delete** (overflow; disabled with a reason while running).
+- Emulator cards for `avd` instances get **Start** (existing Boot), **Stop**, **Restart**, **Show on PC / Hide on PC** (running only) (overflow menu), and **Clone / Rename / Delete** (overflow; disabled with a reason while running).
 - A **New emulator** action in the emulator list header opens a sheet: name field (pre-filled e.g. `Maple_2`), shows "Android 15 · 4 GB · 4 cores · about 12 GB on D after setup", Create.
 - Clone opens the same sheet with the name pre-filled `<source>_copy`, and a note: "Exact copy, including Google and game sign-ins. The game will see it as the same device."
 - Delete asks to type or confirm the name: "Permanently deletes <name> and everything in it."
@@ -77,7 +81,7 @@ The user plays the same game on **several accounts at once**. Google's Android E
 Sketch (emulator list):
 ```
 Emulators                         [+ New]
-┌ Maple 1   Android Emulator · Ready   [Open] [⋮] ┐   ⋮ = Stop · Restart · Clone · Rename · Delete
+┌ Maple 1   Android Emulator · Ready   [Open] [⋮] ┐   ⋮ = Show on PC · Stop · Restart · Clone · Rename · Delete
 ┌ Maple 2   Android Emulator · Stopped [Boot] [⋮] ┐
 ┌ Maple 3   Cloning… 42%                          ┐
 ┌ Tiramisu64_3   BlueStacks · Ready    [Open] [⋮] ┐
@@ -94,7 +98,7 @@ Emulators                         [+ New]
 
 ## Risks
 - **Exact copies share the device identity** (Android ID, Google services ID). The game or Google may treat copies as one device; the user accepted this. Signing each copy into a different account is manual.
-- **Headless + host GPU**: must be verified on atlas (`-no-window` with `hw.gpu.mode=host`); if the emulator falls back to software graphics headless, the builder reports it before continuing.
+- **Hidden window**: the window may flash on atlas for a few seconds at start before it is hidden. Verified: rendering stays on the RTX 3080 while hidden.
 - **Disk**: ~12 GB per emulator; D fits ~8–10. Space checks prevent half-written clones.
 - **Memory**: several 4 GB emulators plus BlueStacks; the start-time RAM check prevents overcommit.
 

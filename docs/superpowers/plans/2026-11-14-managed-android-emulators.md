@@ -14,13 +14,14 @@
 - Root: `D:\Aperture\Emulators`, host option `aperture-avd-home` overrides it. Nothing outside the root is ever listed, started, cloned, renamed or deleted.
 - Names: `[A-Za-z0-9._-]`, length 1–64, not starting with `.`; target id `avd:<name>`; display name = name with `_` → space.
 - New emulator template: pixel_7, `system-images\android-35\google_apis_playstore\x86_64\`, `hw.ramSize=4096`, `hw.cpu.ncore=4`, `hw.gpu.enabled=yes`, `hw.gpu.mode=host`, `hw.keyboard=yes`, `PlayStore.enabled=true`, `disk.dataPartition.size=24G`; other keys copied from the working trial AVD's `config.ini`.
-- Launch: `emulator.exe -avd <name> -no-window -no-audio`, env `ANDROID_AVD_HOME=<root>`, `ANDROID_SDK_ROOT=<user SDK>`, run as the signed-in user through helper flag `--aperture-avd-start <name>`; no inherited handles. No user signed in → error "Sign in to Windows on atlas to start emulators".
+- Launch: `emulator.exe -avd <name> -no-audio` (normal window), then the helper hides that emulator's top-level windows (`ShowWindow(SW_HIDE)`; found by process `qemu-system-x86_64.exe` whose command line has `-avd <name>`, waiting up to 60 s); env `ANDROID_AVD_HOME=<root>`, `ANDROID_SDK_ROOT=<user SDK>`, run as the signed-in user through helper flag `--aperture-avd-start <name>`; no inherited handles. No user signed in → error "Sign in to Windows on atlas to start emulators".
 - Start memory check: Windows available physical memory ≥ `hw.ramSize` + 2048 MB, minus the full `hw.ramSize` of every emulator started in the last 2 minutes; starts serialised by one host-wide lock. Error "Not enough free memory on atlas to start <name>".
 - Free-space checks on the root's drive: create ≥ 16 GB; clone ≥ source size + 4 GB.
 - "Running" = a `qemu-system-x86_64.exe` whose command line contains `-avd <name>`; clone/rename/delete require not running (and source not being cloned).
 - Clone = exact copy, excluding `*.lock`, `multiinstance.lock`, `hardware-qemu.ini`, `snapshots\`, `aperture-*.log*`, `emu-launch-params.txt`; marker `<new>.avd\aperture-clone.json` = `{source, total_bytes, copied_bytes, host_pid, started}`; stale marker (`host_pid` ≠ current process) ⇒ partial folder and `.ini` deleted.
-- Proto (libs/base/protos/message.proto, not hbb_common): `EmulatorHostRequest.new_name = 21` (string); `EmulatorInstance.progress_percent = 8` (uint32).
-- Host actions: `avd_create`, `avd_clone`, `avd_rename`, `avd_delete` (control-gated, operation identity like `emulator_shutdown`, target identity `emulator:avd:<name>`; for create `emulator:avd:<new_name>`); capability string `host.avd_manage.v1`. `emulator_shutdown` accepts `avd:<name>` and stops via the provider.
+- Proto (libs/base/protos/message.proto, not hbb_common): `EmulatorHostRequest.new_name = 21` (string), `EmulatorHostRequest.window_visible = 22` (bool); `EmulatorInstance.progress_percent = 8` (uint32), `EmulatorInstance.window_visible = 9` (bool).
+- Show/hide on PC: host action `avd_window` (`component`, `window_visible`) -> helper `--aperture-avd-window <name> show|hide` in the user session (`SW_SHOW` + `SetForegroundWindow`, or `SW_HIDE`); the host keeps the last state per emulator in memory, hidden after start; phone items "Show on PC" / "Hide on PC" for running `avd` emulators.
+- Host actions: `avd_create`, `avd_clone`, `avd_rename`, `avd_delete`, `avd_window` (control-gated, operation identity like `emulator_shutdown`, target identity `emulator:avd:<name>`; for create `emulator:avd:<new_name>`); capability string `host.avd_manage.v1`. `emulator_shutdown` accepts `avd:<name>` and stops via the provider.
 - Rust: no new dependencies; no blocking in async; no per-frame logging (AGENTS.md). Commits end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. No push; installs only with the user's go-ahead.
 - Rust tests: `target/headless-vdd-20261113/t.sh <log> <filter>` (single filter). Flutter tests: `cd flutter && flutter test <file>`.
 
@@ -108,6 +109,8 @@
   - `pub const AVD_START_HELPER: &str = "--aperture-avd-start";`
   - `pub fn handle_helper_args(args: &[String]) -> bool` (in user session: resolve SDK `%LOCALAPPDATA%\Android\Sdk`, run `adb start-server`, spawn emulator per Global Constraints, detached)
   - `pub fn launch_in_user_session(name: &str) -> ResultType<()>` (uses `crate::platform::run_as_user(vec![AVD_START_HELPER, name])`; maps no-session to the spec's error)
+  - `pub const AVD_WINDOW_HELPER: &str = "--aperture-avd-window";` and `pub fn set_window_visible(name: &str, visible: bool) -> ResultType<()>` (runs the helper as the user); helper side finds the top-level windows of that emulator's process titled `Android Emulator - <name>:<port>` or `Emulator`, hidden or not
+  - `pub fn window_visible(name: &str) -> bool` (in-memory last state; `false` after start)
   - `fn memory_allows(available_mb: u64, ram_mb: u32, recent_reserved_mb: u64) -> bool` (pure)
   - `fn running_avd_names(processes: &[(String /*exe name*/, Vec<String> /*cmd*/)]) -> BTreeSet<String>` (pure)
   - `AvdProvider::detect()` now returns a provider whenever the root exists (ADB server optional; running state needs it)
@@ -139,7 +142,7 @@ Make the provider testable by injecting process listing, guest-name probing and 
 - [ ] **Step 2: RED** — `t.sh avd2-red server::emulator::avd` → FAIL.
 - [ ] **Step 3: Implement.** Discovery = `AvdHome::list()` (after `cleanup_stale_clones(std::process::id())`) joined with running names → serial via existing guest probe (`ro.boot.qemu.avd_name`); `start` takes a `static START_LOCK: Mutex<Vec<(Instant, u32)>>` for recent reservations; `stop` = `adb -s <serial> emu kill` then poll process list up to 20 s; `restart` = stop + start; capabilities start/stop/restart = true. Inventory adds `progress_percent` and state `cloning` for clone entries.
 - [ ] **Step 4: GREEN** — `t.sh avd2-green server::emulator::avd` then `t.sh avd2-all emulator`.
-- [ ] **Step 5: Verify headless GPU on atlas (manual, no install).** With the trial stopped, run `emulator -avd Aperture_Trial_Play35 -no-window -no-audio` as the user and check `adb shell dumpsys SurfaceFlinger | grep GLES` names the NVIDIA RTX 3080. If it shows SwiftShader, stop and report before continuing. Restart the trial windowed afterwards.
+- [ ] **Step 5: (done by the controller before execution)** hidden-window start verified on atlas: RTX 3080 in use, same stream speed hidden or shown, redraws when shown. Nothing to do.
 - [ ] **Step 6: Commit** — `feat(host): headless managed emulators start, stop and restart`.
 
 ### Task 3: Host operations, proto and shutdown
@@ -155,7 +158,7 @@ Make the provider testable by injecting process listing, guest-name probing and 
 
 **Interfaces:**
 - Consumes: Task 1 `AvdHome::{create, clone_avd, rename, delete, required_free_bytes_for_clone}`, Task 2 running detection.
-- Produces (JSON the phone sends): `{"action":"avd_create","new_name":N}`, `{"action":"avd_clone","component":"avd:S","new_name":N}`, `{"action":"avd_rename","component":"avd:S","new_name":N}`, `{"action":"avd_delete","component":"avd:S"}`, each with the usual `request_id, operation_id, session_identity, target_identity, session_generation`.
+- Produces (JSON the phone sends): `{"action":"avd_window","component":"avd:S","window_visible":true|false}`, `{"action":"avd_create","new_name":N}`, `{"action":"avd_clone","component":"avd:S","new_name":N}`, `{"action":"avd_rename","component":"avd:S","new_name":N}`, `{"action":"avd_delete","component":"avd:S"}`, each with the usual `request_id, operation_id, session_identity, target_identity, session_generation`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -166,6 +169,7 @@ Make the provider testable by injecting process listing, guest-name probing and 
     // new_name "../x" Err; component "bluestacks:Tiramisu64" Err; target identity == "emulator:avd:Maple_1"
     // avd_create target identity == "emulator:avd:Maple_2"
 }
+#[test] fn avd_window_needs_control_and_a_running_target() { /* authorize(control=false) Err; JSON window_visible true/false -> request.window_visible; host returns ok=false "not running" for a stopped emulator */ }
 #[test] fn shutdown_accepts_android_emulator_targets() { assert!(valid_shutdown_target("avd:Maple_1")); assert!(!valid_shutdown_target("avd:../x")); }
 // emulator_protocol.rs
 #[test] fn parses_avd_management_requests() { /* each action JSON → EmulatorHostRequest with action/component/new_name */ }
@@ -191,6 +195,7 @@ Make the provider testable by injecting process listing, guest-name probing and 
   - `RemoteEmulator.progressPercent` (int, default 0); `runtimeLabel` `'cloning' => 'Cloning $progressPercent%'`
   - `bool get canManageAvds` (capability supported and control)
   - `String? avdActionBlocker(String id, String action)` → `null` or the reason shown on disabled items ('Stop it first', 'Copy in progress')
+  - `RemoteEmulator.windowVisible` (bool, from `window_visible`); `Future<void> setAvdWindowVisible(String id, bool visible)`
   - `Future<void> createAvd(String name)`, `cloneAvd(String id, String name)`, `renameAvd(String id, String name)`, `deleteAvd(String id)` — all through `_beginHostOperation` / `_sendHostOperation` like `shutdownEmulator`, with a 2 s refresh timer while an operation or a `cloning` instance exists
   - `canShutdownEmulator` true for provider `avd` too
   - `String suggestAvdName(String base)` → first free of `base`, `base_2`, `base_3`…
@@ -216,7 +221,7 @@ Copy (exact):
 - New sheet title "New emulator", note "Android 15 · 4 GB · 4 cores · about 12 GB on D after setup".
 - Clone sheet title "Clone <name>", initial `<name>_copy`, note "Exact copy, including Google and game sign-ins. The game will see it as the same device."
 - Delete dialog "Delete <name>?" / "Permanently deletes <name> and everything in it." buttons "Cancel" / "Delete".
-- Menu items: "Stop", "Restart", "Clone", "Rename", "Delete" (+ existing "Launch game"); disabled items show the blocker as subtitle.
+- Menu items: "Show on PC" / "Hide on PC" (running only, label from `windowVisible`), "Stop", "Restart", "Clone", "Rename", "Delete" (+ existing "Launch game"); disabled items show the blocker as subtitle.
 
 - [ ] **Step 1: Failing tests** — sheet rejects invalid or taken names (Create disabled, message "Use letters, numbers, . _ -" / "Name already used"); delete dialog returns true only on "Delete"; card menu for a ready `avd` shows Stop/Restart enabled and Delete disabled with "Stop it first"; a `cloning` card shows "Cloning 42%" and no menu.
 - [ ] **Step 2: RED** — `flutter test test/avd_manage_sheets_test.dart test/target_dashboard_test.dart`.
@@ -231,5 +236,5 @@ Copy (exact):
 - [ ] **Step 1:** Build host DLL, Android native lib, APK (commands in the session notes); stage `target/managed-avd-20261114/deployment` and run `-ValidateOnly` → "VALIDATION PASSED".
 - [ ] **Step 2: Ask the user** before installing host + phone and before moving the trial AVD.
 - [ ] **Step 3:** Stop the trial; move `%USERPROFILE%\.android\avd\Aperture_Trial_Play35.avd` + `.ini` to `D:\Aperture\Emulators`, rewrite `path=`; leave the development AVDs untouched.
-- [ ] **Step 4: On device:** trial listed as Stopped → Boot (headless, no window on atlas) → streams; New `Maple_2` → boots; Clone trial → progress → both run at once; Rename; Delete the test copy; development AVDs never listed. Read the timing log for both streams.
+- [ ] **Step 4: On device:** trial listed as Stopped → Boot (window hidden on atlas) → streams; Show on PC → window appears on atlas while streaming; Hide on PC → gone, still streaming; New `Maple_2` → boots; Clone trial → progress → both run at once; Rename; Delete the test copy; development AVDs never listed. Read the timing log for both streams.
 - [ ] **Step 5: Commit** — `chore: Aperture 1.6.0`.
