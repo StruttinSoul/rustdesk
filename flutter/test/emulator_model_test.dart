@@ -2248,4 +2248,18 @@ void main() {
     expect(model.error, isEmpty);
     model.dispose();
   });
+
+  group('emulator providers', () {
+    test('BlueStacks and the Android Emulator are dashboard targets', () {
+      expect(isDashboardGuestProvider('bluestacks'), isTrue);
+      expect(isDashboardGuestProvider('avd'), isTrue);
+      expect(isDashboardGuestProvider('ldplayer'), isFalse);
+    });
+
+    test('providers have readable names', () {
+      expect(emulatorProviderLabel('bluestacks'), 'BlueStacks');
+      expect(emulatorProviderLabel('avd'), 'Android Emulator');
+      expect(emulatorProviderLabel('ldplayer'), 'ldplayer');
+    });
+  });
 }

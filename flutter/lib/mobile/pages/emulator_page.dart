@@ -717,9 +717,7 @@ class _EmulatorPageState extends State<EmulatorPage>
                           const SizedBox(height: 3),
                           Text(
                             [
-                              instance.provider == 'bluestacks'
-                                  ? 'BlueStacks'
-                                  : instance.provider,
+                              emulatorProviderLabel(instance.provider),
                               if (instance.androidVersion.isNotEmpty)
                                 'Android ${instance.androidVersion}',
                             ].join(' · '),

@@ -49,6 +49,15 @@ impl GuestStreamProfile {
         Self::fullscreen_from_options(Config::get_option)
     }
 
+    /// The Android Emulator's software encoder drops to about a third of any
+    /// frame cap below its 60 Hz screen (30 -> ~10 fps), so it streams at 60.
+    fn uncapped_fps(self) -> Self {
+        Self {
+            max_fps: 60,
+            ..self
+        }
+    }
+
     fn fullscreen_from_options(option: impl Fn(&str) -> String) -> Self {
         let default = Self::FULLSCREEN;
         Self {
@@ -106,11 +115,16 @@ pub struct GuestHelper {
 
 impl GuestHelper {
     pub fn connect(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, false)
+        Self::connect_with_options(adb, serial, helper, false, false)
+    }
+
+    /// Full-screen stream for Google's Android Emulator (see `uncapped_fps`).
+    pub fn connect_android_emulator(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
+        Self::connect_with_options(adb, serial, helper, false, true)
     }
 
     pub fn connect_preview(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, true)
+        Self::connect_with_options(adb, serial, helper, true, false)
     }
 
     fn connect_with_options(
@@ -118,6 +132,7 @@ impl GuestHelper {
         serial: &str,
         helper: &Path,
         preview: bool,
+        uncapped_fps: bool,
     ) -> ResultType<Self> {
         if !is_local_emulator(serial) {
             bail!("Guest helper requires a local emulator ADB endpoint")
@@ -150,10 +165,10 @@ impl GuestHelper {
         session.port = Some(port);
         let classpath = format!("CLASSPATH={}", session.jar);
         let scid_arg = format!("scid={scid:08x}");
-        let profile = if preview {
-            GuestStreamProfile::preview()
-        } else {
-            GuestStreamProfile::fullscreen()
+        let profile = match (preview, uncapped_fps) {
+            (true, _) => GuestStreamProfile::preview(),
+            (false, true) => GuestStreamProfile::fullscreen().uncapped_fps(),
+            (false, false) => GuestStreamProfile::fullscreen(),
         };
         if !preview && profile != GuestStreamProfile::FULLSCREEN {
             log::debug!("Guest fullscreen stream profile: {profile:?}");
@@ -301,9 +316,17 @@ pub(super) fn adb_command(adb: &Path, serial: &str, args: &[&str]) -> ResultType
     if !is_local_emulator(serial) {
         bail!("ADB requires a local emulator endpoint")
     }
+    run_adb(adb, &[&["-s", serial], args].concat())
+}
+
+/// `adb devices` on the default server.
+pub(super) fn adb_devices(adb: &Path) -> ResultType<String> {
+    run_adb(adb, &["devices"])
+}
+
+fn run_adb(adb: &Path, args: &[&str]) -> ResultType<String> {
     let mut child = Command::new(adb)
         .creation_flags(0x08000000)
-        .args(["-s", serial])
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -425,6 +448,20 @@ mod tests {
                 .map(|(_, value)| (*value).to_owned())
                 .unwrap_or_default()
         })
+    }
+
+    #[test]
+    fn android_emulator_streams_at_sixty_fps() {
+        // Below 60 the Android Emulator's software encoder falls to ~10 fps.
+        let configured = fullscreen_profile_from(&[(GUEST_MAX_FPS_OPTION, "30")]);
+        assert_eq!(
+            configured.uncapped_fps(),
+            GuestStreamProfile {
+                max_fps: 60,
+                ..configured
+            }
+        );
+        assert_eq!(GuestStreamProfile::FULLSCREEN.max_fps, 30);
     }
 
     #[test]

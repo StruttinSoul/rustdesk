@@ -157,7 +157,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         for (var i = 0; i < widget.ffi.ffiModel.pi.displays.length; i++)
           _Target.monitor(i),
         for (final instance in model.instances)
-          if (instance.provider == 'bluestacks') _Target.guest(instance),
+          if (isDashboardGuestProvider(instance.provider))
+            _Target.guest(instance),
       ];
 
   @override
@@ -1421,7 +1422,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           final stopped = target.instance?.state == 'stopped';
           final shuttingDown = target.instance != null && model.isEmulatorShuttingDown(target.id);
           final shutdownFailed = target.instance?.state == 'shutdown_failed';
-          final shutdownAction = target.instance != null && !stopped &&
+          final shutdownAction = target.instance?.provider == 'bluestacks' && !stopped &&
                   model.emulatorShutdownCapability == CapabilityStatus.supported &&
                   widget.ffi.ffiModel.keyboard && !widget.ffi.ffiModel.viewOnly
               ? () => unawaited(_shutdownEmulator(target)) : null;

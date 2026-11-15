@@ -844,6 +844,12 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn request_emulator(&self, payload: String) {
         if let Some(request) = crate::client::emulator_request_from_json(&payload) {
+            if matches!(
+                request.union.as_ref(),
+                Some(emulator_request::Union::Touch(touch)) if touch.action == 0
+            ) {
+                crate::frame_timing::CLIENT_TAPS.touch_down(std::time::Instant::now());
+            }
             let mut message = Message::new();
             message.set_emulator_request(request);
             self.send(Data::Message(message));

@@ -1,4 +1,5 @@
 use super::{
+    avd::AvdProvider,
     bluestacks::BlueStacksProvider,
     guest_protocol::{text_packet, touch_packet, H264Frames, VideoPacket},
     guest_runtime::{
@@ -38,7 +39,7 @@ struct LocalTarget {
 fn targets() -> (Vec<LocalTarget>, Vec<String>) {
     let mut found = Vec::new();
     let mut errors = Vec::new();
-    let providers: [(&str, ResultType<Option<Arc<dyn EmulatorProvider>>>); 2] = [
+    let providers: [(&str, ResultType<Option<Arc<dyn EmulatorProvider>>>); 3] = [
         (
             "BlueStacks",
             BlueStacksProvider::detect().map(|provider| {
@@ -48,6 +49,12 @@ fn targets() -> (Vec<LocalTarget>, Vec<String>) {
         (
             "LDPlayer",
             LdPlayerProvider::detect().map(|provider| {
+                provider.map(|provider| Arc::new(provider) as Arc<dyn EmulatorProvider>)
+            }),
+        ),
+        (
+            "Android Emulator",
+            AvdProvider::detect().map(|provider| {
                 provider.map(|provider| Arc::new(provider) as Arc<dyn EmulatorProvider>)
             }),
         ),
@@ -172,8 +179,21 @@ pub fn with_phase(mut response: EmulatorResponse, phase: &str) -> EmulatorRespon
     response
 }
 
-fn adb_executable() -> ResultType<PathBuf> {
-    if let Some(adb) = hbb_common::sysinfo::System::new_all()
+fn has_live_preview(provider: &str) -> bool {
+    matches!(provider, "bluestacks" | "avd")
+}
+
+/// Providers whose emulator-N serial could be BlueStacks' port alias.
+fn may_be_bluestacks_alias(provider: &str) -> bool {
+    provider != "bluestacks"
+}
+
+/// The adb.exe of the running default (port 5037) ADB server, if any.
+pub(super) fn running_adb_server() -> Option<PathBuf> {
+    // Processes only: new_all() also queries disks, networks and components.
+    let mut system = hbb_common::sysinfo::System::new();
+    system.refresh_processes();
+    system
         .processes()
         .values()
         .find_map(|process| {
@@ -182,7 +202,10 @@ fn adb_executable() -> ResultType<PathBuf> {
                 && process.exe().is_file())
             .then(|| process.exe().to_path_buf())
         })
-    {
+}
+
+fn adb_executable() -> ResultType<PathBuf> {
+    if let Some(adb) = running_adb_server() {
         return Ok(adb);
     }
     for root in [
@@ -495,10 +518,10 @@ fn run_session(
         .find(|target| target.target.stable_id == target_id)
         .ok_or_else(|| hbb_common::anyhow::anyhow!("Emulator instance no longer exists"))?;
     if preview
-        && (local.target.provider.to_string() != "bluestacks"
+        && (!has_live_preview(&local.target.provider.to_string())
             || local.target.state == EmulatorState::Stopped)
     {
-        bail!("Only running BlueStacks instances have live previews")
+        bail!("Only running BlueStacks and Android Emulator instances have live previews")
     }
     if !local.provider.capabilities(&local.target).adb {
         bail!("Enable ADB debugging in this emulator instance's settings before connecting")
@@ -572,8 +595,10 @@ fn run_session(
         &serial,
         &["shell", "getprop", "ro.bst.ime_listener_port"],
     )?;
-    if local.target.provider.to_string() == "ldplayer" && !bluestacks_marker.trim().is_empty() {
-        bail!("This LDPlayer ADB endpoint belongs to BlueStacks; resolve the ADB port conflict in the emulator settings")
+    if may_be_bluestacks_alias(&local.target.provider.to_string())
+        && !bluestacks_marker.trim().is_empty()
+    {
+        bail!("This emulator's ADB endpoint belongs to BlueStacks; resolve the ADB port conflict in the emulator settings")
     }
     if selection.launch_default_app && local.target.provider.to_string() == "bluestacks" {
         super::bluestacks::launch_default_app(&local.target.provider_instance_id)?;
@@ -583,6 +608,8 @@ fn run_session(
     }
     let mut helper = if preview {
         GuestHelper::connect_preview(&adb, &serial, &helper)?
+    } else if local.target.provider.to_string() == "avd" {
+        GuestHelper::connect_android_emulator(&adb, &serial, &helper)?
     } else {
         GuestHelper::connect(&adb, &serial, &helper)?
     };
@@ -661,6 +688,12 @@ fn run_session(
         })?;
     let mut frames = H264Frames::default();
     let mut backpressure = GuestFrameBackpressure::default();
+    let mut timing = crate::frame_timing::TimingWindow::new(
+        "Guest video (host)",
+        Duration::from_secs(5),
+        Instant::now(),
+    );
+    let mut last_frame: Option<Instant> = None;
     let result = (|| -> ResultType<()> {
         loop {
             if cancel.load(Ordering::Acquire) {
@@ -685,7 +718,18 @@ fn run_session(
                 }
             }
             if let Some(frame) = frames.accept(packet)? {
-                capture_idle.lock().unwrap().note_frame(Instant::now());
+                let read_at = Instant::now();
+                capture_idle.lock().unwrap().note_frame(read_at);
+                if !preview {
+                    if let Some(previous) = last_frame {
+                        timing.sample("read_gap", crate::frame_timing::ms(read_at - previous));
+                    }
+                    last_frame = Some(read_at);
+                    timing.sample("kbytes", frame.data.len() as f64 / 1024.0);
+                    if let Some(latency) = crate::frame_timing::HOST_TAPS.take_latency(read_at) {
+                        timing.sample("tap_to_frame", crate::frame_timing::ms(latency));
+                    }
+                }
                 let ready_dimensions = {
                     let mut current = geometry.lock().unwrap();
                     let became_ready = !current.ready;
@@ -720,6 +764,12 @@ fn run_session(
                     events,
                     capture_input,
                 )?;
+                if !preview {
+                    timing.sample("deliver", crate::frame_timing::ms(read_at.elapsed()));
+                    if let Some(line) = timing.take_due(Instant::now()) {
+                        log::info!("{line}");
+                    }
+                }
             }
         }
     })();
@@ -866,6 +916,9 @@ fn input_loop(
                         width,
                         height,
                     )?)?;
+                    if touch.action == 0 {
+                        crate::frame_timing::HOST_TAPS.touch_down(Instant::now());
+                    }
                     if touch.action == 1 || touch.action == 3 {
                         touches.remove(&touch.pointer_id);
                     } else {
@@ -918,6 +971,16 @@ fn key_packet(keycode: u32, down: bool) -> [u8; 14] {
 mod tests {
     use super::*;
     use std::{io::Read, net::TcpListener};
+
+    #[test]
+    fn android_emulator_gets_previews_and_the_bluestacks_alias_guard() {
+        assert!(has_live_preview("bluestacks"));
+        assert!(has_live_preview("avd"));
+        assert!(!has_live_preview("ldplayer"));
+        assert!(!may_be_bluestacks_alias("bluestacks"));
+        assert!(may_be_bluestacks_alias("ldplayer"));
+        assert!(may_be_bluestacks_alias("avd"));
+    }
 
     fn shed_touch(action: u32) -> EmulatorRequest {
         let mut request = EmulatorRequest::new();
@@ -1112,6 +1175,35 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(delivered, vec![0, 33, 66, 99, 132, 165]);
+    }
+
+    #[test]
+    fn guest_transport_preserves_a_short_burst_at_sixty_fps() {
+        let (events, mut receiver) = hbb_common::tokio::sync::mpsc::channel(
+            super::super::remote::GUEST_EVENT_QUEUE_SIZE,
+        );
+        let (input, requests) = mpsc::sync_channel(2);
+        let mut sender = GuestFrameBackpressure::default();
+        // The Android Emulator streams at 60 FPS: a 200-ms delay is 12 frames.
+        for index in 0..12 {
+            sender
+                .deliver(
+                    EmulatorVideoFrame {
+                        session_id: 9,
+                        pts: index * 17,
+                        key: index == 0,
+                        ..Default::default()
+                    },
+                    &events,
+                    &input,
+                )
+                .unwrap();
+        }
+        assert!(
+            requests.try_recv().is_err(),
+            "A short 60-FPS burst must not reset the guest encoder"
+        );
+        assert_eq!(std::iter::from_fn(|| receiver.try_recv().ok()).count(), 12);
     }
 
     #[test]

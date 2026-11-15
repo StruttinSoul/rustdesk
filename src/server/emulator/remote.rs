@@ -9,8 +9,22 @@ pub fn valid_shutdown_target(target: &str) -> bool {
     target.strip_prefix("bluestacks:").map(|id| !id.is_empty() && id.len() <= 64 &&
         id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')).unwrap_or(false)
 }
-// Match the client's short-burst budget; sustained overload still requests a keyframe.
-pub const GUEST_EVENT_QUEUE_SIZE: usize = 8;
+/// Dashboard previews: a BlueStacks instance, or a running Google Android
+/// Emulator (`avd:<AVD name>`).
+pub fn valid_preview_target(id: &str) -> bool {
+    if let Some(name) = id.strip_prefix("avd:") {
+        return !name.is_empty()
+            && name.len() <= 64
+            && !name.starts_with('.')
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    }
+    id.starts_with("bluestacks:") && id.len() > 11 && id.len() <= 128
+}
+// About 270 ms of frames at the Android Emulator's 60 FPS (530 ms at 30 FPS);
+// sustained overload still requests a keyframe.
+pub const GUEST_EVENT_QUEUE_SIZE: usize = 16;
 
 pub enum GuestEvent {
     Response(EmulatorResponse),
@@ -208,7 +222,7 @@ pub fn authorize_request(
                 || previews
                     .target_ids
                     .iter()
-                    .any(|id| !id.starts_with("bluestacks:") || id.len() > 128 || id.len() <= 11)
+                    .any(|id| !valid_preview_target(id))
                 || (!previews.enabled
                     && (!previews.target_ids.is_empty() || !previews.displays.is_empty()))
             {
@@ -646,6 +660,17 @@ mod tests {
         assert!(authorize_host_operation(&request, "scope-a", 4).is_err());
         for target in ["bluestacks:", "ldplayer:0", "windows:0", "bluestacks:../x", "bluestacks:a:b"] {
             assert!(!valid_shutdown_target(target));
+        }
+    }
+
+    #[test]
+    fn previews_accept_bluestacks_and_android_emulator_ids() {
+        for id in ["bluestacks:Tiramisu64", "avd:Aperture_Trial_Play35", "avd:Pixel_7-API.35"] {
+            assert!(valid_preview_target(id), "{id}");
+        }
+        let long_avd = format!("avd:{}", "a".repeat(65));
+        for id in ["bluestacks:", "avd:", "avd:../x", "avd:a:b", "avd:a b", "ldplayer:0", long_avd.as_str()] {
+            assert!(!valid_preview_target(id), "{id}");
         }
     }
 

@@ -16,8 +16,17 @@ const GUEST_CHANNEL_BASE: usize = 0x40000000;
 const GUEST_VIDEO_QUEUE_SIZE: usize = 12;
 const GUEST_VIDEO_REFRESH_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// A received guest frame with when it arrived, for timing the phone side.
+struct QueuedFrame {
+    arrived: std::time::Instant,
+    tap_ms: Option<f64>,
+    frame: EmulatorVideoFrame,
+}
+
 pub(super) struct GuestVideoDecoder {
-    sender: SyncSender<EmulatorVideoFrame>,
+    sender: SyncSender<QueuedFrame>,
+    /// Main stream only: time taps and log a timing summary.
+    timed: bool,
     flush: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
     waiting_key: bool,
@@ -25,8 +34,12 @@ pub(super) struct GuestVideoDecoder {
 }
 
 impl GuestVideoDecoder {
-    fn start<T: InvokeUiSession>(session: &Session<T>, channel: usize) -> ResultType<Self> {
-        let (sender, receiver) = mpsc::sync_channel::<EmulatorVideoFrame>(GUEST_VIDEO_QUEUE_SIZE);
+    fn start<T: InvokeUiSession>(
+        session: &Session<T>,
+        channel: usize,
+        timed: bool,
+    ) -> ResultType<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<QueuedFrame>(GUEST_VIDEO_QUEUE_SIZE);
         let flush = Arc::new(AtomicBool::new(false));
         let worker_flush = flush.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -37,6 +50,12 @@ impl GuestVideoDecoder {
             .spawn(move || {
                 get_hwcodec_config();
                 let mut decoder = VideoHandler::new(CodecFormat::H264, channel);
+                let mut timing = crate::frame_timing::TimingWindow::new(
+                    "Guest video (phone)",
+                    std::time::Duration::from_secs(5),
+                    std::time::Instant::now(),
+                );
+                let mut last_arrival: Option<std::time::Instant> = None;
                 while let Ok(frame) = receiver.recv() {
                     if stop.load(Ordering::Acquire) {
                         break;
@@ -48,7 +67,8 @@ impl GuestVideoDecoder {
                             frames.push(frame);
                         }
                         decoder.reset(Some(CodecFormat::H264));
-                        let Some(key) = frames.iter().rposition(|frame| frame.key) else {
+                        timing.count("flush");
+                        let Some(key) = frames.iter().rposition(|queued| queued.frame.key) else {
                             continue;
                         };
                         frames.drain(..key);
@@ -60,6 +80,30 @@ impl GuestVideoDecoder {
                             frames.push(frame);
                         }
                     }
+                    let decode_started = std::time::Instant::now();
+                    if timed {
+                        timing.sample("batch", frames.len() as f64);
+                        for queued in &frames {
+                            if let Some(previous) = last_arrival {
+                                timing.sample(
+                                    "arrival_gap",
+                                    crate::frame_timing::ms(
+                                        queued.arrived.saturating_duration_since(previous),
+                                    ),
+                                );
+                            }
+                            last_arrival = Some(queued.arrived);
+                            timing.sample(
+                                "queue",
+                                crate::frame_timing::ms(
+                                    decode_started.saturating_duration_since(queued.arrived),
+                                ),
+                            );
+                            if let Some(tap_ms) = queued.tap_ms {
+                                timing.sample("tap_to_frame", tap_ms);
+                            }
+                        }
+                    }
                     let mut video = VideoFrame {
                         display: channel as i32,
                         ..Default::default()
@@ -67,23 +111,31 @@ impl GuestVideoDecoder {
                     video.set_h264s(EncodedVideoFrames {
                         frames: frames
                             .into_iter()
-                            .map(|frame| EncodedVideoFrame {
-                                data: frame.data,
-                                key: frame.key,
-                                pts: frame.pts,
+                            .map(|queued| EncodedVideoFrame {
+                                data: queued.frame.data,
+                                key: queued.frame.key,
+                                pts: queued.frame.pts,
                                 ..Default::default()
                             })
                             .collect(),
                         ..Default::default()
                     });
                     let mut pixels = true;
-                    match decoder.handle_frame(video, &mut pixels, &mut None) {
+                    let result = decoder.handle_frame(video, &mut pixels, &mut None);
+                    let decoded = std::time::Instant::now();
+                    if timed {
+                        timing.sample("decode", crate::frame_timing::ms(decoded - decode_started));
+                    }
+                    match result {
                         Ok(true) if !stop.load(Ordering::Acquire) => {
                             if pixels {
                                 ui.on_rgba(channel, &mut decoder.rgb);
                             } else {
                                 #[cfg(all(feature = "vram", feature = "flutter"))]
                                 ui.on_texture(channel, decoder.texture.texture);
+                            }
+                            if timed {
+                                timing.sample("present", crate::frame_timing::ms(decoded.elapsed()));
                             }
                         }
                         Err(error) => hbb_common::throttled_log!(
@@ -93,10 +145,16 @@ impl GuestVideoDecoder {
                         ),
                         _ => {}
                     }
+                    if timed {
+                        if let Some(line) = timing.take_due(std::time::Instant::now()) {
+                            log::info!("{line}");
+                        }
+                    }
                 }
             })?;
         Ok(Self {
             sender,
+            timed,
             flush,
             cancelled,
             waiting_key: true,
@@ -105,11 +163,21 @@ impl GuestVideoDecoder {
     }
 
     fn push(&mut self, frame: EmulatorVideoFrame) -> bool {
+        let arrived = std::time::Instant::now();
+        let tap_ms = self
+            .timed
+            .then(|| crate::frame_timing::CLIENT_TAPS.take_latency(arrived))
+            .flatten()
+            .map(crate::frame_timing::ms);
         if self.waiting_key && !frame.key {
             return self.refresh_if_due();
         }
         let key = frame.key;
-        match self.sender.try_send(frame) {
+        match self.sender.try_send(QueuedFrame {
+            arrived,
+            tap_ms,
+            frame,
+        }) {
             Ok(()) => {
                 if key {
                     self.waiting_key = false;
@@ -177,6 +245,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(GUEST_VIDEO_QUEUE_SIZE);
         let mut decoder = GuestVideoDecoder {
             sender,
+            timed: false,
             flush: Arc::new(AtomicBool::new(false)),
             cancelled: Arc::new(AtomicBool::new(false)),
             waiting_key: true,
@@ -192,7 +261,7 @@ mod tests {
         }
         assert_eq!(
             std::iter::from_fn(|| receiver.try_recv().ok())
-                .map(|frame| frame.pts)
+                .map(|queued| queued.frame.pts)
                 .collect::<Vec<_>>(),
             (0..10).map(|index| index * 33).collect::<Vec<_>>(),
             "Losing a reference frame freezes playback until the next keyframe"
@@ -201,7 +270,7 @@ mod tests {
             pts: 330,
             ..Default::default()
         }));
-        assert_eq!(receiver.try_recv().unwrap().pts, 330);
+        assert_eq!(receiver.try_recv().unwrap().frame.pts, 330);
     }
 
     #[test]
@@ -209,6 +278,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(GUEST_VIDEO_QUEUE_SIZE);
         let mut decoder = GuestVideoDecoder {
             sender,
+            timed: false,
             flush: Arc::new(AtomicBool::new(false)),
             cancelled: Arc::new(AtomicBool::new(false)),
             waiting_key: true,
@@ -238,12 +308,12 @@ mod tests {
             ..Default::default()
         }));
         assert!(!decoder.waiting_key);
-        assert_eq!(receiver.try_recv().unwrap().pts, 1_000);
+        assert_eq!(receiver.try_recv().unwrap().frame.pts, 1_000);
         assert!(!decoder.push(EmulatorVideoFrame {
             pts: 1_033,
             ..Default::default()
         }));
-        assert_eq!(receiver.try_recv().unwrap().pts, 1_033);
+        assert_eq!(receiver.try_recv().unwrap().frame.pts, 1_033);
     }
 
     #[tokio::test]
@@ -251,6 +321,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(GUEST_VIDEO_QUEUE_SIZE);
         let mut decoder = GuestVideoDecoder {
             sender,
+            timed: false,
             flush: Arc::new(AtomicBool::new(false)),
             cancelled: Arc::new(AtomicBool::new(false)),
             waiting_key: true,
@@ -376,7 +447,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     {
                         let channel =
                             GUEST_CHANNEL_BASE | (status.session_id as usize & 0x3fffffff);
-                        match GuestVideoDecoder::start(&self.handler, channel) {
+                        match GuestVideoDecoder::start(&self.handler, channel, false) {
                             Ok(decoder) => {
                                 self.guest_previews.insert(status.session_id, Some(decoder));
                             }
@@ -420,7 +491,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                     let channel = GUEST_CHANNEL_BASE | (status.session_id as usize & 0x3fffffff);
                     self.guest_video.take();
-                    match GuestVideoDecoder::start(&self.handler, channel) {
+                    match GuestVideoDecoder::start(&self.handler, channel, true) {
                         Ok(decoder) => self.guest_video = Some(decoder),
                         Err(error) => {
                             let mut failed = response.clone();

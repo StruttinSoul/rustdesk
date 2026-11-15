@@ -66,6 +66,17 @@ typedef EmulatorCommandSender = Future<void> Function(String key, String value);
   return (x: x, y: y);
 }
 
+/// Emulators the phone dashboard can stream: BlueStacks and Google's
+/// Android Emulator (`avd`, listed by the PC while it is running).
+bool isDashboardGuestProvider(String provider) =>
+    provider == 'bluestacks' || provider == 'avd';
+
+String emulatorProviderLabel(String provider) => switch (provider) {
+      'bluestacks' => 'BlueStacks',
+      'avd' => 'Android Emulator',
+      _ => provider,
+    };
+
 class RemoteEmulator {
   const RemoteEmulator(
       {required this.id,
