@@ -4,6 +4,7 @@
 //! default ADB server already sees and hands their serial to the guest stream.
 
 use super::{
+    avd_files::valid_avd_name,
     guest_runtime::{adb_command, adb_devices},
     AdbEndpoint, EmulatorCapabilities, EmulatorProvider, EmulatorRuntimeState, EmulatorState,
     EmulatorTarget, ProviderId,
@@ -12,7 +13,6 @@ use hbb_common::{bail, log, ResultType};
 use std::path::PathBuf;
 
 const PROVIDER_ID: &str = "avd";
-const MAX_AVD_NAME_LEN: usize = 64;
 const PC_ONLY: &str = "Start and stop the Android Emulator on the PC";
 
 /// Online `emulator-N` serials from `adb devices` output.
@@ -54,15 +54,6 @@ fn parse_probe(output: &str) -> Option<Probe> {
         booted,
         android_version,
     })
-}
-
-fn valid_avd_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_AVD_NAME_LEN
-        && !name.starts_with('.')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn stable_id(name: &str) -> String {
@@ -232,7 +223,7 @@ mod tests {
         assert!(!valid_avd_name(""));
         assert!(!valid_avd_name("a b"));
         assert!(!valid_avd_name("a/b"));
-        assert!(!valid_avd_name(&"a".repeat(MAX_AVD_NAME_LEN + 1)));
+        assert!(!valid_avd_name(&"a".repeat(65)));
     }
 
     #[test]

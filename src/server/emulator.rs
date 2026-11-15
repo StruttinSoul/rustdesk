@@ -6,6 +6,8 @@ pub const MAX_TEXT_BYTES: usize = 4096;
 #[cfg(windows)]
 pub mod avd;
 #[cfg(windows)]
+pub mod avd_files;
+#[cfg(windows)]
 pub mod bluestacks;
 #[cfg(windows)]
 pub mod boot_windows;
