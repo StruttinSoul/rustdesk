@@ -2317,7 +2317,8 @@ void main() {
     test('cloneAvd sends an identified request', () async {
       final sent = <Map<String, dynamic>>[];
       final model = await connected(sent, [inst('Maple_1', 'stopped')]);
-      await model.cloneAvd('avd:Maple_1', 'Maple_1_copy');
+      unawaited(model.cloneAvd('avd:Maple_1', 'Maple_1_copy'));
+      await Future<void>.delayed(Duration.zero);
       final request = Map<String, dynamic>.from(sent.last);
       expect(request['action'], 'avd_clone');
       expect(request['component'], 'avd:Maple_1');
@@ -2333,27 +2334,31 @@ void main() {
       final sent = <Map<String, dynamic>>[];
       final model = await connected(sent,
           [inst('Maple_1', 'stopped'), inst('Oak', 'ready', window: true)]);
-      await model.createAvd('Fresh');
+      unawaited(model.createAvd('Fresh'));
+      await Future<void>.delayed(Duration.zero);
       var request = Map<String, dynamic>.from(sent.last);
       expect(request['action'], 'avd_create');
       expect(request['new_name'], 'Fresh');
       expect(request['target_identity'], 'emulator:avd:Fresh');
       expect(request.containsKey('component'), isFalse);
 
-      await model.renameAvd('avd:Maple_1', 'Maple_9');
+      unawaited(model.renameAvd('avd:Maple_1', 'Maple_9'));
+      await Future<void>.delayed(Duration.zero);
       request = Map<String, dynamic>.from(sent.last);
       expect(request['action'], 'avd_rename');
       expect(request['component'], 'avd:Maple_1');
       expect(request['new_name'], 'Maple_9');
       expect(request['target_identity'], 'emulator:avd:Maple_1');
 
-      await model.deleteAvd('avd:Maple_1');
+      unawaited(model.deleteAvd('avd:Maple_1'));
+      await Future<void>.delayed(Duration.zero);
       request = Map<String, dynamic>.from(sent.last);
       expect(request['action'], 'avd_delete');
       expect(request['component'], 'avd:Maple_1');
       expect(request['target_identity'], 'emulator:avd:Maple_1');
 
-      await model.setAvdWindowVisible('avd:Oak', false);
+      unawaited(model.setAvdWindowVisible('avd:Oak', false));
+      await Future<void>.delayed(Duration.zero);
       request = Map<String, dynamic>.from(sent.last);
       expect(request['action'], 'avd_window');
       expect(request['component'], 'avd:Oak');
@@ -2388,8 +2393,104 @@ void main() {
       final sent = <Map<String, dynamic>>[];
       final model = await connected(sent, [inst('Ready', 'ready')]);
       final before = sent.length;
-      await model.deleteAvd('avd:Ready');
+      final outcome = await model.deleteAvd('avd:Ready');
       expect(sent.length, before);
+      expect(outcome.ok, isFalse);
+      expect(outcome.message, 'Stop it first');
+      model.dispose();
+    });
+
+    Map<String, dynamic> hostReply(Map<String, dynamic> request,
+            {required bool ok, String? message, String? error}) =>
+        {
+          'type': 'host',
+          'request_id': request['request_id'],
+          'protocol_version': 1,
+          'host': {
+            'ok': ok,
+            'accepted': true,
+            'state': ok ? 'applied' : 'failed',
+            if (message != null) 'message': message,
+            if (error != null) 'error': error,
+            if (error != null) 'error_code': 'avd_delete_failed',
+            'operation_id': request['operation_id'],
+            'session_identity': 'scope-avd',
+            'target_identity': request['target_identity'],
+            'session_generation': 2,
+          },
+        };
+
+    test('the PC refusing a delete is reported to the caller', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [inst('Maple_1', 'stopped')]);
+      var settled = false;
+      final result = model.deleteAvd('avd:Maple_1')
+        ..whenComplete(() => settled = true);
+      await Future<void>.delayed(Duration.zero);
+      final request = Map<String, dynamic>.from(sent.last);
+      expect(request['action'], 'avd_delete');
+      expect(settled, isFalse, reason: 'sent is not answered');
+      model.handleResponse(hostReply(request,
+          ok: false, error: 'Maple_1 is running; stop it first'));
+      final outcome = await result;
+      expect(outcome.ok, isFalse);
+      expect(outcome.message, 'Maple_1 is running; stop it first');
+      model.dispose();
+    });
+
+    test('an accepted clone reports the PC message', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [inst('Maple_1', 'stopped')]);
+      final result = model.cloneAvd('avd:Maple_1', 'Maple_2');
+      await Future<void>.delayed(Duration.zero);
+      model.handleResponse(hostReply(Map<String, dynamic>.from(sent.last),
+          ok: true, message: 'Cloning…'));
+      final outcome = await result;
+      expect(outcome.ok, isTrue);
+      expect(outcome.message, 'Cloning…');
+      model.dispose();
+    });
+
+    test('an unanswered action completes when the connection drops', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [inst('Maple_1', 'stopped')]);
+      final result = model.renameAvd('avd:Maple_1', 'Maple_9');
+      await Future<void>.delayed(Duration.zero);
+      model.invalidateConnection();
+      final outcome = await result;
+      expect(outcome.ok, isFalse);
+      expect(outcome.message, isNotEmpty);
+      model.dispose();
+    });
+
+    test('an unanswered action completes when the model is disposed', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = await connected(sent, [inst('Maple_1', 'stopped')]);
+      final result = model.deleteAvd('avd:Maple_1');
+      await Future<void>.delayed(Duration.zero);
+      model.dispose();
+      expect((await result).ok, isFalse);
+    });
+
+    test('an unanswered action times out with an error', () async {
+      final sent = <Map<String, dynamic>>[];
+      final model = EmulatorModel(Uuid().v4obj(),
+          commandSender: (_, value) async => sent.add(jsonDecode(value)),
+          hostOperationTimeout: const Duration(milliseconds: 20));
+      await model.refresh();
+      model.handleResponse({
+        'type': 'inventory',
+        'request_id': sent.single['request_id'],
+        'protocol_version': 1,
+        'instances': [inst('Maple_1', 'stopped')],
+        'provider_errors': const [],
+        'capabilities': caps,
+        'operation_session_identity': 'scope-avd',
+        'operation_generation': 2,
+      });
+      final outcome = await model.deleteAvd('avd:Maple_1');
+      expect(outcome.ok, isFalse);
+      expect(outcome.message, contains('Refresh'));
       model.dispose();
     });
 

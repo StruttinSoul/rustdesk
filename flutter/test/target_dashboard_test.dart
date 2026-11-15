@@ -585,7 +585,9 @@ void main() {
     for (final asRow in [false, true]) {
       final label = asRow ? 'row' : 'card';
       Widget build(AvdCardActions actions,
-              {bool stopped = false, void Function()? onOpen}) =>
+              {bool stopped = false,
+              void Function()? onOpen,
+              String stoppedNote = ''}) =>
           host(asRow
               ? TargetScreenRow(
                   name: 'Phone 2',
@@ -593,6 +595,7 @@ void main() {
                   stopped: stopped,
                   live: !stopped,
                   onOpen: onOpen,
+                  stoppedNote: stoppedNote,
                   avd: actions)
               : TargetPreviewCard(
                   name: 'Phone 2',
@@ -600,7 +603,19 @@ void main() {
                   stopped: stopped,
                   live: !stopped,
                   onOpen: onOpen,
+                  stoppedNote: stoppedNote,
                   avd: actions));
+
+      testWidgets('stopped avd $label shows why its copy failed',
+          (tester) async {
+        const failure = 'Copy to Phone_3 failed: not enough space';
+        await tester.pumpWidget(build(const AvdCardActions(),
+            stopped: true, stoppedNote: failure));
+        expect(tester.takeException(), isNull);
+        expect(find.text(failure), findsOneWidget);
+        await tester.pumpWidget(build(const AvdCardActions(), stopped: true));
+        expect(find.text(failure), findsNothing);
+      });
 
       testWidgets('running avd $label offers Stop and a blocked Delete',
           (tester) async {

@@ -185,6 +185,7 @@ class EmulatorModel extends ChangeNotifier {
   final Map<int, Completer<HostWindowInfo?>> _hostWindowFocusCompletions = {};
   final Map<int, Completer<HostShellRestartResult>> _shellRestartCompletions =
       {};
+  final Map<int, Completer<AvdActionResult>> _avdActionCompletions = {};
   final Set<int> _pendingHostOperations = {};
   final Set<String> _shutdownPending = {};
   final Map<int, String> _shutdownRequests = {};
@@ -226,28 +227,35 @@ class EmulatorModel extends ChangeNotifier {
     return candidate;
   }
 
-  Future<void> createAvd(String name) =>
+  Future<AvdActionResult> createAvd(String name) =>
       _sendAvdAction('avd_create', 'emulator:avd:$name', {'new_name': name});
-  Future<void> cloneAvd(String id, String name) => _sendAvdAction(
+  Future<AvdActionResult> cloneAvd(String id, String name) => _sendAvdAction(
       'avd_clone', 'emulator:$id', {'component': id, 'new_name': name}, id: id);
-  Future<void> renameAvd(String id, String name) => _sendAvdAction(
+  Future<AvdActionResult> renameAvd(String id, String name) => _sendAvdAction(
       'avd_rename', 'emulator:$id', {'component': id, 'new_name': name}, id: id);
-  Future<void> deleteAvd(String id) =>
+  Future<AvdActionResult> deleteAvd(String id) =>
       _sendAvdAction('avd_delete', 'emulator:$id', {'component': id}, id: id);
-  Future<void> setAvdWindowVisible(String id, bool visible) => _sendAvdAction(
+  Future<AvdActionResult> setAvdWindowVisible(String id, bool visible) => _sendAvdAction(
       'avd_window', 'emulator:$id', {'component': id, 'window_visible': visible}, id: id);
 
-  Future<void> _sendAvdAction(
+  /// Resolves with the PC's answer (or why there is none), not when sent.
+  Future<AvdActionResult> _sendAvdAction(
       String action, String targetIdentity, Map<String, dynamic> fields,
-      {String? id}) async {
-    if (!canManageAvds) return;
+      {String? id}) {
+    if (!canManageAvds) {
+      return Future.value(const AvdActionResult(
+          false, 'This PC can’t manage emulators from the phone right now.'));
+    }
     if (id != null) {
-      if (!instances.any((item) => item.id == id && item.provider == 'avd')) return;
+      if (!instances.any((item) => item.id == id && item.provider == 'avd')) {
+        return Future.value(
+            const AvdActionResult(false, 'This emulator is no longer listed.'));
+      }
       final blocker = avdActionBlocker(id, action);
       if (blocker != null) {
         hostError = blocker;
         if (!_disposed) notifyListeners();
-        return;
+        return Future.value(AvdActionResult(false, blocker));
       }
     }
     final requestId = ++_sequence;
@@ -263,14 +271,34 @@ class EmulatorModel extends ChangeNotifier {
       if (!busy) { timer.cancel(); _avdRefreshTimer = null; return; }
       if (!loading && !connecting) unawaited(refresh());
     });
+    final completion = Completer<AvdActionResult>();
+    _avdActionCompletions[requestId] = completion;
     notifyListeners();
-    await _sendHostOperation({
+    unawaited(_sendHostOperation({
       'action': action, 'request_id': requestId, ...fields,
       'operation_id': operationId, 'session_identity': _operationSessionIdentity,
       'target_identity': targetIdentity, 'session_generation': _operationGeneration,
     }, requestId: requestId, capability: 'host.avd_manage.v1',
       stillValid: () => hostConnectionCurrent &&
-          (id == null || instances.any((item) => item.id == id)));
+          (id == null || instances.any((item) => item.id == id))));
+    return completion.future;
+  }
+
+  void _finishAvdAction(int requestId, bool ok, String message) {
+    final completion = _avdActionCompletions.remove(requestId);
+    if (completion != null && !completion.isCompleted) {
+      completion.complete(AvdActionResult(ok, message));
+    }
+  }
+
+  void _abandonAvdActions() {
+    for (final completion in _avdActionCompletions.values) {
+      if (!completion.isCompleted) {
+        completion.complete(const AvdActionResult(false,
+            'The connection changed before the PC answered. Refresh to see the result.'));
+      }
+    }
+    _avdActionCompletions.clear();
   }
 
   Future<void> shutdownEmulator(String id) async {
@@ -1267,6 +1295,7 @@ class EmulatorModel extends ChangeNotifier {
       _finishShellRestart(requestId, false, _shellRestartUnfinished);
       hostMessage =
           'The PC may have applied the request. Refresh before retrying.';
+      _finishAvdAction(requestId, false, hostMessage);
       if (action.startsWith('phone_workspace_')) {
         _phoneWorkspaceLoading = false;
         _phoneWorkspaceNeedsReconcile = true;
@@ -1326,6 +1355,7 @@ class EmulatorModel extends ChangeNotifier {
           _finishShellRestart(requestId, false, _shellRestartUnfinished);
           hostMessage = '';
           hostError = operation.error;
+          _finishAvdAction(requestId, false, operation.error);
           if (operation.action.startsWith('phone_workspace_')) {
             _phoneWorkspaceLoading = false;
             phoneWorkspaceMessage = '';
@@ -1362,6 +1392,7 @@ class EmulatorModel extends ChangeNotifier {
           _finishShellRestart(requestId, false, _shellRestartUnfinished);
           hostMessage = '';
           hostError = failure.toString();
+          _finishAvdAction(requestId, false, hostError);
           if (operation.action.startsWith('phone_workspace_')) {
             _phoneWorkspaceLoading = false;
             _phoneWorkspaceNeedsReconcile = true;
@@ -1632,6 +1663,7 @@ class EmulatorModel extends ChangeNotifier {
         _hostWindowFocusCompletions.remove(id)?.complete(observedWindow);
         hostMessage = host['message']?.toString() ?? '';
         _finishShellRestart(id, true, hostMessage);
+        _finishAvdAction(id, true, hostMessage);
         if (operation.action.startsWith('phone_workspace_')) {
           phoneWorkspaceMessage = host['message']?.toString() ?? '';
           phoneWorkspaceError = '';
@@ -1659,6 +1691,7 @@ class EmulatorModel extends ChangeNotifier {
         hostError =
             host['error']?.toString() ?? 'Host management request failed';
         _finishShellRestart(id, false, hostError);
+        _finishAvdAction(id, false, hostError);
         if (operation.action.startsWith('phone_workspace_')) {
           phoneWorkspaceMessage = '';
           phoneWorkspaceError =
@@ -1748,6 +1781,7 @@ class EmulatorModel extends ChangeNotifier {
         }
         _hostWindowFocusCompletions.clear();
         _abandonShellRestarts();
+        _abandonAvdActions();
         _clearShutdownState();
       }
       _operationSessionIdentity = operationIdentity;
@@ -1928,6 +1962,7 @@ class EmulatorModel extends ChangeNotifier {
         _hostWindowFocusCompletions.remove(id)?.complete(null);
         _finishShellRestart(id, false, _shellRestartUnfinished);
         hostError = requestError;
+        _finishAvdAction(id, false, requestError);
         if (operation?.action.startsWith('gateway_') == true) {
           _gatewayMutationLoading = false;
           gatewayMessage = '';
@@ -2018,6 +2053,7 @@ class EmulatorModel extends ChangeNotifier {
     }
     _hostWindowFocusCompletions.clear();
     _abandonShellRestarts();
+    _abandonAvdActions();
     _hostOperations.advanceGeneration();
     _operationGeneration = _hostOperations.generation;
     _operationSessionIdentity = '';
@@ -2120,6 +2156,7 @@ class EmulatorModel extends ChangeNotifier {
     }
     _hostWindowFocusCompletions.clear();
     _abandonShellRestarts();
+    _abandonAvdActions();
     previews.clear();
     guestFailures.clear();
     _previewTargets.clear();
@@ -2156,6 +2193,7 @@ class EmulatorModel extends ChangeNotifier {
     }
     _hostWindowFocusCompletions.clear();
     _abandonShellRestarts();
+    _abandonAvdActions();
     super.dispose();
   }
 }
@@ -2177,6 +2215,13 @@ const _shellRestartUnfinished =
 
 class HostShellRestartResult {
   const HostShellRestartResult(this.ok, this.message);
+  final bool ok;
+  final String message;
+}
+
+/// The PC's answer to a managed-emulator action, or why there is none.
+class AvdActionResult {
+  const AvdActionResult(this.ok, this.message);
   final bool ok;
   final String message;
 }

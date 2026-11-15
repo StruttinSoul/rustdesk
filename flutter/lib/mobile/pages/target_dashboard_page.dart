@@ -617,9 +617,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         _avdRawName(item.id).toLowerCase() == lower);
   }
 
-  void _reportAvdResult() {
-    if (mounted && model.hostError.isNotEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(model.hostError)));
+  /// Shows the PC's refusal or failure; success stays quiet (the card updates).
+  void _reportAvdResult(AvdActionResult result) {
+    if (mounted && !result.ok && result.message.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.message)));
     }
   }
 
@@ -630,8 +631,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         note: 'Android 15 · 4 GB · 4 cores · about 12 GB on D after setup',
         isTaken: _avdNameTaken);
     if (name == null || !mounted) return;
-    await model.createAvd(name);
-    _reportAvdResult();
+    _reportAvdResult(await model.createAvd(name));
   }
 
   Future<void> _cloneAvd(_Target target) async {
@@ -643,8 +643,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         isTaken: _avdNameTaken,
         confirmLabel: 'Clone');
     if (name == null || !mounted) return;
-    await model.cloneAvd(target.id, name);
-    _reportAvdResult();
+    _reportAvdResult(await model.cloneAvd(target.id, name));
   }
 
   Future<void> _renameAvd(_Target target) async {
@@ -656,19 +655,17 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         isTaken: (candidate) => _avdNameTaken(candidate, except: target.id),
         confirmLabel: 'Rename');
     if (name == null || name == raw || !mounted) return;
-    await model.renameAvd(target.id, name);
-    _reportAvdResult();
+    _reportAvdResult(await model.renameAvd(target.id, name));
   }
 
   Future<void> _deleteAvd(_Target target) async {
     if (!await confirmAvdDelete(context, target.name) || !mounted) return;
-    await model.deleteAvd(target.id);
-    _reportAvdResult();
+    _reportAvdResult(await model.deleteAvd(target.id));
   }
 
   Future<void> _toggleAvdWindow(_Target target) async {
-    await model.setAvdWindowVisible(target.id, !(target.instance?.windowVisible ?? false));
-    _reportAvdResult();
+    _reportAvdResult(await model.setAvdWindowVisible(
+        target.id, !(target.instance?.windowVisible ?? false)));
   }
 
   Future<void> _dashboard() async {
@@ -1564,6 +1561,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               : (streamDisconnected
                   ? model.guestFailures[target.id] ?? ''
                   : target.instance?.error ?? '');
+          // A managed emulator's last failure (e.g. a copy of it that failed).
+          final stoppedNote =
+              stopped && instance?.provider == 'avd' ? instance!.error : '';
           final openAction = model.connecting || cloning ||
                   (target.instance != null &&
                       (!widget.ffi.ffiModel.keyboard ||
@@ -1595,6 +1595,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               onRetry: retry,
               onShutdown: shutdownAction,
               shuttingDown: shuttingDown,
+              stoppedNote: stoppedNote,
               avd: avdActions,
             );
           }
@@ -1613,6 +1614,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             onRetry: retry,
             onShutdown: shutdownAction,
             shuttingDown: shuttingDown,
+            stoppedNote: stoppedNote,
             avd: avdActions,
           );
         },
@@ -2389,10 +2391,14 @@ class TargetScreenRow extends StatelessWidget {
     this.onRetry,
     this.onShutdown,
     this.shuttingDown = false,
+    this.stoppedNote = '',
     this.avd,
   });
 
   final AvdCardActions? avd;
+
+  /// Shown on a stopped card, e.g. why a copy of this emulator failed.
+  final String stoppedNote;
   final String name;
   final String type;
   final bool stopped;
@@ -2487,6 +2493,14 @@ class TargetScreenRow extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelSmall?.copyWith(
                             color: statusColor, fontWeight: FontWeight.w600)),
+                    if (stopped && stoppedNote.isNotEmpty)
+                      Text(stoppedNote,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodySmall
+                              ?.copyWith(color: palette.error)),
                   ],
                 ),
               ),
@@ -2549,8 +2563,12 @@ class TargetPreviewCard extends StatelessWidget {
       this.onRetry,
       this.onShutdown,
       this.shuttingDown = false,
+      this.stoppedNote = '',
       this.avd});
   final AvdCardActions? avd;
+
+  /// Shown on a stopped card, e.g. why a copy of this emulator failed.
+  final String stoppedNote;
   final String name;
   final String type;
   final bool stopped;
@@ -2711,6 +2729,20 @@ class TargetPreviewCard extends StatelessWidget {
                               ),
                             ),
                           ),
+                        ),
+                      ),
+                    if (stopped && stoppedNote.isNotEmpty)
+                      Positioned(
+                        left: 8,
+                        right: 8,
+                        bottom: 8,
+                        child: Text(
+                          stoppedNote,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: videoOverlayPalette.textPrimary),
                         ),
                       ),
                     if (!stopped) Positioned(
