@@ -102,7 +102,7 @@ fn stop_avd(target: &str, name: &str) -> ResultType<String> {
     }));
     let worker = job.clone();
     let worker_name = name.to_owned();
-    // The stop waits up to ~24 s for the emulator; the host worker answers now.
+    // The stop waits up to 20 s for the emulator; the host worker answers now.
     thread::Builder::new()
         .name("avd-shutdown".into())
         .spawn(move || {

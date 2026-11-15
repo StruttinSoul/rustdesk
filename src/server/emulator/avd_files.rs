@@ -17,9 +17,12 @@ use std::{
 const OPTION_AVD_HOME: &str = "aperture-avd-home";
 const DEFAULT_ROOT: &str = r"D:\Aperture\Emulators";
 const CLONE_MARKER: &str = "aperture-clone.json";
-const CLONE_HEADROOM_BYTES: u64 = 4 << 30;
+pub const CLONE_HEADROOM_BYTES: u64 = 4 << 30;
 const COPY_CHUNK_BYTES: usize = 8 << 20;
 const MARKER_INTERVAL: Duration = Duration::from_millis(500);
+/// An unreadable marker no clone of this process owns is stale only once it
+/// has not changed for this long (a live writer replaces it every 500 ms).
+const UNREADABLE_MARKER_AGE: Duration = Duration::from_secs(120);
 
 /// The trial AVD's `config.ini` with the values new emulators get. `AvdId` and
 /// `avd.ini.displayname` are filled from the name when the AVD is written.
@@ -201,6 +204,8 @@ pub struct AvdHome {
     /// Stale clones that could not be removed and were already logged, so the
     /// 10 s inventory scan retries them silently. Shared by clones of this value.
     unremovable: Arc<Mutex<BTreeSet<String>>>,
+    /// Entries the inventory scan skips and has already logged once.
+    warned: Arc<Mutex<BTreeSet<String>>>,
 }
 
 /// The value of `key=` in an ini text, if present.
@@ -231,6 +236,20 @@ fn set_key(text: &str, key: &str, value: &str) -> String {
     }
     let mut out = lines.join(eol);
     out.push_str(eol);
+    out
+}
+
+/// `text` without any `key=` line; other lines and the line endings are kept.
+fn remove_key(text: &str, key: &str) -> String {
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.split_once('=').map_or(false, |(k, _)| k.trim() == key) {
+            continue;
+        }
+        out.push_str(line);
+        out.push_str(eol);
+    }
     out
 }
 
@@ -342,7 +361,27 @@ impl AvdHome {
         Self {
             root,
             unremovable: Arc::default(),
+            warned: Arc::default(),
         }
+    }
+
+    /// True the first time `key` is seen, when a skipped entry is to be logged.
+    fn warn_once(&self, key: String) -> bool {
+        // A plain set: a panicking holder leaves nothing half-updated.
+        self.warned
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key)
+    }
+
+    #[cfg(test)]
+    fn warned_entries(&self) -> Vec<String> {
+        self.warned
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
     fn unremovable_set(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
@@ -404,6 +443,27 @@ impl AvdHome {
         Ok(())
     }
 
+    /// Fails unless `<name>.ini`'s `path=` resolves to this folder's
+    /// `<name>.avd`. The emulator follows `path=` (and, when that is missing,
+    /// `path.rel=` under the user's `.android`), so an AVD copied in by hand may
+    /// still run a development AVD elsewhere. The file is never rewritten here.
+    pub fn check_ini_path(&self, name: &str) -> ResultType<()> {
+        let name = Self::checked_name(name)?;
+        let dir = self.avd_dir(name);
+        self.ensure_inside(&dir)?;
+        let text = fs::read_to_string(self.ini_path(name))
+            .with_context(|| format!("Cannot read {name}.ini"))?;
+        let expected = fs::canonicalize(&dir)?;
+        let points_here = get_key(&text, "path")
+            .filter(|path| !path.is_empty())
+            .and_then(|path| fs::canonicalize(path).ok())
+            .map_or(false, |actual| actual == expected);
+        if !points_here {
+            bail!("{name} points outside the Aperture emulator folder");
+        }
+        Ok(())
+    }
+
     fn exists(&self, name: &str) -> bool {
         self.avd_dir(name).exists() || self.ini_path(name).exists()
     }
@@ -441,7 +501,10 @@ impl AvdHome {
             let dir = self.avd_dir(name);
             if dir.exists() {
                 if let Err(e) = self.ensure_inside(&dir) {
-                    log::warn!("Skipping emulator {name}: {e}");
+                    // Every inventory scan meets it again: log it once.
+                    if self.warn_once(format!("list:{name}")) {
+                        log::warn!("Skipping emulator {name}: {e}");
+                    }
                     continue;
                 }
             }
@@ -518,6 +581,7 @@ impl AvdHome {
         }
         self.ensure_inside(&old_dir)?;
         self.ensure_inside(&old_ini)?;
+        self.check_ini_path(from)?;
         let old_ini_text = fs::read_to_string(&old_ini)?;
         let new_dir = self.avd_dir(to);
         fs::rename(&old_dir, &new_dir)?;
@@ -526,6 +590,8 @@ impl AvdHome {
             let config = fs::read_to_string(&config_path)?;
             fs::write(&config_path, self.rewrite_config(to, &config))?;
             let ini = set_key(&old_ini_text, "path", &new_dir.display().to_string());
+            // path.rel= is resolved under the user's .android, never this folder.
+            let ini = remove_key(&ini, "path.rel");
             fs::write(self.ini_path(to), ini)?;
             fs::remove_file(&old_ini)?;
             Ok(())
@@ -598,6 +664,7 @@ impl AvdHome {
             bail!("Emulator {from} is being cloned");
         }
         self.ensure_inside(&src)?;
+        self.check_ini_path(from)?;
         let (dirs, files) = plan_copy(&src, &self.avd_dir(to))?;
         let total: u64 = files.iter().map(|f| f.size).sum();
 
@@ -635,6 +702,7 @@ impl AvdHome {
             fs::create_dir_all(dir)?;
         }
         let mut last_marker = Instant::now();
+        let mut marker_failed = false;
         let mut buffer = vec![0u8; COPY_CHUNK_BYTES];
         for item in files {
             let is_config = item.to == dst.join("config.ini");
@@ -654,7 +722,14 @@ impl AvdHome {
                     state.copied_bytes += read as u64;
                     progress(state.copied_bytes, total);
                     if last_marker.elapsed() >= MARKER_INTERVAL {
-                        write_marker(&dst, &state, started)?;
+                        // Progress only: a transient sharing violation (an
+                        // indexer or antivirus) must not abort the copy.
+                        if let Err(e) = write_marker(&dst, &state, started) {
+                            if !marker_failed {
+                                log::warn!("Cannot update the progress of copying {from} to {to}: {e}");
+                                marker_failed = true;
+                            }
+                        }
                         last_marker = Instant::now();
                     }
                 }
@@ -663,12 +738,23 @@ impl AvdHome {
         }
         progress(state.copied_bytes, total);
         fs::remove_file(dst.join(CLONE_MARKER))?;
+        // Left behind only by a failed marker update.
+        if let Err(e) = fs::remove_file(dst.join(format!("{CLONE_MARKER}.tmp"))) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("Cannot remove the progress file of {to}: {e}");
+            }
+        }
         Ok(())
     }
 
     /// Removes clones a previous host process left unfinished; returns their
-    /// names. A clone whose marker names `current_pid` is still running.
-    pub fn cleanup_stale_clones(&self, current_pid: u32) -> ResultType<Vec<String>> {
+    /// names. A clone whose marker names `current_pid`, or whose lower-cased
+    /// name is in `live` (copies this process is making), is still running.
+    pub fn cleanup_stale_clones(
+        &self,
+        current_pid: u32,
+        live: &BTreeSet<String>,
+    ) -> ResultType<Vec<String>> {
         let reader = match fs::read_dir(&self.root) {
             Ok(reader) => reader,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -687,13 +773,29 @@ impl AvdHome {
             if !valid_avd_name(name) || !path.join(CLONE_MARKER).exists() {
                 continue;
             }
-            // An unreadable marker was never completed by a live clone (the
-            // writer replaces it atomically), so it counts as stale.
-            if read_marker(&path).map_or(false, |m| m.host_pid == current_pid) {
+            if live.contains(&name.to_ascii_lowercase()) {
                 continue;
             }
+            match read_marker(&path) {
+                Some(marker) if marker.host_pid == current_pid => continue,
+                Some(_) => {}
+                // Unreadable (perhaps for a moment): stale once it stops changing.
+                None => {
+                    let quiet = fs::metadata(path.join(CLONE_MARKER))
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .map_or(false, |age| age >= UNREADABLE_MARKER_AGE);
+                    if !quiet {
+                        continue;
+                    }
+                }
+            }
             if let Err(e) = self.ensure_inside(&path) {
-                log::warn!("Skipping unfinished emulator clone {name}: {e}");
+                // Every inventory scan meets it again: log it once.
+                if self.warn_once(format!("cleanup:{name}")) {
+                    log::warn!("Skipping unfinished emulator clone {name}: {e}");
+                }
                 continue;
             }
             // A removal that already failed is retried without logging again.
@@ -872,6 +974,13 @@ mod tests {
             r#"{"source":"A","total_bytes":200,"copied_bytes":50,"host_pid":1,"started":1}"#,
         )
         .unwrap();
+        // Long untouched, so the marker counts as stale even while unreadable.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("aperture-clone.json"))
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(600))
+            .unwrap();
         // An exclusive handle on the marker keeps Windows from deleting it, so
         // every scan finds the clone stale and fails to remove it.
         let lock = fs::OpenOptions::new()
@@ -880,13 +989,13 @@ mod tests {
             .open(dir.join("aperture-clone.json"))
             .unwrap();
         for _ in 0..3 {
-            assert!(home.cleanup_stale_clones(2).unwrap().is_empty());
+            assert!(home.cleanup_stale_clones(2, &BTreeSet::new()).unwrap().is_empty());
         }
         assert_eq!(home.unremovable_clones(), vec!["B".to_owned()]);
         assert!(home.note_cleanup_failure("C"));
         assert!(!home.note_cleanup_failure("C"));
         drop(lock);
-        assert_eq!(home.cleanup_stale_clones(2).unwrap(), vec!["B".to_owned()]);
+        assert_eq!(home.cleanup_stale_clones(2, &BTreeSet::new()).unwrap(), vec!["B".to_owned()]);
         assert!(home.unremovable_clones().is_empty());
     }
 
@@ -902,14 +1011,14 @@ mod tests {
             )
         };
         fs::write(&marker, json(1)).unwrap();
-        assert_eq!(home.cleanup_stale_clones(2).unwrap(), vec!["B".to_owned()]);
+        assert_eq!(home.cleanup_stale_clones(2, &BTreeSet::new()).unwrap(), vec!["B".to_owned()]);
         assert!(!home.root().join("B.avd").exists());
         assert!(!home.root().join("B.ini").exists());
         assert!(home.root().join("A.avd").exists());
 
         home.create("B", NEW_AVD_TEMPLATE).unwrap();
         fs::write(&marker, json(2)).unwrap();
-        assert!(home.cleanup_stale_clones(2).unwrap().is_empty());
+        assert!(home.cleanup_stale_clones(2, &BTreeSet::new()).unwrap().is_empty());
         let entries = home.list().unwrap();
         let b = entries.iter().find(|e| e.name == "B").unwrap();
         let progress = b.clone.as_ref().unwrap();
@@ -1010,11 +1119,115 @@ mod tests {
         junction(&home.root().join("B.avd"), &outside);
         home.create("C", NEW_AVD_TEMPLATE).unwrap();
         fs::write(home.root().join("C.avd").join("aperture-clone.json"), marker).unwrap();
-        assert_eq!(home.cleanup_stale_clones(2).unwrap(), vec!["C".to_owned()]);
+        assert_eq!(home.cleanup_stale_clones(2, &BTreeSet::new()).unwrap(), vec!["C".to_owned()]);
         assert!(outside.join("aperture-clone.json").exists());
         assert!(!home.root().join("C.avd").exists());
         fs::remove_dir(home.root().join("B.avd")).unwrap();
         fs::remove_dir_all(outside).unwrap();
+        cleanup(home);
+    }
+
+    #[test]
+    fn clone_copy_error_removes_the_partial_copy() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let home = temp_home("copyerror");
+        let src = make_source(&home, "A");
+        let image = fs::read(src.join("userdata-qemu.img")).unwrap();
+        // An exclusive handle makes reading this file fail halfway through the copy.
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(src.join("data").join("x.bin"))
+            .unwrap();
+        assert!(home.clone_avd("A", "B", 1, |_, _| {}).is_err());
+        drop(lock);
+        assert!(!home.root().join("B.avd").exists());
+        assert!(!home.root().join("B.ini").exists());
+        assert_eq!(fs::read(src.join("data").join("x.bin")).unwrap(), vec![7u8; 100_000]);
+        assert_eq!(fs::read(src.join("userdata-qemu.img")).unwrap(), image);
+        let names: Vec<_> = home.list().unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["A".to_owned()]);
+        cleanup(home);
+    }
+
+    #[test]
+    fn periodic_marker_failure_does_not_abort_the_clone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let home = temp_home("markerfail");
+        make_source(&home, "A");
+        let tmp = home.root().join("B.avd").join("aperture-clone.json.tmp");
+        let mut lock = None;
+        // After the first chunk, the next marker update hits a sharing violation.
+        let result = home.clone_avd("A", "B", 1, |_, _| {
+            if lock.is_none() {
+                std::thread::sleep(MARKER_INTERVAL + Duration::from_millis(100));
+                lock = Some(
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .share_mode(0)
+                        .open(&tmp)
+                        .unwrap(),
+                );
+            }
+        });
+        assert!(lock.is_some(), "the copy never reported progress");
+        drop(lock);
+        result.unwrap();
+        let dst = home.root().join("B.avd");
+        assert_eq!(fs::read(dst.join("data").join("x.bin")).unwrap(), vec![7u8; 100_000]);
+        assert!(!dst.join("aperture-clone.json").exists());
+        assert!(home.list().unwrap().iter().any(|e| e.name == "B" && e.clone.is_none()));
+        cleanup(home);
+    }
+
+    #[test]
+    fn escaped_entries_are_logged_once() {
+        let home = temp_home("warnonce");
+        let outside = outside_dir("warnonce");
+        fs::write(
+            outside.join("aperture-clone.json"),
+            r#"{"source":"A","total_bytes":2,"copied_bytes":1,"host_pid":1,"started":1}"#,
+        )
+        .unwrap();
+        fs::write(home.root().join("X.ini"), "target=android-35\n").unwrap();
+        junction(&home.root().join("X.avd"), &outside);
+        for _ in 0..3 {
+            assert!(home.list().unwrap().is_empty());
+            assert!(home.cleanup_stale_clones(2, &BTreeSet::new()).unwrap().is_empty());
+        }
+        assert_eq!(
+            home.warned_entries(),
+            vec!["cleanup:X".to_owned(), "list:X".to_owned()]
+        );
+        fs::remove_dir(home.root().join("X.avd")).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+        cleanup(home);
+    }
+
+    #[test]
+    fn unreadable_marker_is_stale_only_when_old_and_not_live() {
+        let home = temp_home("unreadable");
+        home.create("B", NEW_AVD_TEMPLATE).unwrap();
+        let marker = home.root().join("B.avd").join("aperture-clone.json");
+        fs::write(&marker, "{\"source\":").unwrap();
+        let none = BTreeSet::new();
+        // Just written: possibly caught mid-update.
+        assert!(home.cleanup_stale_clones(2, &none).unwrap().is_empty());
+        let old = SystemTime::now() - Duration::from_secs(600);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        // A copy this process is making is never removed.
+        let live = BTreeSet::from(["b".to_owned()]);
+        assert!(home.cleanup_stale_clones(2, &live).unwrap().is_empty());
+        assert!(home.root().join("B.avd").exists());
+        assert_eq!(home.cleanup_stale_clones(2, &none).unwrap(), vec!["B".to_owned()]);
+        assert!(!home.root().join("B.avd").exists());
+        assert!(!home.root().join("B.ini").exists());
         cleanup(home);
     }
 }

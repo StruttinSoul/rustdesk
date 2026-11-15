@@ -328,28 +328,25 @@ fn avd_clone(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) 
     if !super::avd_files::valid_avd_name(target) {
         bail!("Invalid emulator name")
     }
-    // Held until the copy ends: start, rename and delete of both names are refused.
+    // Held until the copy ends: start, rename and delete of both names are
+    // refused, and its remaining bytes count against the free space. The space
+    // check (next to other copies in progress) is part of it.
     let reservation = provider.begin_clone(source, target)?;
-    let required = provider.home().required_free_bytes_for_clone(source)?;
-    let free = provider.free_disk_bytes()?;
-    if free < required {
-        bail!(
-            "Not enough free space on the PC to copy {source}: {} GB needed, {} GB free",
-            gigabytes(required),
-            free >> 30
-        )
-    }
     let home = provider.home().clone();
     let (from, to) = (source.to_owned(), target.to_owned());
     thread::Builder::new()
         .name("aperture-avd-clone".to_owned())
         .spawn(move || {
-            let _reservation = reservation;
-            // Progress is read from the clone's marker file by the inventory.
-            match home.clone_avd(&from, &to, std::process::id(), |_, _| {}) {
+            // The inventory reads progress from the clone's marker file.
+            let copied = home.clone_avd(&from, &to, std::process::id(), |copied, total| {
+                reservation.progress(copied, total)
+            });
+            match copied {
                 Ok(()) => hbb_common::log::info!("Copied managed emulator {from} to {to}"),
                 Err(error) => {
-                    hbb_common::log::warn!("Copying managed emulator {from} to {to} failed: {error}")
+                    hbb_common::log::warn!("Copying managed emulator {from} to {to} failed: {error}");
+                    // Shown on the source's card, since the copy's card is gone.
+                    reservation.fail(&error.to_string());
                 }
             }
         })?;
@@ -1019,6 +1016,105 @@ mod tests {
         let value = avd_value(&avd_request("avd_clone", "avd:Maple_1", "Maple_3"), &provider);
         assert_eq!(value["ok"], false);
         assert!(value["error"].as_str().unwrap().contains("running"), "{value}");
+    }
+
+    /// Waits until `done` holds, polling the provider for up to 10 s.
+    fn wait_for(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn space_checks_count_the_rest_of_clones_in_progress() {
+        use super::super::avd::tests::{create, temp_root, FakeSystem};
+        let root = temp_root("host-clone-pending");
+        create(&root, "Maple_1");
+        create(&root, "Maple_5");
+        let system = FakeSystem::new(64_000);
+        let provider = avd_provider(&root, &system);
+        let required = provider.home().required_free_bytes_for_clone("Maple_1").unwrap();
+        let size = required - (4 << 30);
+        // Enough for one copy of Maple_1, not for that plus a second copy.
+        system.set_free_bytes(required + size / 2);
+        let first = provider.begin_clone("Maple_1", "Maple_2").unwrap();
+        let value = avd_value(&avd_request("avd_clone", "avd:Maple_5", "Maple_6"), &provider);
+        assert_eq!(value["ok"], false, "{value}");
+        assert!(value["error"].as_str().unwrap().contains("space"), "{value}");
+        system.set_free_bytes(AVD_CREATE_MIN_FREE_BYTES + size / 2);
+        let value = avd_value(&avd_request("avd_create", "", "Maple_7"), &provider);
+        assert_eq!(value["ok"], false, "{value}");
+        assert!(value["error"].as_str().unwrap().contains("space"), "{value}");
+        assert!(!root.0.join("Maple_6.avd").exists() && !root.0.join("Maple_7.avd").exists());
+        // Once the first copy is over, both fit again.
+        drop(first);
+        let value = avd_value(&avd_request("avd_create", "", "Maple_7"), &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        system.set_free_bytes(required + size / 2);
+        let value = avd_value(&avd_request("avd_clone", "avd:Maple_5", "Maple_6"), &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        wait_for(|| {
+            provider
+                .home()
+                .list()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name == "Maple_6" && entry.clone.is_none())
+        });
+    }
+
+    #[test]
+    fn a_failed_clone_is_reported_on_the_source_card() {
+        use super::super::{avd::tests::{create, temp_root, FakeSystem}, EmulatorProvider};
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_root("host-clone-fail");
+        create(&root, "Maple_1");
+        let image = root.0.join("Maple_1.avd").join("userdata-qemu.img");
+        std::fs::write(&image, vec![1u8; 4096]).unwrap();
+        // Unreadable while this handle is open: the copy fails after it was accepted.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&image)
+            .unwrap();
+        let system = FakeSystem::new(64_000);
+        let provider = avd_provider(&root, &system);
+        let value = avd_value(&avd_request("avd_clone", "avd:Maple_1", "Maple_2"), &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        let mut error = String::new();
+        wait_for(|| {
+            let targets = provider.discover().unwrap();
+            error = targets
+                .iter()
+                .find(|target| target.provider_instance_id == "Maple_1")
+                .and_then(|target| target.last_error.clone())
+                .unwrap_or_default();
+            !error.is_empty()
+        });
+        drop(lock);
+        assert!(error.starts_with("Copy to Maple_2 failed: "), "{error}");
+        assert!(!root.0.join("Maple_2.avd").exists() && !root.0.join("Maple_2.ini").exists());
+        let targets = provider.discover().unwrap();
+        assert!(targets.iter().all(|target| target.provider_instance_id != "Maple_2"));
+        // A new copy of the same source clears the old failure.
+        let value = avd_value(&avd_request("avd_clone", "avd:Maple_1", "Maple_3"), &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        wait_for(|| {
+            provider
+                .home()
+                .list()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name == "Maple_3" && entry.clone.is_none())
+        });
+        let targets = provider.discover().unwrap();
+        let source = targets
+            .iter()
+            .find(|target| target.provider_instance_id == "Maple_1")
+            .unwrap();
+        assert_eq!(source.last_error, None);
     }
 
     #[test]

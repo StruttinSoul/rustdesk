@@ -7,7 +7,7 @@
 //! are never listed, even while they run.
 
 use super::{
-    avd_files::{valid_avd_name, AvdEntry, AvdHome},
+    avd_files::{valid_avd_name, AvdEntry, AvdHome, CLONE_HEADROOM_BYTES},
     avd_launch_windows,
     guest_runtime::{adb_command, adb_devices},
     AdbEndpoint, EmulatorCapabilities, EmulatorProvider, EmulatorRuntimeState, EmulatorState,
@@ -17,7 +17,10 @@ use hbb_common::{bail, log, ResultType};
 use std::{
     collections::BTreeSet,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -29,10 +32,15 @@ const MEMORY_MARGIN_MB: u64 = 2048;
 const START_RESERVATION: Duration = Duration::from_secs(120);
 /// The emulator's own default when an AVD names no `hw.ramSize`.
 const DEFAULT_RAM_MB: u32 = 2048;
+/// How long a stop waits for the emulator process to exit (spec: 20 s).
 const STOP_WAIT: Duration = Duration::from_secs(20);
 const STOP_POLL: Duration = Duration::from_millis(500);
-/// How long the console `kill` gets before Android is powered off instead.
-const KILL_GRACE: Duration = Duration::from_secs(4);
+/// How long the console `kill` gets before Android is powered off instead,
+/// and only if the guest is still online in ADB: saving the boot snapshot on
+/// exit can keep the process alive well after the guest has left.
+const POWER_OFF_GRACE: Duration = Duration::from_secs(10);
+/// How long the source of a failed copy shows why it failed.
+const CLONE_FAILURE_SHOWN: Duration = Duration::from_secs(120);
 
 /// A start that still counts against free memory: when, which AVD, its RAM.
 type StartReservation = (Instant, String, u32);
@@ -40,10 +48,54 @@ type StartReservation = (Instant, String, u32);
 /// Host-wide: starts are serialised and recent starts reserve their RAM.
 static START_LOCK: Mutex<Vec<StartReservation>> = Mutex::new(Vec::new());
 
-/// Lower-cased names of AVDs a clone in progress reads or writes. Only changed
+/// A copy this host process is making.
+struct InFlightClone {
+    /// Lower-cased source and destination names.
+    source: String,
+    to: String,
+    /// Bytes still to be written, counted against the drive's free space.
+    remaining: Arc<AtomicU64>,
+}
+
+/// A copy that failed, shown on its source for a while.
+struct CloneFailure {
+    at: Instant,
+    source: String,
+    message: String,
+}
+
+/// Copies in progress and recent failures. In-progress copies are only added
 /// while the start lock is held to check, so a start or a management action
 /// never slips in between a clone's checks and its marker file.
-static CLONING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+pub(crate) struct CloneBook {
+    in_flight: Vec<InFlightClone>,
+    failures: Vec<CloneFailure>,
+}
+
+impl CloneBook {
+    const fn new() -> Self {
+        Self {
+            in_flight: Vec::new(),
+            failures: Vec::new(),
+        }
+    }
+
+    fn reserves(&self, name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        self.in_flight
+            .iter()
+            .any(|clone| clone.source == name || clone.to == name)
+    }
+
+    fn pending_bytes(&self) -> u64 {
+        self.in_flight
+            .iter()
+            .map(|clone| clone.remaining.load(Ordering::Relaxed))
+            .fold(0, u64::saturating_add)
+    }
+}
+
+static CLONING: Mutex<CloneBook> = Mutex::new(CloneBook::new());
 
 /// Online `emulator-N` serials from `adb devices` output.
 fn parse_emulator_serials(output: &str) -> Vec<String> {
@@ -215,23 +267,52 @@ pub struct AvdProvider {
     home: AvdHome,
     system: Arc<dyn AvdSystem>,
     starts: &'static Mutex<Vec<StartReservation>>,
-    cloning: &'static Mutex<BTreeSet<String>>,
+    cloning: &'static Mutex<CloneBook>,
+    /// How long after `emu kill` a guest still online in ADB is powered off.
     kill_grace: Duration,
 }
 
 /// Holds the source and destination of a clone against start, rename, delete
-/// and create until dropped (when the copy ends, however it ends).
+/// and create, and its remaining bytes against the free space, until dropped
+/// (when the copy ends, however it ends).
 pub struct CloneReservation {
-    set: &'static Mutex<BTreeSet<String>>,
-    names: [String; 2],
+    book: &'static Mutex<CloneBook>,
+    source: String,
+    to: String,
+    remaining: Arc<AtomicU64>,
+}
+
+impl CloneReservation {
+    fn book(&self) -> std::sync::MutexGuard<'_, CloneBook> {
+        // Plain lists: a panicking holder leaves nothing half-updated.
+        self.book.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Progress of the copy: what is left no longer counts as free space.
+    pub fn progress(&self, copied: u64, total: u64) {
+        self.remaining
+            .store(total.saturating_sub(copied), Ordering::Relaxed);
+    }
+
+    /// Records why the copy failed; its source shows it for a while.
+    pub fn fail(&self, error: &str) {
+        let message = format!("Copy to {} failed: {error}", self.to);
+        let mut book = self.book();
+        book.failures.retain(|failure| failure.source != self.source);
+        book.failures.push(CloneFailure {
+            at: Instant::now(),
+            source: self.source.clone(),
+            message,
+        });
+    }
 }
 
 impl Drop for CloneReservation {
     fn drop(&mut self) {
-        let mut set = self.set.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        for name in &self.names {
-            set.remove(name);
-        }
+        let remaining = self.remaining.clone();
+        self.book()
+            .in_flight
+            .retain(|clone| !Arc::ptr_eq(&clone.remaining, &remaining));
     }
 }
 
@@ -248,7 +329,7 @@ impl AvdProvider {
             system: Arc::new(HostSystem),
             starts: &START_LOCK,
             cloning: &CLONING,
-            kill_grace: KILL_GRACE,
+            kill_grace: POWER_OFF_GRACE,
         }))
     }
 
@@ -260,7 +341,7 @@ impl AvdProvider {
             system: Arc::new(HostSystem),
             starts: &START_LOCK,
             cloning: &CLONING,
-            kill_grace: KILL_GRACE,
+            kill_grace: POWER_OFF_GRACE,
         }
     }
 
@@ -270,7 +351,7 @@ impl AvdProvider {
             home,
             system,
             starts: Box::leak(Box::new(Mutex::new(Vec::new()))),
-            cloning: Box::leak(Box::new(Mutex::new(BTreeSet::new()))),
+            cloning: Box::leak(Box::new(Mutex::new(CloneBook::new()))),
             kill_grace: Duration::from_millis(50),
         }
     }
@@ -279,12 +360,13 @@ impl AvdProvider {
         &self.home
     }
 
-    fn cloning_names(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+    fn clone_book(&self) -> std::sync::MutexGuard<'_, CloneBook> {
+        // Plain lists: a panicking holder leaves nothing half-updated.
         self.cloning.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn check_not_cloning(&self, name: &str) -> ResultType<()> {
-        if self.cloning_names().contains(&name.to_ascii_lowercase()) {
+        if self.clone_book().reserves(name) {
             bail!("{name} is being copied; wait for the copy in progress to finish")
         }
         Ok(())
@@ -332,19 +414,40 @@ impl AvdProvider {
     }
 
     /// Reserves `source` and `to` for a clone about to run. Refused unless
-    /// `source` is idle; the reservation lasts until the result is dropped.
+    /// `source` is idle and the drive has room for it next to the copies in
+    /// progress; the reservation lasts until the result is dropped.
     pub fn begin_clone(&self, source: &str, to: &str) -> ResultType<CloneReservation> {
         let starts = self.reservations();
         self.check_idle(&starts, source)?;
+        self.home.check_ini_path(source)?;
         self.check_not_cloning(to)?;
         if self.home.list()?.iter().any(|entry| entry.name.eq_ignore_ascii_case(to)) {
             bail!("An emulator named {to} already exists")
         }
-        let names = [source.to_ascii_lowercase(), to.to_ascii_lowercase()];
-        self.cloning_names().extend(names.iter().cloned());
+        let required = self.home.required_free_bytes_for_clone(source)?;
+        let free = self.free_disk_bytes()?;
+        if free < required {
+            bail!(
+                "Not enough free space on the PC to copy {source}: {} GB needed, {} GB free",
+                required.div_ceil(1 << 30),
+                free >> 30
+            )
+        }
+        let remaining = Arc::new(AtomicU64::new(
+            required.saturating_sub(CLONE_HEADROOM_BYTES),
+        ));
+        let mut book = self.clone_book();
+        book.failures.retain(|failure| failure.source != source);
+        book.in_flight.push(InFlightClone {
+            source: source.to_ascii_lowercase(),
+            to: to.to_ascii_lowercase(),
+            remaining: remaining.clone(),
+        });
         Ok(CloneReservation {
-            set: self.cloning,
-            names,
+            book: self.cloning,
+            source: source.to_owned(),
+            to: to.to_owned(),
+            remaining,
         })
     }
 
@@ -357,13 +460,33 @@ impl AvdProvider {
         avd_launch_windows::set_window_visible(name, visible)
     }
 
+    /// Free space on the emulator folder's drive, less what the copies in
+    /// progress are still to write.
     pub fn free_disk_bytes(&self) -> ResultType<u64> {
-        self.system.free_disk_bytes(self.home.root())
+        let free = self.system.free_disk_bytes(self.home.root())?;
+        Ok(free.saturating_sub(self.clone_book().pending_bytes()))
+    }
+
+    /// The recent copy failure of `name`, if any.
+    fn clone_failure(&self, name: &str) -> Option<String> {
+        let mut book = self.clone_book();
+        book.failures
+            .retain(|failure| failure.at.elapsed() < CLONE_FAILURE_SHOWN);
+        book.failures
+            .iter()
+            .find(|failure| failure.source == name)
+            .map(|failure| failure.message.clone())
     }
 
     fn instances(&self) -> ResultType<Vec<Instance>> {
+        let live: BTreeSet<String> = self
+            .clone_book()
+            .in_flight
+            .iter()
+            .map(|clone| clone.to.clone())
+            .collect();
         // Clones a previous host process left unfinished are removed (and logged) here.
-        self.home.cleanup_stale_clones(std::process::id())?;
+        self.home.cleanup_stale_clones(std::process::id(), &live)?;
         let entries = self.home.list()?;
         let running = running_avd_names(&self.system.processes());
         let mut guests = match self.system.guests() {
@@ -411,17 +534,55 @@ impl AvdProvider {
         }
     }
 
-    /// Polls until no emulator process runs `name`; false after `wait`.
-    fn wait_until_stopped(&self, name: &str, wait: Duration) -> bool {
-        let deadline = Instant::now() + wait;
+    /// Whether the guest behind `serial` is still online in ADB; None when
+    /// ADB cannot tell right now.
+    fn guest_online(&self, name: &str, serial: &str) -> Option<bool> {
+        match self.system.guests() {
+            Ok(guests) => Some(
+                guests
+                    .iter()
+                    .any(|(online, probe)| online == serial && probe.name == name),
+            ),
+            Err(error) => {
+                log::trace!("Android Emulator guests unavailable: {error}");
+                None
+            }
+        }
+    }
+
+    /// After `emu kill`: waits up to `STOP_WAIT` for the emulator process to
+    /// exit. Android is powered off only when the guest is still online in ADB
+    /// after the grace, never once it has left (the emulator is then busy
+    /// saving its state and exiting).
+    fn wait_after_kill(&self, name: &str, serial: &str) -> ResultType<()> {
+        let started = Instant::now();
+        let poll = STOP_POLL.min(self.kill_grace);
+        // Decided once: powered off, or seen leaving ADB.
+        let mut settled = false;
         loop {
             if !running_avd_names(&self.system.processes()).contains(name) {
-                return true;
+                return Ok(());
             }
-            if Instant::now() >= deadline {
-                return false;
+            let elapsed = started.elapsed();
+            if elapsed >= STOP_WAIT {
+                bail!("{name} did not stop within 20 seconds")
             }
-            thread::sleep(STOP_POLL.min(wait));
+            if !settled && elapsed >= self.kill_grace {
+                match self.guest_online(name, serial) {
+                    Some(true) => {
+                        // The console kill did nothing (typically refused for
+                        // lack of the user's console token).
+                        log::info!(
+                            "Android Emulator {name} ignored the console kill; powering it off"
+                        );
+                        self.system.power_off(serial)?;
+                        settled = true;
+                    }
+                    Some(false) => settled = true,
+                    None => {}
+                }
+            }
+            thread::sleep(poll);
         }
     }
 
@@ -466,7 +627,15 @@ impl EmulatorProvider for AvdProvider {
     }
 
     fn discover(&self) -> ResultType<Vec<EmulatorTarget>> {
-        Ok(self.instances()?.iter().map(to_target).collect())
+        let mut targets: Vec<EmulatorTarget> = self.instances()?.iter().map(to_target).collect();
+        for target in &mut targets {
+            if target.progress_percent.is_none() {
+                if let Some(message) = self.clone_failure(&target.provider_instance_id) {
+                    target.last_error = Some(message);
+                }
+            }
+        }
+        Ok(targets)
     }
 
     fn refresh(&self, target: &EmulatorTarget) -> ResultType<EmulatorRuntimeState> {
@@ -497,6 +666,7 @@ impl EmulatorProvider for AvdProvider {
             bail!("{name} is already running")
         }
         self.check_not_cloning(name)?;
+        self.home.check_ini_path(name)?;
         starts.retain(|(at, _, _)| at.elapsed() < START_RESERVATION);
         let reserved = starts.iter().map(|(_, _, mb)| u64::from(*mb)).sum();
         let ram_mb = match instance.entry.ram_mb {
@@ -516,15 +686,7 @@ impl EmulatorProvider for AvdProvider {
         let name = target.provider_instance_id.as_str();
         let serial = self.serial(target)?;
         self.system.kill(&serial)?;
-        if !self.wait_until_stopped(name, self.kill_grace) {
-            // The console kill did nothing (typically refused for lack of the
-            // user's console token): power Android off instead.
-            log::info!("Android Emulator {name} ignored the console kill; powering it off");
-            self.system.power_off(&serial)?;
-            if !self.wait_until_stopped(name, STOP_WAIT) {
-                bail!("{name} did not stop within 20 seconds")
-            }
-        }
+        self.wait_after_kill(name, &serial)?;
         // Its RAM is free again, so a restart need not wait out the reservation.
         self.reservations().retain(|(_, started, _)| started != name);
         log::info!("Stopped Android Emulator {name}");
@@ -640,6 +802,10 @@ pub(crate) mod tests {
         powered_off: Mutex<Vec<String>>,
         /// `emu kill` reports success but the emulator keeps running.
         kill_ignored: bool,
+        /// `emu kill` works: the guest leaves ADB at once, the process this much later.
+        kill_linger: Option<Duration>,
+        /// Emulators that left ADB and whose process ends at the given time.
+        exits: Mutex<Vec<(String, Instant)>>,
         free_bytes: Mutex<u64>,
     }
 
@@ -653,8 +819,16 @@ pub(crate) mod tests {
                 killed: Mutex::new(Vec::new()),
                 powered_off: Mutex::new(Vec::new()),
                 kill_ignored: false,
+                kill_linger: None,
+                exits: Mutex::new(Vec::new()),
                 free_bytes: Mutex::new(u64::MAX),
             })
+        }
+
+        fn lingering_after_kill(memory_mb: u64, linger: Duration) -> Arc<Self> {
+            let mut system = Arc::try_unwrap(Self::new(memory_mb)).ok().unwrap();
+            system.kill_linger = Some(linger);
+            Arc::new(system)
         }
 
         fn ignoring_kill(memory_mb: u64) -> Arc<Self> {
@@ -701,7 +875,17 @@ pub(crate) mod tests {
 
     impl AvdSystem for FakeSystem {
         fn processes(&self) -> Vec<(String, Vec<String>)> {
-            self.processes.lock().unwrap().clone()
+            let due: Vec<String> = self
+                .exits
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, at)| Instant::now() >= *at)
+                .map(|(name, _)| name.clone())
+                .collect();
+            let mut processes = self.processes.lock().unwrap();
+            processes.retain(|(_, cmd)| !due.iter().any(|name| cmd.contains(name)));
+            processes.clone()
         }
         fn guests(&self) -> ResultType<Vec<(String, Probe)>> {
             Ok(self.guests.lock().unwrap().clone())
@@ -718,7 +902,14 @@ pub(crate) mod tests {
         }
         fn kill(&self, serial: &str) -> ResultType<()> {
             self.killed.lock().unwrap().push(serial.to_owned());
-            if !self.kill_ignored {
+            if let Some(linger) = self.kill_linger {
+                let mut guests = self.guests.lock().unwrap();
+                let at = Instant::now() + linger;
+                for (_, probe) in guests.iter().filter(|(s, _)| s == serial) {
+                    self.exits.lock().unwrap().push((probe.name.clone(), at));
+                }
+                guests.retain(|(s, _)| s != serial);
+            } else if !self.kill_ignored {
                 self.end(serial);
             }
             Ok(())
@@ -895,6 +1086,93 @@ pub(crate) mod tests {
         system.run("Maple_1", Some("emulator-5554"));
         provider(&root, &system).stop(&target("Maple_1")).unwrap();
         assert!(system.powered_off.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_waits_for_a_guest_that_left_adb_without_powering_it_off() {
+        let root = temp_root("linger");
+        create(&root, "Maple_1");
+        // Saving state on exit: the guest leaves ADB, qemu ends 400 ms later.
+        let system = FakeSystem::lingering_after_kill(64_000, Duration::from_millis(400));
+        system.run("Maple_1", Some("emulator-5554"));
+        provider(&root, &system).stop(&target("Maple_1")).unwrap();
+        assert_eq!(*system.killed.lock().unwrap(), vec!["emulator-5554"]);
+        assert!(system.powered_off.lock().unwrap().is_empty());
+        assert!(system.processes().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_marker_of_a_live_clone_is_kept() {
+        let root = temp_root("livemarker");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        let provider = provider(&root, &system);
+        let _guard = provider.begin_clone("Maple_1", "Maple_2").unwrap();
+        let dir = root.0.join("Maple_2.avd");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.0.join("Maple_2.ini"), "path=x\n").unwrap();
+        // Caught mid-replace or unreadable for a moment: still this process's copy.
+        std::fs::write(dir.join("aperture-clone.json"), "{\"source\":").unwrap();
+        provider.discover().unwrap();
+        assert!(dir.join("aperture-clone.json").is_file());
+        assert!(root.0.join("Maple_2.ini").is_file());
+    }
+
+    fn ini_pointing_at(root: &TempRoot, name: &str, avd_dir: &Path) -> String {
+        let text = format!(
+            "avd.ini.encoding=UTF-8\npath={}\npath.rel=avd\\{name}.avd\ntarget=android-35\n",
+            avd_dir.display()
+        );
+        std::fs::write(root.0.join(format!("{name}.ini")), &text).unwrap();
+        text
+    }
+
+    #[test]
+    fn an_ini_pointing_outside_the_folder_is_refused() {
+        let root = temp_root("inipath");
+        create(&root, "Maple_1");
+        // Copied in with Explorer, still pointing at a development AVD.
+        let elsewhere = temp_root("inipath-dev");
+        std::fs::create_dir_all(elsewhere.0.join("Maple_1.avd")).unwrap();
+        let text = ini_pointing_at(&root, "Maple_1", &elsewhere.0.join("Maple_1.avd"));
+        let ini = root.0.join("Maple_1.ini");
+        let system = FakeSystem::new(64_000);
+        let provider = provider(&root, &system);
+        let error = provider.start(&target("Maple_1")).unwrap_err().to_string();
+        assert!(error.contains("Maple_1 points outside the Aperture emulator folder"), "{error}");
+        assert!(system.launched.lock().unwrap().is_empty());
+        let error = provider.begin_clone("Maple_1", "Maple_2").err().unwrap().to_string();
+        assert!(error.contains("points outside"), "{error}");
+        assert!(provider.home().clone_avd("Maple_1", "Maple_2", 1, |_, _| {}).is_err());
+        assert!(!root.0.join("Maple_2.avd").exists() && !root.0.join("Maple_2.ini").exists());
+        assert!(provider.home().rename("Maple_1", "Maple_3").is_err());
+        assert!(root.0.join("Maple_1.avd").is_dir() && !root.0.join("Maple_3.avd").exists());
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), text, "the user's file is untouched");
+        // No path= at all: the emulator would fall back to path.rel under .android.
+        std::fs::write(&ini, "path.rel=avd\\Maple_1.avd\ntarget=android-35\n").unwrap();
+        assert!(provider.start(&target("Maple_1")).is_err());
+        assert!(system.launched.lock().unwrap().is_empty());
+        // Delete removes only the folder's own files.
+        provider.home().delete("Maple_1").unwrap();
+        assert!(elsewhere.0.join("Maple_1.avd").is_dir());
+    }
+
+    #[test]
+    fn created_cloned_and_renamed_emulators_point_into_the_folder() {
+        let root = temp_root("inipath-ok");
+        create(&root, "Maple_1");
+        // As Android Studio writes it: path.rel resolves under the user's .android.
+        ini_pointing_at(&root, "Maple_1", &root.0.join("Maple_1.avd"));
+        let system = FakeSystem::new(64_000);
+        let provider = provider(&root, &system);
+        provider.home().clone_avd("Maple_1", "Maple_2", 1, |_, _| {}).unwrap();
+        provider.home().rename("Maple_1", "Maple_3").unwrap();
+        for name in ["Maple_2", "Maple_3"] {
+            provider.start(&target(name)).unwrap();
+            let ini = std::fs::read_to_string(root.0.join(format!("{name}.ini"))).unwrap();
+            assert!(!ini.contains("path.rel"), "{name}: {ini}");
+        }
+        assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_2", "Maple_3"]);
     }
 
     #[test]
