@@ -296,9 +296,17 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     try {
       // Recorded before the sheet opens so it is one-time even if the app dies.
       await bind.setLocalFlutterOption(k: promptedKey, v: 'Y');
-      if (!mounted) return;
+      // A game or monitor may have opened during the write.
+      if (!mounted || _fullscreen != null) return;
       final trust = await showTrustPhoneSheet(context, hostName: _hostName);
       if (trust == true) await _trustThisPhone();
+    } catch (_) {
+      // Runs unawaited: report instead of reaching the zone's uncaught handler.
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(translate('Pairing failed'))));
+      }
     } finally {
       _offeringPairing = false;
     }

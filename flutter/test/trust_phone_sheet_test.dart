@@ -30,21 +30,19 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(MaterialApp(
       theme: MirpgRemoteTheme.build(ThemeData.dark()),
-      home: MediaQuery(
-        data: MediaQueryData(
-          size: const Size(360, 800),
-          textScaler: TextScaler.linear(textScale),
-        ),
-        child: Builder(
-          builder: (context) => Scaffold(
-            body: Center(
-              child: ElevatedButton(
-                onPressed: () async => results.add(await showTrustPhoneSheet(
-                    context,
-                    hostName: 'atlas',
-                    tr: fakeTr)),
-                child: const Text('open'),
-              ),
+      builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(textScale)),
+          child: child!),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: Center(
+            child: ElevatedButton(
+              onPressed: () async => results.add(await showTrustPhoneSheet(
+                  context,
+                  hostName: 'atlas',
+                  tr: fakeTr)),
+              child: const Text('open'),
             ),
           ),
         ),
@@ -84,6 +82,9 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     expect(find.text('Trust'), findsOneWidget);
+    expect(
+        MediaQuery.textScalerOf(tester.element(find.text('Trust'))).scale(10),
+        closeTo(13, 0.001));
     expect(tester.takeException(), isNull);
   });
 }
