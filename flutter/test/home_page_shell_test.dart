@@ -20,6 +20,17 @@ class _FakePage extends StatelessWidget implements PageShape {
 }
 
 void main() {
+  test('Chat is never a root tab', () {
+    expect(mobileRootTabs(android: true, incomingOnly: false, outgoingOnly: false),
+        [MobileRootTab.computers, MobileRootTab.share, MobileRootTab.settings]);
+    expect(mobileRootTabs(android: true, incomingOnly: false, outgoingOnly: true),
+        [MobileRootTab.computers, MobileRootTab.settings]);
+    expect(mobileRootTabs(android: true, incomingOnly: true, outgoingOnly: false),
+        [MobileRootTab.share, MobileRootTab.settings]);
+    expect(mobileRootTabs(android: false, incomingOnly: false, outgoingOnly: false),
+        [MobileRootTab.computers, MobileRootTab.settings]);
+  });
+
   test('remote root is named Computers', () {
     expect(ConnectionPage(appBarActions: const []).title, 'Computers');
   });
@@ -29,7 +40,6 @@ void main() {
     var selected = 0;
     const pages = <PageShape>[
       _FakePage('Computers', Icon(Icons.computer_outlined)),
-      _FakePage('Chat', Icon(Icons.chat_bubble_outline)),
       _FakePage('Share', Icon(Icons.screen_share_outlined)),
       _FakePage('Settings', Icon(Icons.settings_outlined)),
     ];
@@ -49,13 +59,14 @@ void main() {
 
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(find.byType(BottomNavigationBar), findsNothing);
-    for (final label in ['Computers', 'Chat', 'Share', 'Settings']) {
+    for (final label in ['Computers', 'Share', 'Settings']) {
       expect(find.text(label), findsOneWidget);
     }
+    expect(find.text('Chat'), findsNothing);
 
     await tester.tap(find.text('Share'));
     await tester.pump();
-    expect(selected, 2);
+    expect(selected, 1);
     expect(find.text('body-Share'), findsOneWidget);
   });
 
@@ -63,7 +74,6 @@ void main() {
       (tester) async {
     const pages = <PageShape>[
       _FakePage('Computers', Icon(Icons.computer_outlined)),
-      _FakePage('Chat', Icon(Icons.chat_bubble_outline)),
       _FakePage('Share', Icon(Icons.screen_share_outlined)),
       _FakePage('Settings', Icon(Icons.settings_outlined)),
     ];

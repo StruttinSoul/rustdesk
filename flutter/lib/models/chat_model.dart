@@ -152,13 +152,8 @@ class ChatModel with ChangeNotifier {
     if (chatIconOverlayEntry != null) {
       chatIconOverlayEntry!.remove();
     }
-    // mobile check navigationBar
-    final bar = navigationBarKey.currentWidget;
-    if (bar != null) {
-      if ((bar as BottomNavigationBar).currentIndex == 1) {
-        return;
-      }
-    }
+    // mobile: the chat page is already open
+    if (HomePage.homeKey.currentState?.isChatPageCurrentTab == true) return;
 
     final overlayState = _blockableOverlayState.state;
     if (overlayState == null) return;
