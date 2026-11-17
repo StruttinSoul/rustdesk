@@ -115,16 +115,22 @@ pub struct GuestHelper {
 
 impl GuestHelper {
     pub fn connect(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, false, false)
+        Self::connect_with_options(adb, serial, helper, false, false, true)
     }
 
     /// Full-screen stream for Google's Android Emulator (see `uncapped_fps`).
     pub fn connect_android_emulator(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, false, true)
+        Self::connect_with_options(adb, serial, helper, false, true, true)
     }
 
     pub fn connect_preview(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, true, false)
+        Self::connect_with_options(adb, serial, helper, true, false, true)
+    }
+
+    /// Input only: the helper runs with `video=false`, so the first (and only)
+    /// socket is control and there is no codec header (scrcpy's dummy byte proves it is live).
+    pub fn connect_control_only(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
+        Self::connect_with_options(adb, serial, helper, false, false, false)
     }
 
     fn connect_with_options(
@@ -133,6 +139,7 @@ impl GuestHelper {
         helper: &Path,
         preview: bool,
         uncapped_fps: bool,
+        video: bool,
     ) -> ResultType<Self> {
         if !is_local_emulator(serial) {
             bail!("Guest helper requires a local emulator ADB endpoint")
@@ -174,6 +181,11 @@ impl GuestHelper {
             log::debug!("Guest fullscreen stream profile: {profile:?}");
         }
         let [max_size_arg, max_fps_arg, bit_rate_arg, codec_options_arg] = profile.scrcpy_args();
+        let video_arg = format!("video={video}");
+        // Without a video socket there is no codec header to prove the tunnel
+        // reaches a live server (an ADB forward accepts before the server
+        // listens), so control-only asks for scrcpy's dummy byte instead.
+        let dummy_byte_arg = format!("send_dummy_byte={}", !video);
         session.child = Some(
             Command::new(adb)
                 .creation_flags(0x08000000)
@@ -189,9 +201,10 @@ impl GuestHelper {
                     &scid_arg,
                     "tunnel_forward=true",
                     "audio=false",
+                    &video_arg,
                     "video_codec=h264",
                     "send_device_meta=false",
-                    "send_dummy_byte=false",
+                    &dummy_byte_arg,
                     "clipboard_autosync=false",
                     "power_on=false",
                     "cleanup=false",
@@ -209,23 +222,40 @@ impl GuestHelper {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let started = Instant::now();
         loop {
-            let attempt = || -> ResultType<(TcpStream, TcpStream)> {
-                let mut video = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
-                video.set_read_timeout(Some(Duration::from_secs(2)))?;
-                let control = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
+            let attempt = || -> ResultType<(Option<TcpStream>, TcpStream)> {
+                let video_socket = if video {
+                    let mut socket = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
+                    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+                    Some(socket)
+                } else {
+                    None
+                };
+                let mut control = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
+                if !video {
+                    control.set_read_timeout(Some(Duration::from_secs(2)))?;
+                    let mut dummy = [0; 1];
+                    control.read_exact(&mut dummy)?;
+                    control.set_read_timeout(None)?;
+                }
                 control.set_write_timeout(Some(Duration::from_secs(1)))?;
                 control.set_nodelay(true)?;
-                let mut codec = [0; 4];
-                video.read_exact(&mut codec)?;
-                if &codec != b"h264" {
-                    bail!("Guest helper did not select H.264")
-                }
-                video.set_read_timeout(None)?;
-                Ok((video, control))
+                let video_socket = match video_socket {
+                    Some(mut socket) => {
+                        let mut codec = [0; 4];
+                        socket.read_exact(&mut codec)?;
+                        if &codec != b"h264" {
+                            bail!("Guest helper did not select H.264")
+                        }
+                        socket.set_read_timeout(None)?;
+                        Some(socket)
+                    }
+                    None => None,
+                };
+                Ok((video_socket, control))
             };
             match attempt() {
                 Ok((video, control)) => {
-                    session.video = Some(video);
+                    session.video = video;
                     session.control = Some(control);
                     log::debug!("Started owned guest helper {id} on {serial}");
                     return Ok(session);
@@ -696,5 +726,98 @@ mod tests {
             }
         }
         panic!("scrcpy reset-video did not produce a fresh keyframe");
+    }
+
+    fn probe_display_size(adb: &Path, serial: &str) -> (u16, u16) {
+        let out = adb_command(adb, serial, &["shell", "wm", "size"]).unwrap();
+        // "Physical size: 1080x2400" optionally followed by "Override size: ...".
+        let size = out
+            .lines()
+            .filter_map(|line| line.rsplit(':').next())
+            .map(str::trim)
+            .last()
+            .and_then(|size| size.split_once('x'))
+            .and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)))
+            .expect("wm size output");
+        size
+    }
+
+    fn probe_tap(control: &mut TcpStream, x: u32, y: u32, width: u16, height: u16) {
+        use super::super::guest_protocol::touch_packet;
+        control.write_all(&touch_packet(0, 0, x, y, width, height).unwrap()).unwrap();
+        control.write_all(&touch_packet(1, 0, x, y, width, height).unwrap()).unwrap();
+    }
+
+    /// `adb shell` with the whole output captured (`run_adb` cannot drain a
+    /// large dump).
+    fn probe_shell(adb: &Path, serial: &str, args: &[&str]) -> String {
+        let output = Command::new(adb)
+            .creation_flags(0x08000000)
+            .args(["-s", serial, "shell"])
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// The visible texts of the foreground screen, in document order.
+    fn probe_screen_texts(adb: &Path, serial: &str) -> Vec<String> {
+        let xml = probe_shell(adb, serial, &["uiautomator dump /data/local/tmp/probe-ui.xml >/dev/null; cat /data/local/tmp/probe-ui.xml"]);
+        let mut texts = Vec::new();
+        for part in xml.split(" text=\"").skip(1) {
+            if let Some((text, _)) = part.split_once('"') {
+                if !text.is_empty() {
+                    texts.push(text.to_owned());
+                }
+            }
+        }
+        texts
+    }
+
+    fn probe_open_settings(adb: &Path, serial: &str) -> Vec<String> {
+        probe_shell(adb, serial, &["am", "force-stop", "com.android.settings"]);
+        probe_shell(adb, serial, &["input", "keyevent", "3"]);
+        probe_shell(adb, serial, &["am", "start", "-a", "android.settings.SETTINGS"]);
+        thread::sleep(Duration::from_secs(3));
+        probe_screen_texts(adb, serial)
+    }
+
+    #[test]
+    #[ignore = "Probes helper control-only touch space in an explicitly selected local Android guest"]
+    fn real_local_guest_control_only_touch_space() {
+        let adb = PathBuf::from(std::env::var("MIRPG_TEST_ADB").expect("Set MIRPG_TEST_ADB"));
+        let serial = std::env::var("MIRPG_TEST_GUEST_SERIAL").expect("Set MIRPG_TEST_GUEST_SERIAL");
+        let (w, h) = probe_display_size(&adb, &serial);
+        eprintln!("display size {w}x{h}");
+        let mut helper =
+            GuestHelper::connect_control_only(&adb, &serial, &helper_path().unwrap()).unwrap();
+        assert!(helper.read_packet().is_err(), "control-only has no video socket");
+        let mut control = helper.control_socket().unwrap();
+        let (cx, cy) = ((w / 2) as u32, (h / 2) as u32);
+        let main = probe_open_settings(&adb, &serial);
+        eprintln!("settings main screen: {main:?}");
+
+        probe_tap(&mut control, cx, cy, w, h);
+        thread::sleep(Duration::from_millis(1500));
+        let after_display = probe_screen_texts(&adb, &serial);
+        eprintln!("after display-size tap ({cx},{cy}) in {w}x{h}: {after_display:?}");
+
+        let main_again = probe_open_settings(&adb, &serial);
+        assert_eq!(main, main_again, "settings must reset to the same screen");
+        let (hw, hh) = (w / 2, h / 2);
+        let (hx, hy) = ((hw / 2) as u32, (hh / 2) as u32);
+        probe_tap(&mut control, hx, hy, hw, hh);
+        thread::sleep(Duration::from_millis(1500));
+        let after_half = probe_screen_texts(&adb, &serial);
+        eprintln!("after half-size tap ({hx},{hy}) in {hw}x{hh}: {after_half:?}");
+
+        probe_shell(&adb, &serial, &["input", "keyevent", "3"]);
+        assert_ne!(main, after_display, "display-size tap must be delivered at the centre");
+        eprintln!(
+            "RESULT display_delivered={} half_delivered={} half_same_target_as_display={}",
+            main != after_display,
+            main != after_half,
+            after_half == after_display
+        );
     }
 }
