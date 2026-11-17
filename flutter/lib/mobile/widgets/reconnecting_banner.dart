@@ -26,19 +26,24 @@ class ReconnectingBanner extends StatelessWidget {
         listenable: controller,
         builder: (context, _) {
           if (!controller.showsReconnecting) return const SizedBox.shrink();
+          // The page puts this in a Stack outside any Scaffold; without a
+          // Material above it the text would get Flutter's fallback style.
           return Positioned.fill(
-            child: IgnorePointer(
-              child: SafeArea(
-                child: Padding(
-                  padding: padding,
-                  child: Align(
-                    alignment: alignment,
-                    child: MirpgStatusChip(
-                      label: tr('Reconnecting…'),
-                      icon: Icons.hourglass_top_rounded,
-                      tone: MirpgStatusTone.warning,
-                      onDarkSurface: true,
-                      horizontalPadding: 12,
+            child: Material(
+              type: MaterialType.transparency,
+              child: IgnorePointer(
+                child: SafeArea(
+                  child: Padding(
+                    padding: padding,
+                    child: Align(
+                      alignment: alignment,
+                      child: MirpgStatusChip(
+                        label: tr('Reconnecting…'),
+                        icon: Icons.hourglass_top_rounded,
+                        tone: MirpgStatusTone.warning,
+                        onDarkSurface: true,
+                        horizontalPadding: 12,
+                      ),
                     ),
                   ),
                 ),

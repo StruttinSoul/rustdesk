@@ -292,7 +292,60 @@ void main() {
         expect(controller.phase, SessionReconnectPhase.idle, reason: type);
         clock.advance(const Duration(seconds: 30));
         expect(clock.pending, 0, reason: type);
+        controller.onConnected(); // the user got through; ready for the next
       }
+    });
+
+    test('after a prompt, a later drop of the unauthorised connection does '
+        'not start another run (no 3 minute loop)', () {
+      controller.onMessage(error(reset));
+      controller.onMessage(prompt('wait-remote-accept-nook'));
+      // The PC drops the connection nobody accepted; the phone sees a reset.
+      clock.advance(const Duration(seconds: 180));
+      expect(controller.onMessage(error('Reset by the peer')), isFalse);
+      expect(attempts, 1);
+      expect(controller.phase, SessionReconnectPhase.idle);
+      expect(clock.pending, 0);
+      // Once the session really authenticates, drops are handled again.
+      controller.onConnected();
+      expect(controller.onMessage(error(reset)), isTrue);
+      expect(attempts, 2);
+    });
+
+    test('after a refusal, drops are left to the dialogs until connected', () {
+      controller.onMessage(error(reset));
+      controller.onMessage(error('Connection denied by the PC'));
+      expect(controller.onMessage(error(reset)), isFalse);
+      expect(attempts, 1);
+      controller.onConnected();
+      expect(controller.onMessage(error(reset)), isTrue);
+    });
+
+    test('a drop reported as Connecting... is restored after the stock '
+        'reconnect, which keeps running', () {
+      final stock = {
+        'type': 'restarting-show',
+        'title': 'Connecting...',
+        'text': 'Connection in progress. Please wait.',
+      };
+      expect(controller.onMessage(stock), isFalse,
+          reason: 'The stock reconnect continues');
+      expect(attempts, 0, reason: 'Not a second reconnect on top of it');
+      expect(controller.phase, SessionReconnectPhase.idle);
+      controller.onConnected();
+      expect(restored, 1);
+    });
+
+    test('other restarting-show titles do not mark a drop', () {
+      expect(
+          controller.onMessage({
+            'type': 'restarting-show',
+            'title': 'Restarting remote device',
+            'text': ''
+          }),
+          isFalse);
+      controller.onConnected();
+      expect(restored, 0);
     });
 
     test('success restores once and goes back to idle', () {

@@ -184,6 +184,11 @@ class SessionReconnectController extends ChangeNotifier {
   Timer? _deadline;
   Map<String, dynamic> _last = const {};
   bool _restorePending = false;
+
+  /// A prompt or a refusal ended a run and no session has authenticated since.
+  /// The PC drops an unaccepted connection after its grace period; that reset
+  /// is not a new drop of a working session and must not start another run.
+  bool _awaitingUser = false;
   bool _disposed = false;
 
   SessionReconnectPhase get phase => _phase;
@@ -210,11 +215,18 @@ class SessionReconnectController extends ChangeNotifier {
     final type = (event['type'] ?? '').toString();
     final title = (event['title'] ?? '').toString();
     final text = (event['text'] ?? '').toString();
+    if (type == 'restarting-show' && title == 'Connecting...') {
+      // The peer-gone detector reconnects by itself under this box. Let that
+      // run, and restore the view when it gets back.
+      _restorePending = true;
+      return false;
+    }
     switch (_phase) {
       case SessionReconnectPhase.gaveUp:
         return false;
       case SessionReconnectPhase.idle:
-        if (!isRecoverableSessionLoss(type: type, title: title, text: text)) {
+        if (_awaitingUser ||
+            !isRecoverableSessionLoss(type: type, title: title, text: text)) {
           return false;
         }
         _last = Map<String, dynamic>.of(event);
@@ -227,6 +239,7 @@ class SessionReconnectController extends ChangeNotifier {
           // Credentials are RustDesk's to ask for. The prompt stays; once the
           // user is through it the view is still restored.
           _cancelTimers();
+          _awaitingUser = true;
           _setPhase(SessionReconnectPhase.idle);
           return false;
         }
@@ -234,6 +247,7 @@ class SessionReconnectController extends ChangeNotifier {
         if (_isRefusal(text)) {
           _cancelTimers();
           _restorePending = false;
+          _awaitingUser = true;
           _setPhase(SessionReconnectPhase.idle);
           return false;
         }
@@ -315,6 +329,7 @@ class SessionReconnectController extends ChangeNotifier {
     _cancelTimers();
     final restore = _restorePending;
     _restorePending = false;
+    _awaitingUser = false;
     _failed = 0;
     _setPhase(SessionReconnectPhase.idle);
     if (restore) onRestored();
@@ -324,6 +339,7 @@ class SessionReconnectController extends ChangeNotifier {
   void cancel() {
     _cancelTimers();
     _restorePending = false;
+    _awaitingUser = false;
     _failed = 0;
     _setPhase(SessionReconnectPhase.idle);
   }

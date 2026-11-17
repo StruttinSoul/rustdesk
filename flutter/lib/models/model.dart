@@ -979,10 +979,7 @@ class FfiModel with ChangeNotifier {
     // "Reconnecting…" state instead of the error dialog. It hands the box back
     // when it gives up, and for refusals and password or 2FA prompts.
     final autoReconnect = sessionReconnect;
-    if (autoReconnect != null && autoReconnect.onMessage(evt)) {
-      _onConnectionInvalidated?.call();
-      return;
-    }
+    if (autoReconnect != null && autoReconnect.onMessage(evt)) return;
 
     // Disable relative mouse mode on any error-type message to ensure cursor is released.
     // This includes connection errors, session-ending messages, elevation errors, etc.

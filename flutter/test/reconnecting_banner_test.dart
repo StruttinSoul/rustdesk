@@ -21,16 +21,28 @@ void main() {
 
   tearDown(() => controller.dispose());
 
+  // Like the dashboard: the banner sits in a Stack outside any Scaffold, so
+  // it has no Material above it.
   Future<void> pump(WidgetTester tester) => tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: Stack(children: [
-            Positioned.fill(
-                child: GestureDetector(
-                    behavior: HitTestBehavior.opaque, onTap: () => taps++)),
-            ReconnectingBanner(controller: controller, tr: fakeTr),
-          ]),
-        ),
+        home: Stack(children: [
+          Positioned.fill(
+              child: GestureDetector(
+                  behavior: HitTestBehavior.opaque, onTap: () => taps++)),
+          ReconnectingBanner(controller: controller, tr: fakeTr),
+        ]),
       ));
+
+  testWidgets('its text has a plain style, not the fallback underline',
+      (tester) async {
+    await pump(tester);
+    controller.onMessage(
+        {'type': 'error', 'title': 'Connection Error', 'text': 'Timeout'});
+    await tester.pump();
+    final style = DefaultTextStyle.of(tester.element(find.text('Reconnecting…')))
+        .style;
+    expect(style.decoration, isNot(TextDecoration.underline));
+    controller.cancel();
+  });
 
   testWidgets('shows Reconnecting… only while attempts run, without a dialog',
       (tester) async {

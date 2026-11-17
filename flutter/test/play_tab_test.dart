@@ -382,6 +382,25 @@ void main() {
       expect(news, 1);
     });
 
+    testWidgets('New stays reachable on first load and on a list error',
+        (tester) async {
+      await pump(tester, firstLoad: true);
+      await tester.tap(find.text('New'));
+      expect(news, 1);
+
+      await pump(tester, listError: 'The PC did not return its emulator list.');
+      await tester.tap(find.text('New'));
+      expect(news, 2);
+      expect(find.text('Try again'), findsOneWidget);
+    });
+
+    testWidgets('the empty state keeps its single New emulator button',
+        (tester) async {
+      await pump(tester);
+      expect(find.text('New emulator'), findsOneWidget);
+      expect(find.text('New'), findsNothing);
+    });
+
     testWidgets('no New in the header when onNew is null', (tester) async {
       await pump(tester, tiles: [t('A', live)], withNew: false);
       expect(find.text('New'), findsNothing);

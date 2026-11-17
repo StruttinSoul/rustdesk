@@ -311,6 +311,11 @@ class PlayTabBody extends StatelessWidget {
             child: child,
           ),
         );
+    // New is always reachable: on the header row, except where the empty
+    // state shows its own New emulator button.
+    final showCounts = !firstLoad && tiles.isNotEmpty;
+    final emptyState = !firstLoad && tiles.isEmpty && listError.isEmpty;
+    final showHeader = showCounts || (onNew != null && !emptyState);
     return LayoutBuilder(builder: (context, constraints) {
       final bodyHeight = constraints.maxHeight;
       return RefreshIndicator(
@@ -319,14 +324,16 @@ class PlayTabBody extends StatelessWidget {
           controller: scrollController,
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
-            if (!firstLoad && tiles.isNotEmpty)
+            if (showHeader)
               box(
                 SizedBox(
                   height: _headerExtent,
                   child: Row(children: [
                     Expanded(
                       child: Text(
-                        '${tr('Emulators')} · ${tr('{$running/${listed.length}} running')}',
+                        showCounts
+                            ? '${tr('Emulators')} · ${tr('{$running/${listed.length}} running')}'
+                            : tr('Emulators'),
                         style: text.titleSmall,
                       ),
                     ),
