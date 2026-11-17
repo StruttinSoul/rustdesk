@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aperture UI redesign - mockups (2026-11-16)</title>
+<style>
+:root{
+  --bg:#101923; --surface:#1C2938; --raised:#26374A; --text:#F0F5FC; --text2:#BBC8D8;
+  --accent:#A4BCFF; --action:#3361D8; --good:#70D8B0; --warn:#FFE0A6; --err:#FFB4AB;
+  --destructive:#B43E43; --outline:#36475B; --muted:#8C9BAE;
+  --page:#080C12; --ink:#E6ECF4; --ink2:#9BA9BB;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--page);color:var(--ink);font:16px/1.45 Roboto,"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1400px;margin:0 auto;padding:40px 32px 96px}
+h1{font-size:32px;line-height:1.2;margin:0 0 8px;font-weight:600}
+h2{font-size:24px;margin:72px 0 8px;font-weight:600;padding-top:24px;border-top:1px solid #1d2733}
+h3{font-size:16px;margin:0 0 8px;font-weight:600}
+p.lead{color:var(--ink2);max-width:880px;margin:0 0 24px}
+code{font:13px/1.4 Consolas,"Cascadia Mono",monospace;color:#c9d6e8;background:#141c27;padding:1px 6px;border-radius:4px}
+.i{width:24px;height:24px;fill:currentColor;flex:none;display:block}
+.i.s{width:20px;height:20px}.i.xs{width:16px;height:16px}
+
+/* ---------- page furniture ---------- */
+.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:24px}
+.lcard{background:#0e141c;border:1px solid #1d2733;border-radius:16px;padding:16px}
+.sw{display:flex;flex-wrap:wrap;gap:8px}
+.sw span{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);width:calc(50% - 4px)}
+.sw i{width:24px;height:24px;border-radius:6px;border:1px solid #ffffff22;flex:none}
+.vocab{font-size:13px;color:var(--ink2);margin:0;padding:0;list-style:none}
+.vocab li{padding:2px 0}.vocab b{color:var(--ink);font-weight:600}.vocab s{color:#6f7d90}
+.gallery{display:flex;flex-wrap:wrap;gap:48px 40px;align-items:flex-start;margin-top:24px}
+figure{margin:0}
+figure.fp{width:434px}figure.fl{width:937px}figure.fpc{width:1280px}
+figcaption{margin-top:20px;font-size:14px;color:var(--ink2)}
+figcaption b.t{display:block;color:var(--ink);font-size:16px;font-weight:600;margin-bottom:4px}
+figcaption .why{display:block;margin-top:6px}
+figcaption .why::before{content:"Why: ";color:var(--ink);font-weight:600}
+.q{display:flex;gap:8px;align-items:flex-start;margin-top:10px;padding:8px 12px;border:1px dashed #5b6d86;border-radius:10px;font-size:13px;color:#c9d6e8;background:#0e141c}
+.q b{flex:none;color:#101923;background:var(--warn);border-radius:6px;padding:0 6px;font-size:12px;line-height:20px}
+.scrollx{overflow-x:auto;padding:12px}
+
+/* ---------- phone frame ---------- */
+.phone{width:412px;height:915px;margin:11px;border-radius:34px;position:relative;overflow:hidden;background:var(--bg);color:var(--text);
+  box-shadow:0 0 0 9px #05070a,0 0 0 11px #2b3644,0 24px 48px #0009}
+.phone.land{width:915px;height:412px}
+.screen,.under{position:absolute;inset:0;display:flex;flex-direction:column}
+.sb{height:32px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 24px;font-size:13px;font-weight:500;color:var(--text)}
+.sb .r{display:flex;gap:6px;align-items:center}
+.sb .bat{width:22px;height:11px;border:1.5px solid var(--text);border-radius:3px;position:relative}
+.sb .bat::after{content:"";position:absolute;inset:1.5px;right:5px;background:var(--text);border-radius:1px}
+.sb .sig{width:14px;height:11px;background:linear-gradient(90deg,var(--text) 0 3px,transparent 3px 5px,var(--text) 5px 8px,transparent 8px 10px,var(--text) 10px 13px);clip-path:polygon(0 60%,22% 60%,22% 30%,58% 30%,58% 0,100% 0,100% 100%,0 100%)}
+.ab{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px}
+.ab .ttl{font-size:22px;font-weight:600;flex:1;display:flex;align-items:center;gap:10px}
+.logo{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#3361D8,#A4BCFF);position:relative;flex:none}
+.logo::after{content:"";position:absolute;inset:7px 7px 7px 9px;border:2.5px solid #101923;border-radius:3px}
+.pill{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:16px;border:1px solid #70D8B066;background:#70D8B014;color:var(--good);font-size:13px;font-weight:600;white-space:nowrap}
+.body{flex:1;min-height:0;padding:0 16px;overflow:hidden;position:relative}
+.sh{display:flex;align-items:center;justify-content:space-between;height:36px;font-size:14px;font-weight:600;color:var(--text2)}
+.sh b{color:var(--text);font-weight:600}
+.sh a{color:var(--accent);font-weight:600;font-size:14px;text-decoration:none}
+.tabs{height:80px;flex:none;background:var(--surface);border-top:1px solid var(--outline);display:flex;padding:8px 8px 20px;position:relative}
+.tabs::after,.gest::after{content:"";position:absolute;left:50%;bottom:7px;width:108px;height:4px;margin-left:-54px;border-radius:2px;background:#F0F5FC99}
+.gest{height:20px;flex:none;position:relative}
+.tab{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:12px;font-weight:500;color:var(--text2)}
+.tab .ind{width:64px;height:32px;border-radius:16px;display:grid;place-items:center}
+.tab.on{color:var(--text);font-weight:700}.tab.on .ind{background:#A4BCFF2E;color:var(--accent)}
+
+/* ---------- state badge ---------- */
+.badge{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 8px;border-radius:12px;font-size:12px;font-weight:600;line-height:1;background:#101923E6;border:1px solid;white-space:nowrap}
+.badge i{width:10px;height:10px;border-radius:50%;flex:none;display:block}
+.badge.live{color:var(--good);border-color:#70D8B080}.badge.live i{background:var(--good)}
+.badge.starting{color:var(--warn);border-color:#FFE0A680}.badge.starting i{border:2px solid #FFE0A655;border-top-color:var(--warn)}
+.badge.stopped{color:var(--text2);border-color:#BBC8D866}.badge.stopped i{border:2px solid var(--text2)}
+.badge.stopping{color:var(--text2);border-color:#BBC8D866}.badge.stopping i{border:2px solid #BBC8D855;border-top-color:var(--text2)}
+.badge.copying{color:var(--accent);border-color:#A4BCFF80}.badge.copying i{border-radius:2px;border:2px solid var(--accent)}
+.badge.problem{color:var(--err);border-color:#FFB4AB80}.badge.problem i{border-radius:0;width:0;height:0;border:6px solid transparent;border-top:0;border-bottom:10px solid var(--err)}
+.badge.plain{background:transparent;border-color:transparent;padding-left:0}
+
+/* ---------- emulator tile ---------- */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.tile{background:var(--surface);border:1px solid var(--outline);border-radius:16px;overflow:hidden}
+.prev{aspect-ratio:3/4;position:relative;background:#0A1018;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;padding:12px 12px 40px}
+.prev .badge{position:absolute;left:8px;bottom:8px}
+.prev .pcflag{position:absolute;right:8px;bottom:8px}
+.pcflag{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border-radius:12px;background:#101923E6;border:1px solid var(--outline);color:var(--text);font-size:12px;font-weight:600}
+.prev .cause{font-size:13px;line-height:1.3;color:var(--text2)}
+.prev .time{font-size:13px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+.tname{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 4px 0 12px;font-size:16px;font-weight:600}
+.tname .i{color:var(--text2);margin:0 6px}
+.spin{width:32px;height:32px;border-radius:50%;border:3px solid #FFE0A633;border-top-color:var(--warn);animation:sp 1.2s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:48px;padding:0 20px;border-radius:12px;font-size:14px;font-weight:600;border:0;background:var(--action);color:#fff;white-space:nowrap}
+.btn.tonal{background:var(--raised);color:var(--accent);border:1px solid var(--outline)}
+.btn.text{background:transparent;color:var(--accent)}
+.btn.danger{background:var(--destructive)}
+.btn.wide{display:flex;width:100%}
+.btn.sm{height:40px;padding:0 14px}
+.fab{height:48px;border-radius:16px;box-shadow:0 6px 16px #0008}
+.rowcard{background:var(--surface);border:1px solid var(--outline);border-radius:16px;min-height:48px;display:flex;align-items:center;gap:12px;padding:0 12px;font-size:15px;font-weight:500}
+.rowcard .i{color:var(--text2)}
+.grow{flex:1;min-width:0}
+
+/* ---------- fake game art ---------- */
+.game{position:absolute;inset:0;overflow:hidden;container-type:inline-size;--u:1cqw;background:linear-gradient(180deg,#27408f 0,#6f9be0 40%,#f3d9a4 47%,#5fa468 48%,#2e6b45 100%)}
+.game.wide{--u:.42cqw}
+.game i{position:absolute;display:block}
+.game .hill{left:-10%;right:-10%;top:36%;height:14%;background:radial-gradient(ellipse at 22% 100%,#3d7f58 0 45%,transparent 46%),radial-gradient(ellipse at 72% 100%,#356f4f 0 52%,transparent 53%)}
+.game .hp{left:calc(var(--u)*15);top:calc(var(--u)*6);width:calc(var(--u)*34);height:calc(var(--u)*3.2);border-radius:calc(var(--u)*2);background:linear-gradient(90deg,#ff6b6b 0 70%,#40202a 70%);box-shadow:0 calc(var(--u)*4.6) 0 calc(var(--u)*-.5) #5aa9ff}
+.game .hp::before{content:"";position:absolute;left:calc(var(--u)*-11);top:calc(var(--u)*-2);width:calc(var(--u)*9);height:calc(var(--u)*9);border-radius:50%;background:#f0c9a0;border:calc(var(--u)*.8) solid #ffffffaa}
+.game .map{right:calc(var(--u)*4);top:calc(var(--u)*4);width:calc(var(--u)*17);height:calc(var(--u)*17);border-radius:50%;background:radial-gradient(circle,#ffe08a 0 8%,#3b6c4c 9% 34%,#27503a 35% 100%);border:calc(var(--u)*.8) solid #ffffff88}
+.game .hero{left:50%;margin-left:calc(var(--u)*-4);top:60%;width:calc(var(--u)*8);height:calc(var(--u)*12);border-radius:calc(var(--u)*4) calc(var(--u)*4) calc(var(--u)*1.5) calc(var(--u)*1.5);background:#f4f1ea;box-shadow:0 0 0 calc(var(--u)*.6) #1b2a44,0 calc(var(--u)*7) calc(var(--u)*3) calc(var(--u)*-3) #0008}
+.game .hero::before{content:"";position:absolute;left:calc(var(--u)*1);top:calc(var(--u)*-6.5);width:calc(var(--u)*6);height:calc(var(--u)*6);border-radius:50%;background:#f0c9a0;box-shadow:0 0 0 calc(var(--u)*.6) #1b2a44}
+.game .pad{left:calc(var(--u)*6);bottom:calc(var(--u)*8);width:calc(var(--u)*22);height:calc(var(--u)*22);border-radius:50%;border:calc(var(--u)*.8) solid #ffffff66;background:radial-gradient(circle,#ffffff77 0 28%,#ffffff1f 29%)}
+.game .sk{right:calc(var(--u)*7);bottom:calc(var(--u)*9);width:calc(var(--u)*14);height:calc(var(--u)*14);border-radius:50%;background:#ffffff40;border:calc(var(--u)*.8) solid #ffffff99;box-shadow:calc(var(--u)*-17) calc(var(--u)*3) 0 calc(var(--u)*-2.5) #ffffff66,calc(var(--u)*-10) calc(var(--u)*-13) 0 calc(var(--u)*-2.5) #ffffff66,calc(var(--u)*3) calc(var(--u)*-17) 0 calc(var(--u)*-2.5) #ffffff66}
+.game.g2{background:linear-gradient(180deg,#2a1b54 0,#8a4f9e 36%,#f2a66b 47%,#6d5b93 48%,#2e2748 100%)}
+.game.g2 .hill{background:radial-gradient(ellipse at 30% 100%,#5a4a86 0 48%,transparent 49%),radial-gradient(ellipse at 80% 100%,#4c3e75 0 46%,transparent 47%)}
+.game.g2 .hero{background:#ffd27a}
+.game.g3{background:linear-gradient(180deg,#0e2a3a 0,#1f6f7c 40%,#9fe0c8 47%,#2f7f77 48%,#143f45 100%)}
+.game.g3 .hill{background:radial-gradient(ellipse at 20% 100%,#1f5f61 0 50%,transparent 51%),radial-gradient(ellipse at 70% 100%,#1a5357 0 44%,transparent 45%)}
+.game.g3 .hero{background:#ff9d8a}
+.dim{position:absolute;inset:0;background:#0A1018B8}
+/* fake Windows desktop art */
+.desk{position:absolute;inset:0;overflow:hidden;background:radial-gradient(ellipse 70% 90% at 60% 110%,#5aa0ff 0,#1f55d6 35%,transparent 70%),radial-gradient(ellipse 60% 80% at 30% 0,#2f6bea 0,transparent 70%),#0b2a7a}
+.desk::after{content:"";position:absolute;left:0;right:0;bottom:0;height:9%;background:#1b2433e6}
+.desk .w{position:absolute;border-radius:4px;background:#f4f6fa;box-shadow:0 4px 12px #0006}
+.desk .w::before{content:"";position:absolute;left:0;right:0;top:0;height:16%;background:#dfe5ee;border-radius:4px 4px 0 0}
+.desk .w.d{background:#1f2937}.desk .w.d::before{background:#111827}
+
+/* ---------- sheets ---------- */
+.scrim{position:absolute;inset:0;background:#05080CB3}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--surface);border-radius:24px 24px 0 0;padding:8px 0 28px;box-shadow:0 -8px 32px #0008}
+.sheet::after{content:"";position:absolute;left:50%;bottom:7px;width:108px;height:4px;margin-left:-54px;border-radius:2px;background:#F0F5FC99}
+.grab{width:32px;height:4px;border-radius:2px;background:var(--muted);margin:8px auto 12px}
+.sheet .hd{padding:0 24px 12px}
+.sheet .hd .n{font-size:18px;font-weight:600}
+.sheet .hd .m{font-size:14px;color:var(--text2);display:flex;align-items:center;gap:8px;margin-top:4px;flex-wrap:wrap}
+.srow{height:56px;display:flex;align-items:center;gap:20px;padding:0 24px;font-size:16px}
+.srow .i{color:var(--text2)}
+.srow .why{margin-left:auto;font-size:13px;color:var(--muted)}
+.srow.off{color:var(--muted)}.srow.off .i{color:#64748A}
+.srow.red{color:var(--err)}.srow.red .i{color:var(--err)}
+.srow.red.off{color:#B98A86}.srow.red.off .i{color:#B98A86}
+.hr{height:1px;background:var(--outline);margin:4px 0}
+.field{border:1px solid var(--outline);background:var(--raised);border-radius:12px;height:56px;padding:8px 16px;position:relative}
+.field.focus{border:2px solid var(--accent);padding:7px 15px}
+.field label{display:block;font-size:12px;color:var(--accent);font-weight:500}
+.field div{font-size:16px}
+.caret{display:inline-block;width:2px;height:18px;background:var(--accent);vertical-align:-3px;margin-left:1px}
+.help{font-size:12px;color:var(--text2);margin:6px 16px 0}
+.note{display:flex;gap:12px;align-items:flex-start;background:var(--bg);border:1px solid var(--outline);border-radius:12px;padding:12px;font-size:14px;color:var(--text2);margin-top:16px}
+.note .i{color:var(--accent)}
+
+/* ---------- startup ---------- */
+.start{flex:1;display:flex;flex-direction:column;padding:0 24px}
+.start .nm{font-size:24px;font-weight:600;text-align:center;margin-top:88px}
+.start .ty{font-size:14px;color:var(--text2);text-align:center;margin-top:4px}
+.steps{margin:56px auto 0;width:280px}
+.step{display:flex;align-items:center;gap:16px;height:52px;font-size:16px;position:relative}
+.step .m{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;flex:none}
+.step:not(:last-child)::after{content:"";position:absolute;left:13px;top:42px;width:2px;height:20px;background:var(--outline)}
+.step.done .m{background:#70D8B026;color:var(--good)}
+.step.now{font-weight:600}.step.now .m{border:3px solid #FFE0A633;border-top-color:var(--warn);animation:sp 1.2s linear infinite}
+.step.todo{color:var(--muted)}.step.todo .m{border:2px solid var(--outline)}
+.step.fail{font-weight:600;color:var(--err)}.step.fail .m{background:#FFB4AB26;color:var(--err)}
+.step small{display:block;font-size:12px;font-weight:500;color:var(--text2)}
+.elapsed{text-align:center;margin-top:32px;font-size:14px;color:var(--text2)}
+.elapsed b{font-size:24px;display:block;color:var(--text);font-variant-numeric:tabular-nums;font-weight:600}
+.errbox{margin-top:28px;border:1px solid #FFB4AB73;background:#FFB4AB14;border-radius:16px;padding:16px}
+.errbox b{display:block;font-size:18px;font-weight:600;margin-bottom:4px}
+.errbox span{font-size:14px;color:var(--text2)}
+.errbox em{display:block;font-style:normal;font-size:12px;color:var(--muted);margin-top:8px}
+.bottom{margin-top:auto;padding-bottom:12px;display:flex;flex-direction:column;gap:4px}
+
+/* ---------- in-game ---------- */
+.black{background:#000}
+.stage{position:relative;flex:1;min-height:0}
+.banner{position:absolute;left:50%;top:16px;transform:translateX(-50%);display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border-radius:18px;background:#101923E6;border:1px solid var(--outline);font-size:14px;font-weight:600;color:var(--text);white-space:nowrap}
+.banner i{width:10px;height:10px;border-radius:50%;background:var(--good)}
+.banner span{color:var(--good)}
+.rail{flex:none;background:#0B1119;border-top:1px solid #1d2733}
+.rail .acc{height:40px;display:flex;align-items:center;gap:8px;padding:0 12px}
+.chip{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px 0 10px;border-radius:16px;background:var(--raised);border:1px solid var(--outline);color:var(--text);font-size:13px;font-weight:600;white-space:nowrap}
+.chip i{width:8px;height:8px;border-radius:50%;background:var(--good);flex:none}
+.chip.st i{background:none;border:2px solid #FFE0A655;border-top-color:var(--warn);width:10px;height:10px}
+.chip.cur{background:var(--action);border-color:var(--action);color:#fff}.chip.cur i{background:#fff}
+.chip.add{padding:0;width:32px;justify-content:center;color:var(--accent)}
+.rail .keys{height:48px;display:flex;align-items:center;padding:0 4px}
+.key{width:56px;height:48px;display:grid;place-items:center;color:var(--text)}
+.key.g{color:var(--accent)}
+.sep{flex:1}
+.puck{position:absolute;width:48px;height:48px;border-radius:50%;background:#101923CC;border:1px solid #A4BCFF99;color:var(--accent);display:grid;place-items:center;box-shadow:0 4px 12px #0008}
+.orail{position:absolute;left:0;right:0;bottom:0;height:56px;background:#0B1119EB;border-top:1px solid #36475B;display:flex;align-items:center;gap:8px;padding:0 44px}
+.callout{position:absolute;font-size:12px;font-weight:600;color:#101923;background:var(--warn);border-radius:6px;padding:2px 8px;white-space:nowrap}
+
+/* ---------- list rows (PC tab etc.) ---------- */
+.group{font-size:13px;font-weight:600;color:var(--accent);height:40px;display:flex;align-items:flex-end;padding:0 4px 8px}
+.card{background:var(--surface);border:1px solid var(--outline);border-radius:16px;overflow:hidden}
+.lrow{min-height:56px;display:flex;align-items:center;gap:16px;padding:8px 12px 8px 16px;font-size:16px}
+.lrow+.lrow{border-top:1px solid var(--outline)}
+.lrow .i{color:var(--text2)}
+.lrow small{display:block;font-size:13px;color:var(--text2)}
+.mon{background:var(--surface);border:1px solid var(--outline);border-radius:16px;overflow:hidden;margin-bottom:12px}
+.mon .pv{height:150px;position:relative;background:#000}
+.mon .pv .badge{position:absolute;left:8px;bottom:8px}
+.mon .ft{height:56px;display:flex;align-items:center;gap:8px;padding:0 8px 0 16px}
+.mon .ft b{font-size:16px;font-weight:600;display:block}
+.mon .ft small{font-size:13px;color:var(--text2)}
+
+/* ---------- before/after strip ---------- */
+.strip{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:24px}
+.ba{background:#0e141c;border:1px solid #1d2733;border-radius:20px;padding:24px}
+.ba .pair{display:flex;align-items:flex-start;gap:12px;margin-top:16px}
+.ba .col{width:262px;flex:none}
+.ba .tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border-radius:6px;padding:2px 8px;margin-bottom:10px}
+.tag.b{background:#3a2326;color:var(--err)}.tag.a{background:#173229;color:var(--good)}
+.ba .arrow{align-self:center;color:var(--ink2);font-size:28px}
+.mini{width:262px;height:562px;position:relative}
+.mini .phone{position:absolute;left:7px;top:7px;margin:0;transform:scale(.6);transform-origin:0 0}
+.ba ul{margin:12px 0 0;padding-left:18px;font-size:13px;color:var(--ink2)}
+.ba ul li{margin:2px 0}
+.num{position:absolute;width:32px;height:32px;border-radius:50%;background:var(--warn);color:#101923;font-weight:700;font-size:18px;display:grid;place-items:center;box-shadow:0 2px 8px #000a}
+/* today's look (simplified) */
+.old .obar{height:64px;display:flex;align-items:center;gap:12px;padding:0 16px}
+.old .ocard{background:var(--surface);border:1px solid var(--outline);border-radius:16px;overflow:hidden}
+.old .opv{background:#000;display:grid;place-items:center;color:#5d6b7d;position:relative}
+.old .ochip{position:absolute;top:8px;right:8px;height:26px;padding:0 10px;border-radius:13px;border:1px solid #FFE0A680;color:var(--warn);font-size:12px;font-weight:600;display:flex;align-items:center;background:#101923}
+.old .ochip.l{right:auto;left:8px;color:var(--text);border-color:var(--outline)}
+
+/* ---------- PC ---------- */
+.pc{width:1280px;height:800px;position:relative;overflow:hidden;border-radius:12px;border:1px solid #2b3644;font-family:"Segoe UI",system-ui,Roboto,Arial,sans-serif;color:var(--text);
+  background:radial-gradient(ellipse 60% 80% at 70% 120%,#4f8dff 0,#1c4fd0 30%,transparent 65%),radial-gradient(ellipse 50% 70% at 15% -10%,#2a5fe0 0,transparent 70%),radial-gradient(ellipse 40% 60% at 100% 0,#123a9c 0,transparent 70%),#07173f}
+.taskbar{position:absolute;left:0;right:0;bottom:0;height:48px;background:#141b26ee;border-top:1px solid #ffffff14;display:flex;align-items:center;justify-content:center;gap:8px}
+.taskbar i{width:28px;height:28px;border-radius:6px;background:#ffffff1f;display:block}
+.taskbar i.on{background:linear-gradient(135deg,#3361D8,#A4BCFF);box-shadow:0 14px 0 -12px #A4BCFF}
+.taskbar .clk{position:absolute;right:16px;font-size:12px;text-align:right;line-height:1.3;color:#e6ecf4}
+.win{position:absolute;background:var(--bg);border-radius:8px;border:1px solid #3a4a5e;box-shadow:0 24px 64px #000a;overflow:hidden;display:flex;flex-direction:column;font-size:14px}
+.tb{height:32px;flex:none;display:flex;align-items:center;font-size:12px;color:var(--text2);padding-left:12px;gap:8px;background:var(--bg)}
+.tb .logo{width:16px;height:16px;border-radius:4px}.tb .logo::after{inset:4px 4px 4px 5px;border-width:1.5px;border-radius:1px}
+.tb .ctl{margin-left:auto;display:flex}
+.tb .ctl span{width:46px;height:32px;display:grid;place-items:center;color:var(--text)}
+.tb .ctl svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1}
+.wlabel{position:absolute;font-size:12px;font-weight:600;color:#101923;background:var(--warn);border-radius:6px;padding:2px 8px}
+.hp-b{flex:1;padding:8px 20px 16px;display:flex;flex-direction:column;min-height:0}
+.hp-h{display:flex;align-items:center;gap:10px;height:40px;font-size:16px;font-weight:600}
+.iconbtn{width:36px;height:36px;border-radius:8px;display:grid;place-items:center;color:var(--text2)}
+.iconbtn.bd{border:1px solid var(--outline);background:var(--raised)}
+.hp-host{display:flex;align-items:center;justify-content:space-between;margin-top:4px}
+.hp-host b{font-size:24px;font-weight:600}
+.idrow{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.idbox{background:var(--surface);border:1px solid var(--outline);border-radius:12px;padding:6px 6px 6px 12px;display:flex;align-items:center;gap:4px}
+.idbox small{display:block;font-size:11px;color:var(--text2)}
+.idbox b{font-size:15px;font-weight:600;letter-spacing:.02em}
+.idbox .iconbtn{width:28px;height:28px}
+.hp-s{display:flex;align-items:center;justify-content:space-between;height:32px;margin-top:10px;font-size:13px;font-weight:600;color:var(--text2);border-top:1px solid var(--outline);padding-top:6px}
+.hp-s b{color:var(--text)}.hp-s a{color:var(--accent);text-decoration:none}
+.erow{display:grid;grid-template-columns:118px 96px 1fr 84px;align-items:center;height:40px;font-size:14px}
+.erow .n{font-weight:600}
+.erow .w{color:var(--text2);font-size:13px}
+.pbtn{height:30px;border-radius:8px;border:1px solid var(--outline);background:var(--raised);color:var(--accent);font-size:13px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 12px}
+.pbtn.fill{background:var(--action);border-color:var(--action);color:#fff}
+.pbtn.off{color:#64748A;background:transparent}
+.pbtn.red{color:var(--err)}
+.hp-f{margin-top:auto;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--outline);padding-top:12px}
+.hp-f a{color:var(--accent);font-size:13px;font-weight:600;text-decoration:none}
+.empty{height:44px;display:flex;align-items:center;gap:12px;color:var(--text2);font-size:14px}
+/* settings window */
+.set{flex:1;display:flex;min-height:0}
+.nav{width:184px;flex:none;background:#0C141D;border-right:1px solid var(--outline);padding:12px}
+.nav .it{height:40px;border-radius:8px;display:flex;align-items:center;gap:12px;padding:0 12px;color:var(--text2);font-size:14px;margin-bottom:2px}
+.nav .it.on{background:#A4BCFF24;color:var(--text);font-weight:600;box-shadow:inset 3px 0 0 var(--accent)}
+.nav .it.on .i{color:var(--accent)}
+.nav .new{margin-left:auto;font-size:10px;font-weight:700;color:#101923;background:var(--good);border-radius:4px;padding:0 5px;line-height:16px}
+.pane{flex:1;padding:20px 20px;min-width:0;overflow:hidden}
+.pane h4{font-size:24px;font-weight:600;margin:0}
+.pane .sub{color:var(--text2);font-size:13px;margin-top:4px}
+.tbl{width:100%;border-collapse:collapse;margin-top:16px;background:var(--surface);border:1px solid var(--outline);border-radius:12px;overflow:hidden;border-spacing:0}
+.tblw{border:1px solid var(--outline);border-radius:12px;overflow:hidden;margin-top:16px}
+.tblw .tbl{margin:0;border:0;border-radius:0}
+.tbl th{font-size:12px;font-weight:600;color:var(--text2);text-align:left;height:36px;padding:0 8px;white-space:nowrap;background:#17222F;border-bottom:1px solid var(--outline)}
+.tbl td{height:48px;padding:0 8px;font-size:14px;border-bottom:1px solid var(--outline);white-space:nowrap}
+.tbl tr:last-child td{border-bottom:0}
+.tbl td.n{font-weight:600}.tbl td.m{color:var(--text2);font-size:13px}
+.tbl td.act{text-align:right}
+.tbl td.act .pbtn{margin-left:4px}
+.tbl td.act .pbtn.ic{width:28px;padding:0}.tbl td.act .pbtn{padding:0 10px}.tbl td.act .pbtn.ic{padding:0}
+.opt{display:flex;align-items:center;justify-content:space-between;height:44px;font-size:14px;border-bottom:1px solid var(--outline)}
+.opt:last-child{border-bottom:0}
+.sw-t{width:40px;height:22px;border-radius:11px;background:var(--action);position:relative}
+.sw-t::after{content:"";position:absolute;right:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#fff}
+</style>
+</head>
+<body>
+
+<!-- Material-style icon sprite (inline; no network) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+<defs>
+<symbol id="more" viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></symbol>
+<symbol id="play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
+<symbol id="stop" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></symbol>
+<symbol id="add" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></symbol>
+<symbol id="chev" viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></symbol>
+<symbol id="back" viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></symbol>
+<symbol id="fwd" viewBox="0 0 24 24"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></symbol>
+<symbol id="check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></symbol>
+<symbol id="close" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></symbol>
+<symbol id="monitor" viewBox="0 0 24 24"><path d="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7v2H8v2h8v-2h-2v-2h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H3V4h18v12z"/></symbol>
+<symbol id="computer" viewBox="0 0 24 24"><path d="M20 18c1.1 0 1.99-.9 1.99-2L22 6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2H0v2h24v-2h-4zM4 6h16v10H4V6z"/></symbol>
+<symbol id="grid" viewBox="0 0 24 24"><path d="M3 3v8h8V3H3zm6 6H5V5h4v4zm-6 4v8h8v-8H3zm6 6H5v-4h4v4zm4-16v8h8V3h-8zm6 6h-4V5h4v4zm-6 4v8h8v-8h-8zm6 6h-4v-4h4v4z"/></symbol>
+<symbol id="kbd" viewBox="0 0 24 24"><path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/></symbol>
+<symbol id="copy" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></symbol>
+<symbol id="edit" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></symbol>
+<symbol id="delete" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></symbol>
+<symbol id="tune" viewBox="0 0 24 24"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></symbol>
+<symbol id="gear" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></symbol>
+<symbol id="folder" viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></symbol>
+<symbol id="eye" viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></symbol>
+<symbol id="refresh" viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></symbol>
+<symbol id="err" viewBox="0 0 24 24"><path d="M11 15h2v2h-2zm0-8h2v6h-2zm.99-5C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/></symbol>
+<symbol id="power" viewBox="0 0 24 24"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/></symbol>
+<symbol id="phone" viewBox="0 0 24 24"><path d="M17 1.01L7 1c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V3c0-1.1-.9-2-2-2zM17 19H7V5h10v14z"/></symbol>
+<symbol id="shield" viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></symbol>
+<symbol id="bars" viewBox="0 0 24 24"><path d="M5 9h3v10H5zm5.5-4h3v14h-3zM16 13h3v6h-3z"/></symbol>
+<symbol id="dbl" viewBox="0 0 24 24"><path d="M6.41 6L5 7.41 9.58 12 5 16.59 6.41 18l6-6zM13 6l-1.41 1.41L16.17 12l-4.58 4.59L13 18l6-6z"/></symbol>
+<symbol id="share" viewBox="0 0 24 24"><path d="M16 5l-1.42 1.42-1.59-1.59V16h-1.98V4.83L9.42 6.42 8 5l4-4 4 4zm4 5v11c0 1.1-.9 2-2 2H6c-1.11 0-2-.9-2-2V10c0-1.11.89-2 2-2h3v2H6v11h12V10h-3V8h3c1.1 0 2 .9 2 2z"/></symbol>
+<symbol id="term" viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V8h16v10zM6.4 15.6L9 13l-2.6-2.6L7.8 9l4 4-4 4zM12 15h6v2h-6z"/></symbol>
+<symbol id="info" viewBox="0 0 24 24"><path d="M11 7h2v2h-2zm0 4h2v6h-2zm1-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/></symbol>
+<symbol id="tv" viewBox="0 0 24 24"><path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 1.99-.9 1.99-2L23 5c0-1.1-.9-2-2-2zm0 14H3V5h18v12zM9 8v6l5.5-3z"/></symbol>
+<symbol id="link" viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></symbol>
+<symbol id="nback" viewBox="0 0 24 24"><path d="M17 5v14L6 12z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+<symbol id="nhome" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+<symbol id="nrec" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+</defs>
+</svg>
+
+<div class="wrap">
+
+<h1>Aperture UI redesign &mdash; visual mockups</h1>
+<p class="lead">High-fidelity frames for the proposal in <code>docs/superpowers/specs/2026-11-16-aperture-ui-redesign.md</code>. Static mockups only: no app code was changed. Colours, radii and type sizes are the existing Studio tokens from <code>MirpgStudioPalette</code> / <code>MirpgRemoteTheme</code> (dark). Emulator names and IDs are placeholders. Each frame's caption says what changed against today and why; dashed notes name the open question (Q1&ndash;Q7) the frame depends on and show the proposed default.</p>
+
+<div class="legend">
+  <div class="lcard">
+    <h3>Studio palette (dark)</h3>
+    <div class="sw">
+      <span><i style="background:#101923"></i>background #101923</span>
+      <span><i style="background:#1C2938"></i>surface #1C2938</span>
+      <span><i style="background:#26374A"></i>raised #26374A</span>
+      <span><i style="background:#36475B"></i>outline #36475B</span>
+      <span><i style="background:#A4BCFF"></i>accent #A4BCFF</span>
+      <span><i style="background:#3361D8"></i>action fill #3361D8</span>
+      <span><i style="background:#70D8B0"></i>good #70D8B0</span>
+      <span><i style="background:#FFE0A6"></i>warning #FFE0A6</span>
+      <span><i style="background:#FFB4AB"></i>error #FFB4AB</span>
+      <span><i style="background:#B43E43"></i>destructive #B43E43</span>
+    </div>
+  </div>
+  <div class="lcard">
+    <h3>State badge: one word, one shape, one colour</h3>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">
+      <span class="badge live"><i></i>Live</span>
+      <span class="badge starting"><i></i>Starting</span>
+      <span class="badge stopped"><i></i>Stopped</span>
+      <span class="badge stopping"><i></i>Stopping</span>
+      <span class="badge copying"><i></i>Copying 42%</span>
+      <span class="badge problem"><i></i>Problem</span>
+    </div>
+    <p style="font-size:13px;color:var(--ink2);margin:12px 0 0">Each state has its own glyph (filled dot, arc, ring, square, triangle) so it never relies on colour alone. "Problem" always carries one line of cause.</p>
+  </div>
+  <div class="lcard">
+    <h3>Vocabulary</h3>
+    <ul class="vocab">
+      <li><b>Emulator</b> <s>Android instance, BlueStacks instance, view, target</s></li>
+      <li><b>Start</b> <s>Boot</s> &middot; <b>Open</b> <s>Resume, Tap to control</s> &middot; <b>Stop</b> <s>Shut down emulator</s></li>
+      <li><b>Reconnect</b> <s>Retry preview</s> &middot; <b>Show on PC / Hide on PC</b></li>
+      <li>Tabs: <b>Play</b> <s>Home</s> &middot; <b>Screens</b> &middot; <b>PC</b> <s>Tools</s></li>
+    </ul>
+  </div>
+</div>
+
+<!-- ======================= BEFORE / AFTER ======================= -->
+<h2>Before &rarr; After: the two biggest wins</h2>
+<p class="lead">Left of each pair is a simplified depiction of today's screen (from <code>s2s.png</code> and the code paths cited in the review); right is the proposal at the same scale.</p>
+
+<div class="strip">
+  <div class="ba">
+    <h3>1. Home becomes the emulator grid</h3>
+    <div class="pair">
+      <div class="col">
+        <span class="tag b">Before</span>
+        <div class="mini"><div class="phone"><div class="screen old">
+          <div class="sb"><span>10:22</span><span class="r"><i class="sig"></i><i class="bat"></i></span></div>
+          <div class="obar"><div class="logo" style="width:36px;height:36px"></div><div class="grow"><div style="font-size:22px;font-weight:600;line-height:1.1">Aperture</div><div style="font-size:12px;color:var(--text2);letter-spacing:.06em">Direct connection</div></div><svg class="i"><use href="#refresh"/></svg><svg class="i"><use href="#more"/></svg></div>
+          <div class="body">
+            <div class="sh" style="height:48px"><b style="font-size:18px">Continue working</b><a>ALL SCREENS &rarr;</a></div>
+            <div class="ocard"><div class="opv" style="height:170px"><span class="ochip l">Windows</span><span class="ochip">Connecting</span><svg class="i" style="width:36px;height:36px"><use href="#tv"/></svg></div>
+              <div style="padding:12px 16px;display:flex;align-items:center;background:var(--raised)"><div class="grow"><div style="font-size:18px;font-weight:600">Monitor 1</div><div style="font-size:13px;color:var(--text2)">Waiting for a usable preview</div></div><span style="color:var(--accent);font-weight:600;font-size:14px">Open</span></div></div>
+            <div class="sh" style="height:64px;align-items:flex-end;padding-bottom:10px"><b style="font-size:18px">Android instances</b><a>VIEW ALL &rarr;</a></div>
+            <div class="grid2">
+              <div class="ocard"><div class="opv" style="height:130px"><span class="ochip">Connecting</span><svg class="i" style="width:32px;height:32px"><use href="#tv"/></svg></div><div style="padding:12px;background:var(--raised)"><div style="font-weight:600">BlueStacks App P&hellip;</div><div style="font-size:12px;color:var(--text2);display:flex;justify-content:space-between;align-items:center;margin-top:6px">Waiting for p&hellip;<svg class="i s"><use href="#more"/></svg></div></div></div>
+              <div class="ocard"><div class="opv" style="height:130px"><span class="ochip">Connecting</span><svg class="i" style="width:32px;height:32px"><use href="#tv"/></svg></div><div style="padding:12px;background:var(--raised)"><div style="font-weight:600">BlueStacks App P&hellip;</div><div style="font-size:12px;color:var(--text2);display:flex;justify-content:space-between;align-items:center;margin-top:6px">Waiting for p&hellip;<svg class="i s"><use href="#more"/></svg></div></div></div>
+            </div>
+            <div style="font-size:13px;color:var(--text2);margin-top:16px">3 Windows displays &middot; 4 BlueStacks instances</div>
+          </div>
+          <div class="tabs"><div class="tab on"><span class="ind"><svg class="i"><use href="#grid"/></svg></span>Home</div><div class="tab"><span class="ind"><svg class="i"><use href="#monitor"/></svg></span>Screens</div><div class="tab"><span class="ind"><svg class="i"><use href="#tune"/></svg></span>Tools</div></div>
+        </div></div></div>
+        <ul><li>Leads with a PC monitor; 2 of 4 emulators shown</li><li>Names cut to "BlueStacks App P&hellip;"</li><li>State reads "Connecting" / "Waiting for p&hellip;"</li></ul>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="col">
+        <span class="tag a">After</span>
+        <div class="mini"><div class="phone"><div class="screen" data-clone="#scr-play"></div></div></div>
+        <ul><li>All emulators on the first screen, stable order</li><li>Full names; one state word per tile</li><li>Monitors shrink to one row</li></ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="ba">
+    <h3>2. Switching accounts: four taps &rarr; one</h3>
+    <div class="pair">
+      <div class="col">
+        <span class="tag b">Before</span>
+        <div class="mini"><div class="phone"><div class="screen black old">
+          <div class="stage"><div style="position:absolute;left:0;right:0;top:48px;height:732px"><div class="game g2"><i class="hill"></i><i class="hp"></i><i class="map"></i><i class="hero"></i><i class="pad"></i><i class="sk"></i></div></div>
+            <div class="puck" style="right:12px;top:300px"><svg class="i"><use href="#tune"/></svg></div>
+            
+            <div class="scrim"></div>
+            <span class="num" style="right:68px;top:308px">1</span><div class="sheet" style="padding-bottom:36px">
+              <div class="grab"></div>
+              <div class="hd" style="display:flex;justify-content:space-between;align-items:center"><span class="n">Switch view</span><span style="font-size:14px;color:var(--text2)">Page 1 of 4</span></div>
+              <div class="grid2" style="padding:0 16px">
+                <div class="ocard"><div class="opv" style="height:110px"><span class="ochip l">Windows</span><div class="desk"></div></div><div style="padding:10px 12px;background:var(--raised);font-weight:600">Monitor 1</div></div>
+                <div class="ocard"><div class="opv" style="height:110px"><span class="ochip l">Windows</span><div class="desk"></div></div><div style="padding:10px 12px;background:var(--raised);font-weight:600">Monitor 2</div></div>
+              </div>
+              <div style="display:flex;justify-content:center;gap:8px;margin-top:16px"><i style="width:8px;height:8px;border-radius:50%;background:var(--accent)"></i><i style="width:8px;height:8px;border-radius:50%;background:var(--outline)"></i><i style="width:8px;height:8px;border-radius:50%;background:var(--outline)"></i><i style="width:8px;height:8px;border-radius:50%;background:var(--outline)"></i></div>
+              <span class="num" style="left:136px;top:22px">2</span>
+              <span class="num" style="left:190px;bottom:44px">3</span>
+            </div>
+          </div>
+        </div></div></div>
+        <ul><li>(1) hidden drag-button, (2) "Switch view", (3) page past monitors, (4) card &rarr; full reconnect screen</li><li>No account name on screen while playing</li></ul>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="col">
+        <span class="tag a">After</span>
+        <div class="mini"><div class="phone"><div class="screen black" data-clone="#scr-game"></div><span class="num" style="left:22px;bottom:104px">1</span></div></div>
+        <ul><li>One tap on an account chip in the letterbox</li><li>Current account always named (filled chip + 2 s banner)</li><li>Switch stays immersive; no app-bar flash</li></ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= PHASE 1 ======================= -->
+<h2>1. Phone &middot; Phase 1 &mdash; emulator and game flow</h2>
+<p class="lead">412 &times; 915 dp, dark theme. Connected to the PC "atlas".</p>
+
+<div class="gallery">
+
+<!-- 1a -->
+<figure class="fp">
+  <div class="phone"><div class="screen" id="scr-play">
+    <div class="sb"><span>10:22</span><span class="r"><i class="sig"></i><i class="bat"></i></span></div>
+    <div class="ab"><div class="ttl"><div class="logo"></div>atlas</div><span class="pill"><svg class="i xs"><use href="#link"/></svg>Direct &middot; 3 ms</span></div>
+    <div class="body">
+      <div class="sh"><span><b>Emulators</b> &middot; 1 of 4 running</span></div>
+      <div class="grid2">
+        <div class="tile"><div class="prev"><div class="game g1"><i class="hill"></i><i class="hp"></i><i class="map"></i><i class="hero"></i><i class="pad"></i><i class="sk"></i></div><span class="badge live"><i></i>Live</span><span class="pcflag"><svg class="i xs"><use href="#monitor"/></svg>On PC</span></div><div class="tname"><span>Maple_1</span><svg class="i"><use href="#more"/></svg></div></div>
+        <div class="tile"><div class="prev"><div class="spin"></div><div class="cause">Android ready,<br>starting the screen</div><div class="time">0:41</div><span class="badge starting"><i></i>Starting</span></div><div class="tname"><span>Maple_2</span><svg class="i"><use href="#more"/></svg></div></div>
+        <div class="tile"><div class="prev"><span class="btn tonal"><svg class="i s"><use href="#play"/></svg>Start</span><span class="badge stopped"><i></i>Stopped</span></div><div class="tname"><span>Maple_3</span><svg class="i"><use href="#more"/></svg></div></div>
+        <div class="tile" style="border-color:#FFB4AB73"><div class="prev"><div class="game g3"><i class="hill"></i><i class="hp"></i><i class="map"></i><i class="hero"></i><i class="pad"></i><i class="sk"></i></div><div class="dim"></div><div class="cause" style="position:relative;color:var(--text);font-weight:600">Stream stopped</div><span class="btn tonal sm" style="position:relative"><svg class="i s"><use href="#refresh"/></svg>Reconnect</span><span class="badge problem"><i></i>Problem</span></div><div class="tname"><span>Trial_Play35</span><svg class="i"><use href="#more"/></svg></div></div>
+      </div>
+      <div class="sh" style="margin-top:4px"><b>PC screens</b></div>
+      <div style="display:flex;gap:12px;align-items:center">
+        <div class="rowcard grow"><svg class="i"><use href="#monitor"/></svg><span class="grow">Monitor 1 &middot; 2 &middot; 3</span><svg class="i"><use href="#chev"/></svg></div>
+        <span class="btn fab"><svg class="i s"><use href="#add"/></svg>New</span>
+      </div>
+    </div>
+    <div class="tabs"><div class="tab on"><span class="ind"><svg class="i"><use href="#grid"/></svg></span>Play</div><div class="tab"><span class="ind"><svg class="i"><use href="#monitor"/></svg></span>Screens</div><div class="tab"><span class="ind"><svg class="i"><use href="#computer"/></svg></span>PC</div></div>
+  </div></div>
+  <figcaption><b class="t">1a &middot; Play tab (connected Home)</b>
+  Every emulator on the first screen in the PC's list order, as one tile type: 3:4 preview, state badge bottom-left, full name underneath. Stopped tiles show Start; a failure sits on its own tile with the cause and Reconnect. Monitors shrink to one row; the title is the PC's name and the Direct/latency pill is always visible. "New" is an extended FAB that floats above the tab bar when the list scrolls.
+  <span class="why">today Home leads with "Monitor 1", shows 2 of 4 emulators with truncated names, and reports errors as a page banner (N1, V3, V5, M7, M8).</span>
+  <div class="q"><b>Q3</b><span>Default shown: two columns, tuned for up to about six emulators and portrait games. Eight or more would switch to three columns of smaller tiles.</span></div></figcaption>
+</figure>
+
+<!-- 1b -->
+<figure class="fp">
+  <div class="phone"><div class="screen">
+    <div class="under" data-clone="#scr-play"></div>
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="grab"></div>
+      <div class="hd"><div class="n">Maple_1</div><div class="m">Android Emulator &middot; Android 15 <span class="badge live plain"><i></i>Live</span><span class="pcflag" style="background:transparent"><svg class="i xs"><use href="#monitor"/></svg>On PC</span></div></div>
+      <div class="hr"></div>
+      <div class="srow"><svg class="i"><use href="#play"/></svg>Open</div>
+      <div class="srow"><svg class="i"><use href="#dbl"/></svg>Open and launch game</div>
+      <div class="srow"><svg class="i"><use href="#monitor"/></svg>Hide on PC</div>
+      <div class="srow"><svg class="i"><use href="#stop"/></svg>Stop</div>
+      <div class="hr"></div>
+      <div class="srow off"><svg class="i"><use href="#copy"/></svg>Clone<span class="why">Stop it first</span></div>
+      <div class="srow off"><svg class="i"><use href="#edit"/></svg>Rename<span class="why">Stop it first</span></div>
+      <div class="srow red off"><svg class="i"><use href="#delete"/></svg>Delete<span class="why">Stop it first</span></div>
+    </div>
+  </div></div>
+  <figcaption><b class="t">1b &middot; Emulator action sheet (long-press or &#8942;)</b>
+  One bottom sheet with full-width 56 dp rows replaces the small popup menu. A stopped emulator shows Start in place of Stop and "Show on PC" in place of "Hide on PC"; Clone, Rename and Delete then become enabled. Disabled rows say why, using the existing blocker text. Delete is last and red.
+  <span class="why">management hid behind a small top-right popup, and Show/Hide state was only visible in the menu wording (M5, M6).</span>
+  <div class="q"><b>Q5</b><span>Default shown: tap = Open; "Open and launch game" is a sheet row, only where the PC reports a default game. If the answer is "always launch", the two swap.</span></div></figcaption>
+</figure>
+
+<!-- tile states -->
+<figure class="fp">
+  <div class="phone" style="height:auto;border-radius:24px"><div style="padding:16px">
+    <div class="sh"><b>EmulatorTile &mdash; every state</b></div>
+    <div class="grid2">
+      <div class="tile"><div class="prev"><div class="game g2"><i class="hill"></i><i class="hp"></i><i class="map"></i><i class="hero"></i><i class="pad"></i><i class="sk"></i></div><span class="badge live"><i></i>Live</span></div><div class="tname"><span>Maple_2</span><svg class="i"><use href="#more"/></svg></div></div>
+      <div class="tile"><div class="prev"><div class="game g1"><i class="hill"></i><i class="hp"></i><i class="map"></i><i class="hero"></i><i class="pad"></i><i class="sk"></i></div><div class="dim"></div><div class="spin" style="position:relative;border-color:#BBC8D833;border-top-color:var(--text2)"></div><div class="cause" style="position:relative">Closing Android</div><span class="badge stopping"><i></i>Stopping</span></div><div class="tname"><span>Maple_1</span><svg class="i"><use href="#more"/></svg></div></div>
+      <div class="tile"><div class="prev"><svg class="i" style="width:32px;height:32px;color:var(--accent)"><use href="#copy"/></svg><div class="cause">Copying from Maple_3</div><div style="width:112px;height:4px;border-radius:2px;background:var(--outline);overflow:hidden"><div style="width:42%;height:100%;background:var(--accent)"></div></div><span class="badge copying"><i></i>Copying 42%</span></div><div class="tname"><span>Maple_4</span><svg class="i"><use href="#more"/></svg></div></div>
+      <div class="tile" style="border-style:dashed"><div class="prev"><div class="spin" style="border-color:#A4BCFF33;border-top-color:var(--accent)"></div><div class="cause">Setting up&hellip;<br>about 12 GB on D</div></div><div class="tname"><span>Maple_5</span></div></div>
+    </div>
+  </div></div>
+  <figcaption><b class="t">1a&prime; &middot; Remaining tile states</b>
+  Live without a PC window, Stopping, Copying n% (clone in progress, percentage from the PC) and the "Setting up&hellip;" placeholder after New. Together with 1a this is the complete state list; the badge is always in the same corner.
+  <span class="why">today one state has many names and three card layouts chosen by width (V3, V6).</span>
+  <div class="q"><b>Q4</b><span>The "Setting up&hellip;" tile is drawn as a phone-side placeholder (dashed) until it is known whether the PC lists an emulator while creating it.</span></div></figcaption>
+</figure>
+
+<!-- 1c -->
+<figure class="fp">
+  <div class="phone"><div class="screen">
+    <div class="sb"><span>10:23</span><span class="r"><i class="sig"></i><i class="bat"></i></span></div>
+    <div class="start">
+      <div class="nm">Maple_3</div>
+      <div class="ty">Android Emulator &middot; Android 15</div>
+      <div class="steps">
+        <div class="step done"><span class="m"><svg class="i s"><use href="#check"/></svg></span>Start requested</div>
+        <div class="step done"><span class="m"><svg class="i s"><use href="#check"/></svg></span>Starting Android</div>
+        <div class="step now"><span class="m"></span>Starting the screen</div>
+        <div class="step todo"><span class="m"></span>Live</div>
+      </div>
+      <div class="elapsed"><b>0:41</b>usually under a minute</div>
+      <div class="bottom">
+        <span class="btn wide"><svg class="i s"><use href="#grid"/></svg>Back to emulators</span>
+        <span class="btn text wide"><svg class="i s"><use href="#monitor"/></svg>Show on PC</span>
+      </div>
+    </div>
+    <div class="gest"></div>
+  </div></div>
+  <figcaption><b class="t">1c &middot; Startup checklist</b>
+  Four fixed steps mapped from the existing start phases, an elapsed timer and a hint for what is normal (after 60 s: "Taking longer than usual"). The primary button is at the bottom; it returns to the grid while the emulator keeps starting, so several can be started close together. The disabled Android Back/Home/Recents bar is gone.
+  <span class="why">today this is a spinner and one sentence on an empty page, with exit only at the top-left (M1, N4).</span>
+  <div class="q"><b>Q1</b><span>Assumes the PC keeps starting an emulator after the phone leaves. If it cancels, this button is replaced by "Stay here until it's live" until a "start without opening" action exists.</span></div></figcaption>
+</figure>
+
+<!-- 1d -->
+<figure class="fp">
+  <div class="phone"><div class="screen">
+    <div class="sb"><span>10:25</span><span class="r"><i class="sig"></i><i class="bat"></i></span></div>
+    <div class="start">
+      <div class="nm">Maple_3</div>
+      <div class="ty">Android Emulator &middot; Android 15</div>
+      <div class="steps" style="margin-top:40px">
+        <div class="step done"><span class="m"><svg class="i s"><use href="#check"/></svg></span>Start requested</div>
+        <div class="step fail"><span class="m"><svg class="i s"><use href="#close"/></svg></span><span>Starting Android<small>Stopped here after 2:00</small></span></div>
+        <div class="step todo"><span class="m"></span>Starting the screen</div>
+        <div class="step todo"><span class="m"></span>Live</div>
+      </div>
+      <div class="errbox"><b>Couldn't start Maple_3</b><span>Android did not finish starting within 120 seconds.</span><em>Message from atlas</em></div>
+      <div class="bottom">
+        <span class="btn wide"><svg class="i s"><use href="#refresh"/></svg>Try again</span>
+        <span class="btn text wide">Back to emulators</span>
+        <span class="btn text wide"><svg class="i s"><use href="#monitor"/></svg>Show on PC</span>
+      </div>
+    </div>
+    <div class="gest"></div>
+  </div></div>
+  <figcaption><b class="t">1d &middot; Start failed</b>
+  The failed step is marked in the same checklist, the headline is always "Couldn't start &lt;name&gt;" (or "Lost the screen for &lt;name&gt;"), and the PC's message is the second line. "Try again" retries this emulator. When a live emulator drops, the same screen adds "Trying again in 3 s (1 of 2)" while the existing auto-retry is armed.
+  <span class="why">today failure is raw text with desktop wording and a "Retry discovery" banner on Home that refreshes the list instead (M2).</span></figcaption>
+</figure>
+
+<!-- 1e -->
+<figure class="fp">
+  <div class="phone"><div class="screen black" id="scr-game">
+    <div class="stage">
+      <div style="position:absolute;left:0;right:0;top:48px;height:732px"><div class="game g2"><i class="hill"></i><i class="hp"></i><i class="map"></i><i class="hero"></i><i class="pad"></i><i class="sk"></i></div></div>
+      <div class="banner" style="top:6px"><i></i>Maple_2 &middot; <span>Live</span></div>
+    </div>
+    <div class="rail">
+      <div class="acc"><span class="chip"><i></i>Maple_1</span><span class="chip cur"><i></i>Maple_2</span><span class="chip st"><i></i>Maple_3</span><span class="chip add"><svg class="i s"><use href="#add"/></svg></span></div>
+      <div class="keys"><span class="key g"><svg class="i"><use href="#grid"/></svg></span><span class="key"><svg class="i"><use href="#kbd"/></svg></span><span class="sep"></span><span class="key"><svg class="i"><use href="#nback"/></svg></span><span class="key"><svg class="i"><use href="#nhome"/></svg></span><span class="key"><svg class="i"><use href="#nrec"/></svg></span></div>
+    </div>
+    <div class="gest black"></div>
+  </div></div>
+  <figcaption><b class="t">1e &middot; In-game, portrait game &mdash; docked play rail + name banner</b>
+  A 9:16 game on this phone leaves letterbox; the 88 dp rail sits in it, so nothing covers the game. Row 1: one chip per Live or Starting emulator in grid order, current one filled, "+" opens the full list. Row 2: grid, type text, Android Back / Home / Recents. The "Maple_2 &middot; Live" banner shows for 2 s on every open and switch, then fades; the filled chip is the permanent answer to "which account is this".
+  <span class="why">switching took four taps through a hidden button and a paged sheet, and nothing on screen named the account (N2, N3, M3).</span>
+  <div class="q"><b>Q2</b><span>Default: the phone's back gesture shows "Back again to leave the game"; a second back within 2 s returns to the grid. Alternative: back is sent to the game as Android Back, and exit is only the grid key.</span></div></figcaption>
+</figure>
+
+<!-- 1g new -->
+<figure class="fp">
+  <div class="phone"><div class="screen">
+    <div class="under" data-clone="#scr-play"></div>
+    <div class="scrim"></div>
+    <div class="sheet" style="padding-left:24px;padding-right:24px">
+      <div class="grab"></div>
+      <div class="n" style="font-size:18px;font-weight:600;margin-bottom:16px">New emulator</div>
+      <div class="field focus"><label>Name</label><div>Maple_4<span class="caret"></span></div></div>
+      <div class="help">Letters, digits, dot, underscore and hyphen</div>
+      <div class="note"><svg class="i s"><use href="#info"/></svg><span>Android 15 &middot; 4 GB &middot; 4 cores &middot; about 12 GB on D after setup</span></div>
+      <div style="display:flex;gap:12px;margin-top:24px;margin-bottom:8px"><span class="btn tonal" style="flex:1">Cancel</span><span class="btn" style="flex:1">Create</span></div>
+    </div>
+  </div></div>
+  <figcaption><b class="t">1g &middot; New emulator sheet</b>
+  The existing name sheet and its note, unchanged, now opened from the "New" button on Play. After Create: a snackbar "Setting up Maple_4 on atlas" and a placeholder tile on the grid (see 1a&prime;).
+  <span class="why">"New" was a text button on the Screens tab and success was silent, with no progress entry point on Home (M5).</span>
+  <div class="q"><b>Q4</b><span>Default: the emulator's own name is the account label, so only the name field is shown. A separate phone-side label ("Alt 1 (EU)") would add one optional field here.</span></div></figcaption>
+</figure>
+
+<!-- 1g clone -->
+<figure class="fp">
+  <div class="phone"><div class="screen">
+    <div class="under" data-clone="#scr-play"></div>
+    <div class="scrim"></div>
+    <div class="sheet" style="padding-left:24px;padding-right:24px">
+      <div class="grab"></div>
+      <div class="n" style="font-size:18px;font-weight:600">Clone Maple_3</div>
+      <div style="font-size:14px;color:var(--text2);margin:4px 0 16px">Copies everything in it, including the game sign-in.</div>
+      <div class="field focus"><label>Name of the copy</label><div>Maple_4<span class="caret"></span></div></div>
+      <div class="help">Letters, digits, dot, underscore and hyphen</div>
+      <div class="note"><svg class="i s"><use href="#info"/></svg><span>Maple_3 must stay stopped while it is copied. Progress shows on the new tile as "Copying n%".</span></div>
+      <div style="display:flex;gap:12px;margin-top:24px;margin-bottom:8px"><span class="btn tonal" style="flex:1">Cancel</span><span class="btn" style="flex:1">Clone</span></div>
+    </div>
+  </div></div>
+  <figcaption><b class="t">1g&prime; &middot; Clone sheet</b>
+  Same container and field as New, reached from the action sheet of a stopped emulator. Behaviour, validation and blockers are the existing ones; only the result is made visible: a "Copying n%" tile, then a snackbar when it finishes.
+  <span class="why">one sheet pattern for every management action; completed actions were silent, which is hard to tell from failure (M5).</span></figcaption>
+</figure>
+
+<!-- 1f -->
+<figure class="fl">
+  <div class="phone land"><div class="screen black">
+    <div class="stage">
+      <div class="game g1 wide"><i class="hill"></i><i class="hp"></i><i class="map"></i><i class="hero"></i><i class="pad"></i><i class="sk"></i></div>
+      <div class="puck" style="right:20px;top:150px"><svg class="i"><use href="#grid"/></svg></div>
+      <span class="callout" style="right:76px;top:163px">tap: show rail &middot; double-tap: previous account &middot; drag: move</span>
+    </div>
+  </div></div>
+  <figcaption><b class="t">1f &middot; In-game, landscape game filling the screen &mdash; rail collapsed</b>
+  When the game leaves no letterbox the rail collapses to the existing draggable round button (shown at 80% opacity over video, dark palette). Double-tap jumps to the previously played account, so A &harr; B is one gesture.
+  <span class="why">the game is never shrunk or covered by default; controls were hidden entirely before and needed a drag-button plus a sheet (N2).</span>
+  <div class="q"><b>Q3</b><span>A 16:9 landscape game on this phone leaves side letterbox; there the rail docks vertically on the short edge instead (as in the spec drawing). With mostly landscape games the collapsed button becomes the default.</span></div></figcaption>
+</figure>
+
+<figure class="fl">
+  <div class="phone land"><div class="screen black">
+    <div class="stage">
+      <div class="game g1 wide"><i class="hill"></i><i class="hp"></i><i class="map"></i><i class="hero"></i><i class="pad"></i><i class="sk"></i></div>
+      <div class="banner"><i></i>Maple_1 &middot; <span>Live</span></div>
+      <div class="orail">
+        <span class="chip cur"><i></i>Maple_1</span><span class="chip"><i></i>Maple_2</span><span class="chip st"><i></i>Maple_3</span><span class="chip add"><svg class="i s"><use href="#add"/></svg></span>
+        <span class="sep"></span>
+        <span class="key g"><svg class="i"><use href="#grid"/></svg></span><span class="key"><svg class="i"><use href="#kbd"/></svg></span><span class="key"><svg class="i"><use href="#nback"/></svg></span><span class="key"><svg class="i"><use href="#nhome"/></svg></span><span class="key"><svg class="i"><use href="#nrec"/></svg></span>
+      </div>
+    </div>
+  </div></div>
+  <figcaption><b class="t">1f&prime; &middot; Same view, rail expanded</b>
+  Tapping the button shows the rail over the bottom edge until the next touch on the game. In landscape the two rows merge into one 56 dp bar (accounts left, keys right) because the width allows it; chips, order and icons are identical to the docked rail. Switching is two taps here, one when docked.
+  <span class="why">one control set and one button style in every orientation; account names stay readable instead of paging through a sheet.</span></figcaption>
+</figure>
+
+</div>
+
+<!-- ======================= PHASE 2 ======================= -->
+<h2>2. Phone &middot; Phase 2 &mdash; one theme, one shell</h2>
+<p class="lead">The same Studio theme applied at the app root; tabs become Play / Screens / PC.</p>
+
+<div class="gallery">
+
+<!-- Screens -->
+<figure class="fp">
+  <div class="phone"><div class="screen">
+    <div class="sb"><span>10:22</span><span class="r"><i class="sig"></i><i class="bat"></i></span></div>
+    <div class="ab"><div class="ttl"><div class="logo"></div>atlas</div><span class="pill"><svg class="i xs"><use href="#link"/></svg>Direct &middot; 3 ms</span></div>
+    <div class="body">
+      <div class="sh"><span><b>PC screens</b> &middot; 3 monitors</span></div>
+      <div class="mon"><div class="pv"><div class="desk"><i class="w" style="left:8%;top:14%;width:44%;height:58%"></i><i class="w d" style="left:46%;top:26%;width:42%;height:54%"></i></div><span class="badge live"><i></i>Live</span></div><div class="ft"><div class="grow"><b>Monitor 1</b><small>2560 &times; 1440 &middot; main</small></div><span class="btn text sm">Windows</span><span class="btn tonal sm">Open</span></div></div>
+      <div class="mon"><div class="pv"><div class="desk"><i class="w d" style="left:14%;top:12%;width:72%;height:66%"></i></div><span class="badge live"><i></i>Live</span></div><div class="ft"><div class="grow"><b>Monitor 2</b><small>1920 &times; 1080</small></div><span class="btn text sm">Windows</span><span class="btn tonal sm">Open</span></div></div>
+      <div class="mon"><div class="pv"><div class="desk"></div><span class="badge live"><i></i>Live</span></div><div class="ft"><div class="grow"><b>Monitor 3</b><small>1920 &times; 1080</small></div><span class="btn text sm">Windows</span><span class="btn tonal sm">Open</span></div></div>
+    </div>
+    <div class="tabs"><div class="tab"><span class="ind"><svg class="i"><use href="#grid"/></svg></span>Play</div><div class="tab on"><span class="ind"><svg class="i"><use href="#monitor"/></svg></span>Screens</div><div class="tab"><span class="ind"><svg class="i"><use href="#computer"/></svg></span>PC</div></div>
+  </div></div>
+  <figcaption><b class="t">2a &middot; Screens tab</b>
+  PC monitors only, one large preview card per row, each with "Windows" (the existing window picker) and Open. The All / Windows / Android filter is removed because emulators live on Play. On this tab the preview slots go to monitors.
+  <span class="why">emulators and monitors were mixed in one filtered list, with a different card layout from Home (V6).</span></figcaption>
+</figure>
+
+<!-- PC tab -->
+<figure class="fp">
+  <div class="phone"><div class="screen">
+    <div class="sb"><span>10:22</span><span class="r"><i class="sig"></i><i class="bat"></i></span></div>
+    <div class="ab"><div class="ttl"><div class="logo"></div>atlas</div><span class="pill"><svg class="i xs"><use href="#link"/></svg>Direct &middot; 3 ms</span></div>
+    <div class="body">
+      <div class="group" style="height:28px">This PC</div>
+      <div class="card">
+        <div class="lrow"><svg class="i"><use href="#bars"/></svg><span class="grow">System and processes</span><svg class="i"><use href="#chev"/></svg></div>
+        <div class="lrow"><svg class="i"><use href="#folder"/></svg><span class="grow">Files</span><svg class="i"><use href="#chev"/></svg></div>
+        <div class="lrow"><svg class="i"><use href="#term"/></svg><span class="grow">PowerShell</span><svg class="i"><use href="#chev"/></svg></div>
+      </div>
+      <div class="group">Connection</div>
+      <div class="card">
+        <div class="lrow"><svg class="i"><use href="#tune"/></svg><span class="grow">Quality and connection<small>Direct &middot; 3 ms &middot; Balanced</small></span><svg class="i"><use href="#chev"/></svg></div>
+        <div class="lrow"><svg class="i"><use href="#eye"/></svg><span class="grow">Privacy and host controls</span><svg class="i"><use href="#chev"/></svg></div>
+        <div class="lrow"><svg class="i" style="color:var(--good)"><use href="#shield"/></svg><span class="grow">This phone is trusted<small>Connects without a password</small></span><span class="btn text sm">Forget</span></div>
+      </div>
+      <div class="group">App</div>
+      <div class="card">
+        <div class="lrow"><svg class="i"><use href="#gear"/></svg><span class="grow">Appearance and settings</span><svg class="i"><use href="#chev"/></svg></div>
+      </div>
+      <div class="card" style="margin-top:16px;border-color:#FFB4AB73">
+        <div class="lrow" style="color:var(--err);font-weight:600"><svg class="i" style="color:var(--err)"><use href="#power"/></svg><span class="grow">End session</span></div>
+      </div>
+    </div>
+    <div class="tabs"><div class="tab"><span class="ind"><svg class="i"><use href="#grid"/></svg></span>Play</div><div class="tab"><span class="ind"><svg class="i"><use href="#monitor"/></svg></span>Screens</div><div class="tab on"><span class="ind"><svg class="i"><use href="#computer"/></svg></span>PC</div></div>
+  </div></div>
+  <figcaption><b class="t">2b &middot; PC tab (was Tools)</b>
+  The single home for everything that is in the app-bar &#8942;, the Tools list and the toolbars today: PC tools, quality, privacy, pairing, settings. "End session" is explicit, red and last, in thumb reach. System, Files and PowerShell open as pushed pages and the tab bar hides inside them. The header uses the real host name.
+  <span class="why">session actions were split across four places, "Quality &amp; connection" appeared in three, and the subtitle said "Manage Jarvis" (N5, N6, V4).</span></figcaption>
+</figure>
+
+<!-- Computers -->
+<figure class="fp">
+  <div class="phone"><div class="screen">
+    <div class="sb"><span>10:21</span><span class="r"><i class="sig"></i><i class="bat"></i></span></div>
+    <div class="ab"><div class="ttl">Computers</div></div>
+    <div class="body" style="display:flex;flex-direction:column">
+      <div class="card" style="padding:16px;margin-top:4px">
+        <div style="display:flex;align-items:center;gap:12px"><svg class="i" style="width:32px;height:32px;color:var(--accent)"><use href="#computer"/></svg><div class="grow"><div style="font-size:22px;font-weight:600;line-height:1.2">atlas</div><div style="font-size:13px;color:var(--text2)">Last used &middot; today 09:58</div></div><span class="badge live plain"><i></i>Online</span></div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text2);margin:14px 0 16px"><svg class="i s" style="color:var(--good)"><use href="#shield"/></svg>Trusted &middot; connects without a password</div>
+        <span class="btn wide">Connect</span>
+      </div>
+      <div class="group">Other computers</div>
+      <div class="card">
+        <div class="lrow"><svg class="i"><use href="#computer"/></svg><span class="grow">office-pc<small>Saved &middot; 412 880 153</small></span><span class="badge stopped plain"><i></i>Offline</span></div>
+        <div class="lrow"><svg class="i"><use href="#computer"/></svg><span class="grow">living-room<small>Found on this network</small></span><span class="badge live plain"><i></i>Online</span></div>
+      </div>
+      <div style="margin-top:auto;padding-bottom:16px">
+        <div class="field" style="display:flex;align-items:center;gap:12px;padding:0 6px 0 16px"><span class="grow" style="color:var(--text2)">Computer ID</span><span class="btn sm" style="width:44px;padding:0"><svg class="i s"><use href="#fwd"/></svg></span></div>
+      </div>
+    </div>
+    <div class="tabs"><div class="tab on"><span class="ind"><svg class="i"><use href="#computer"/></svg></span>Computers</div><div class="tab"><span class="ind"><svg class="i"><use href="#share"/></svg></span>Share</div><div class="tab"><span class="ind"><svg class="i"><use href="#gear"/></svg></span>Settings</div></div>
+  </div></div>
+  <figcaption><b class="t">2c &middot; Computers (not connected)</b>
+  Seen only when auto-connect fails or after End session, so it leads with the last PC as a hero card and one Connect button. Connecting and failure show inline on that card ("Connecting to atlas&hellip;" + Cancel; reason + Try again). The ID field moves to the bottom, above the tabs. Chat leaves the tab bar and is reached from Share.
+  <span class="why">the first screen was spent on an ID field filled once, above the saved PCs, with four tabs of different meaning (M10, N5).</span>
+  <div class="q"><b>Q7</b><span>Default shown keeps the "Other computers" list. If the phone only ever connects to atlas, this becomes the single card with the ID field under "Add another computer".</span></div></figcaption>
+</figure>
+
+</div>
+
+<!-- ======================= PHASE 3 ======================= -->
+<h2>3. PC &middot; Phase 3 &mdash; host panel and Emulators settings</h2>
+<p class="lead">1280 &times; 800 desktop frames. The host window keeps its 460 &times; 560 size; Settings keeps 900 &times; 650.</p>
+
+<div class="scrollx">
+<figure class="fpc">
+  <div class="pc">
+    <span class="wlabel" style="left:150px;top:68px">State: phone connected</span>
+    <div class="win" style="left:150px;top:96px;width:460px;height:560px">
+      <div class="tb"><div class="logo"></div>Aperture<span class="ctl"><span><svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg></span><span><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></span><span><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></span></span></div>
+      <div class="hp-b">
+        <div class="hp-host"><b>atlas</b><span style="display:flex;align-items:center;gap:8px"><span class="badge live"><i></i>Ready</span><span class="iconbtn"><svg class="i s"><use href="#gear"/></svg></span></span></div>
+        <div class="idrow">
+          <div class="idbox"><div class="grow"><small>ID</small><b>123 456 789</b></div><span class="iconbtn"><svg class="i xs"><use href="#copy"/></svg></span></div>
+          <div class="idbox"><div class="grow"><small>Password</small><b>&bull;&bull;&bull;&bull;&bull;&bull;</b></div><span class="iconbtn"><svg class="i xs"><use href="#refresh"/></svg></span><span class="iconbtn"><svg class="i xs"><use href="#eye"/></svg></span></div>
+        </div>
+        <div class="hp-s"><b>Connected</b></div>
+        <div class="empty" style="color:var(--text)"><svg class="i s" style="color:var(--good)"><use href="#phone"/></svg><span class="grow"><b style="font-weight:600">Phone</b> &middot; Direct &middot; 12 min<br><small style="color:var(--text2);font-size:12px">Trusted &middot; control allowed</small></span><span class="pbtn red">Disconnect</span></div>
+        <div class="hp-s"><span><b>Emulators</b> &middot; 1 of 4 running</span><a>Manage</a></div>
+        <div class="erow"><span class="n">Maple_1</span><span><span class="badge live plain"><i></i>Live</span></span><span class="w">Shown on PC</span><span class="pbtn">Hide</span></div>
+        <div class="erow"><span class="n">Maple_2</span><span><span class="badge starting plain"><i></i>Starting</span></span><span class="w">0:41</span><span></span></div>
+        <div class="erow"><span class="n">Maple_3</span><span><span class="badge stopped plain"><i></i>Stopped</span></span><span class="w"></span><span class="pbtn"><svg class="i xs"><use href="#play"/></svg>Start</span></div>
+        <div class="erow"><span class="n">Trial_Play35</span><span><span class="badge problem plain"><i></i>Problem</span></span><span class="w">Stream stopped &middot; hidden</span><span class="pbtn">Show</span></div>
+        <div class="hp-f"><a>Connect to another PC</a><span class="pbtn fill" style="height:36px;padding:0 20px">Minimize</span></div>
+      </div>
+    </div>
+
+    <span class="wlabel" style="left:670px;top:68px">State: idle (no phone, no emulators running)</span>
+    <div class="win" style="left:670px;top:96px;width:460px;height:560px">
+      <div class="tb"><div class="logo"></div>Aperture<span class="ctl"><span><svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg></span><span><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></span><span><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></span></span></div>
+      <div class="hp-b">
+        <div class="hp-host"><b>atlas</b><span style="display:flex;align-items:center;gap:8px"><span class="badge live"><i></i>Ready</span><span class="iconbtn"><svg class="i s"><use href="#gear"/></svg></span></span></div>
+        <div class="idrow">
+          <div class="idbox"><div class="grow"><small>ID</small><b>123 456 789</b></div><span class="iconbtn"><svg class="i xs"><use href="#copy"/></svg></span></div>
+          <div class="idbox"><div class="grow"><small>Password</small><b>&bull;&bull;&bull;&bull;&bull;&bull;</b></div><span class="iconbtn"><svg class="i xs"><use href="#refresh"/></svg></span><span class="iconbtn"><svg class="i xs"><use href="#eye"/></svg></span></div>
+        </div>
+        <div class="hp-s"><b>Connected</b></div>
+        <div class="empty"><svg class="i s"><use href="#phone"/></svg>No phone connected</div>
+        <div class="hp-s"><span><b>Emulators</b> &middot; 0 of 4 running</span><a>Manage</a></div>
+        <div class="erow"><span class="n">Maple_1</span><span><span class="badge stopped plain"><i></i>Stopped</span></span><span class="w"></span><span class="pbtn"><svg class="i xs"><use href="#play"/></svg>Start</span></div>
+        <div class="erow"><span class="n">Maple_2</span><span><span class="badge stopped plain"><i></i>Stopped</span></span><span class="w"></span><span class="pbtn"><svg class="i xs"><use href="#play"/></svg>Start</span></div>
+        <div class="erow"><span class="n">Maple_3</span><span><span class="badge stopped plain"><i></i>Stopped</span></span><span class="w"></span><span class="pbtn"><svg class="i xs"><use href="#play"/></svg>Start</span></div>
+        <div class="erow"><span class="n">Trial_Play35</span><span><span class="badge stopped plain"><i></i>Stopped</span></span><span class="w"></span><span class="pbtn"><svg class="i xs"><use href="#play"/></svg>Start</span></div>
+        <div class="hp-f"><a>Connect to another PC</a><span class="pbtn fill" style="height:36px;padding:0 20px">Minimize</span></div>
+      </div>
+    </div>
+
+    <div class="taskbar"><i></i><i></i><i></i><i class="on"></i><i></i><span class="clk">10:22<br>16/11/2026</span></div>
+  </div>
+  <figcaption><b class="t">3a &middot; Host panel with "Connected" and "Emulators" sections</b>
+  The existing 460 &times; 560 panel keeps ID, password, status and Minimize, and gains two read-mostly sections: who is connected (type, route, duration) and the emulator list with the same names, state words and colours as the phone, plus Start and Show / Hide. "Manage" opens Settings at Emulators. Two states are shown side by side on one desktop for comparison.
+  <span class="why">the panel said nothing about emulators or connected phones, the two facts this user needs from the PC (D1). The emulator rows need the small local Rust bridge noted in Phase 3; the Connected section does not.</span>
+  <div class="q"><b>Q6</b><span>Default shown keeps "Connect to another PC" as a quiet link. If the PC is only ever a host, the link and the Connect tab leave the main path.</span></div></figcaption>
+</figure>
+</div>
+
+<div class="scrollx" style="margin-top:32px">
+<figure class="fpc">
+  <div class="pc">
+    <div class="win" style="left:190px;top:50px;width:900px;height:650px">
+      <div class="tb"><div class="logo"></div>Aperture &middot; Settings<span class="ctl"><span><svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg></span><span><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></span><span><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></span></span></div>
+      <div class="set">
+        <div class="nav">
+          <div class="it"><svg class="i s"><use href="#back"/></svg>Back to host</div>
+          <div style="height:1px;background:var(--outline);margin:8px 0"></div>
+          <div class="it"><svg class="i s"><use href="#gear"/></svg>General</div>
+          <div class="it on"><svg class="i s"><use href="#grid"/></svg>Emulators</div>
+          <div class="it"><svg class="i s"><use href="#phone"/></svg>Phones<span class="new">NEW</span></div>
+          <div class="it"><svg class="i s"><use href="#shield"/></svg>Security</div>
+          <div class="it"><svg class="i s"><use href="#link"/></svg>Network</div>
+          <div class="it"><svg class="i s"><use href="#monitor"/></svg>Display</div>
+          <div class="it"><svg class="i s"><use href="#info"/></svg>About Aperture</div>
+        </div>
+        <div class="pane">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between">
+            <div><h4>Emulators</h4><div class="sub">4 on atlas &middot; 1 running &middot; stored in D:\Aperture\Emulators</div></div>
+            <span class="pbtn fill" style="height:36px;padding:0 16px"><svg class="i xs"><use href="#add"/></svg>New emulator</span>
+          </div>
+          <div class="tblw"><table class="tbl">
+            <thead><tr><th>Name</th><th>Type</th><th>State</th><th>PC window</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody>
+            <tr><td class="n">Maple_1</td><td class="m">Android Emulator</td><td><span class="badge live plain"><i></i>Live</span></td><td class="m">Shown</td><td class="act"><span class="pbtn">Hide</span><span class="pbtn"><svg class="i xs"><use href="#stop"/></svg>Stop</span><span class="pbtn ic off" title="Stop it first"><svg class="i xs"><use href="#copy"/></svg></span><span class="pbtn ic off" title="Stop it first"><svg class="i xs"><use href="#edit"/></svg></span><span class="pbtn ic off" title="Stop it first"><svg class="i xs"><use href="#delete"/></svg></span></td></tr>
+            <tr><td class="n">Maple_2</td><td class="m">Android Emulator</td><td><span class="badge starting plain"><i></i>Starting</span></td><td class="m">Hidden</td><td class="act"><span class="pbtn">Show</span><span class="pbtn"><svg class="i xs"><use href="#stop"/></svg>Stop</span><span class="pbtn ic off"><svg class="i xs"><use href="#copy"/></svg></span><span class="pbtn ic off"><svg class="i xs"><use href="#edit"/></svg></span><span class="pbtn ic off"><svg class="i xs"><use href="#delete"/></svg></span></td></tr>
+            <tr><td class="n">Maple_3</td><td class="m">Android Emulator</td><td><span class="badge stopped plain"><i></i>Stopped</span></td><td class="m">&ndash;</td><td class="act"><span class="pbtn"><svg class="i xs"><use href="#play"/></svg>Start</span><span class="pbtn ic" title="Clone"><svg class="i xs"><use href="#copy"/></svg></span><span class="pbtn ic" title="Rename"><svg class="i xs"><use href="#edit"/></svg></span><span class="pbtn ic red" title="Delete"><svg class="i xs"><use href="#delete"/></svg></span></td></tr>
+            <tr><td class="n">Trial_Play35</td><td class="m">BlueStacks</td><td><span class="badge problem plain" style="height:18px"><i></i>Problem</span><div style="color:var(--text2);font-size:12px;line-height:1.2">Stream stopped</div></td><td class="m">Hidden</td><td class="act"><span class="pbtn">Show</span><span class="pbtn"><svg class="i xs"><use href="#stop"/></svg>Stop</span></td></tr>
+            </tbody>
+          </table></div>
+          <div style="font-size:12px;color:var(--text2);margin-top:8px">Clone, Rename and Delete need a stopped emulator ("Stop it first"). BlueStacks emulators can be started, stopped, shown and hidden here; they are created in BlueStacks.</div>
+
+          <div style="font-size:16px;font-weight:600;margin-top:24px">BlueStacks options</div>
+          <div class="tblw" style="padding:0 16px;background:var(--surface);margin-top:8px">
+            <div class="opt"><span>Show BlueStacks instances in the emulator list</span><span class="sw-t"></span></div>
+            <div class="opt"><span>Existing BlueStacks settings <span style="color:var(--text2);font-size:12px">(carried over unchanged)</span></span><svg class="i s" style="color:var(--text2)"><use href="#chev"/></svg></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="taskbar"><i></i><i></i><i></i><i class="on"></i><i></i><span class="clk">10:22<br>16/11/2026</span></div>
+  </div>
+  <figcaption><b class="t">3b &middot; Settings &rarr; Emulators (replaces the "BlueStacks" tab)</b>
+  One table of every emulator with name, type, state, PC window and storage path, and the same actions as the phone: New, Start / Stop, Show / Hide, Clone, Rename, Delete, with the same enablement rules. The existing BlueStacks options sit underneath as a sub-section (rows here are illustrative, not a new design). "Phones" becomes its own page, moved out of Security. The window stays 900 &times; 650 when moving between Connect and Settings.
+  <span class="why">emulators could only be managed from the phone, the only PC surface was BlueStacks-specific, and the window resized on every tab change (N8, D2, D4). The table depends on the same local Rust bridge as 3a; without it Phase 3 still ships the Connected section, Phones page and theme work.</span></figcaption>
+</figure>
+</div>
+
+</div>
+
+<script>
+/* Reuse a drawn screen inside other frames (before/after strip, sheets over the grid). */
+document.querySelectorAll('[data-clone]').forEach(function (el) {
+  var src = document.querySelector(el.getAttribute('data-clone'));
+  if (src) { el.innerHTML = src.innerHTML; }
+});
+</script>
+</body>
+</html>
