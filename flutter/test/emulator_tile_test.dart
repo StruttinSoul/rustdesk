@@ -57,6 +57,22 @@ void main() {
     expect(find.text('Live'), findsNothing);
   });
 
+  testWidgets('stopped tile shows why its copy failed', (tester) async {
+    const failure = 'Copy to Phone_3 failed: not enough space';
+    await pumpIn(
+        tester,
+        tile(const EmulatorTileData(
+            id: 'a',
+            title: 'Main',
+            state: EmulatorUiState(EmulatorUiWord.stopped, 'Stopped',
+                pcMessage: failure))));
+    expect(tester.takeException(), isNull);
+    expect(find.text(failure), findsOneWidget);
+    await pumpIn(tester,
+        tile(const EmulatorTileData(id: 'a', title: 'Main', state: stopped)));
+    expect(find.text(failure), findsNothing);
+  });
+
   testWidgets('tile shows a two-line name without truncation at phone grid width',
       (tester) async {
     const title = 'BlueStacks App Player 3';

@@ -135,6 +135,38 @@ class _PcFlag extends StatelessWidget {
   }
 }
 
+/// Below this preview height the state badge would sit on top of the action
+/// in the middle of the preview, so the action wins.
+const double _kTightPreview = 120;
+
+/// Centred content of a tile's preview. It keeps its natural size and only
+/// shrinks, never overflows, when the preview is squeezed (large text, short
+/// cells); the bottom gap that clears the state badge goes first.
+class _PreviewContent extends StatelessWidget {
+  const _PreviewContent({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: LayoutBuilder(builder: (context, constraints) {
+          final bottom = constraints.maxHeight >= _kTightPreview ? 40.0 : 8.0;
+          return Padding(
+            padding: EdgeInsets.fromLTRB(8, 8, 8, bottom),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                    maxWidth: (constraints.maxWidth - 16)
+                        .clamp(0.0, double.infinity)
+                        .toDouble()),
+                child: child,
+              ),
+            ),
+          );
+        }),
+      );
+}
+
 class EmulatorTile extends StatelessWidget {
   const EmulatorTile({
     super.key,
@@ -167,9 +199,7 @@ class EmulatorTile extends StatelessWidget {
     final cause = _causeText(state, tr);
     switch (state.word) {
       case EmulatorUiWord.stopped:
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 40),
+        return _PreviewContent(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               FilledButton.icon(
                 onPressed: onOpen,
@@ -184,13 +214,9 @@ class EmulatorTile extends StatelessWidget {
                     textAlign: TextAlign.center,
                     style: text.bodySmall?.copyWith(color: onVideo)),
               ],
-            ]),
-          ),
-        );
+            ]));
       case EmulatorUiWord.problem:
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 40),
+        return _PreviewContent(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               if (cause.isNotEmpty) ...[
                 Text(cause,
@@ -202,9 +228,7 @@ class EmulatorTile extends StatelessWidget {
               ],
               FilledButton(
                   onPressed: onOpen, child: Text(tr('Reconnect'))),
-            ]),
-          ),
-        );
+            ]));
       case EmulatorUiWord.copying:
         final match = RegExp(r'\{(\d+)\}').firstMatch(state.label);
         final percent = int.tryParse(match?.group(1) ?? '');
@@ -238,24 +262,32 @@ class EmulatorTile extends StatelessWidget {
     final image = data.image;
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
-      child: Stack(fit: StackFit.expand, children: [
-        const ColoredBox(color: Colors.black),
-        if (image != null && !data.placeholder)
-          RawImage(image: image, fit: BoxFit.contain),
-        if (data.placeholder)
-          Positioned.fill(
-              child: CustomPaint(
-                  painter: _DashedBorderPainter(palette.outline))),
-        _centre(context),
-        if (!data.placeholder)
-          Positioned(
-            left: 8,
-            bottom: 8,
-            child: EmulatorStateBadge(state: data.state, tr: tr),
-          ),
-        if (!data.placeholder && data.windowVisible)
-          Positioned(right: 8, bottom: 8, child: _PcFlag(tr: tr)),
-      ]),
+      child: LayoutBuilder(builder: (context, constraints) {
+        // A stopped or failed tile's action is also its status, so it keeps
+        // the room when the preview is squeezed.
+        final overlays = !data.placeholder &&
+            !(constraints.maxHeight < _kTightPreview &&
+                (data.state.word == EmulatorUiWord.stopped ||
+                    data.state.word == EmulatorUiWord.problem));
+        return Stack(fit: StackFit.expand, children: [
+          const ColoredBox(color: Colors.black),
+          if (image != null && !data.placeholder)
+            RawImage(image: image, fit: BoxFit.contain),
+          if (data.placeholder)
+            Positioned.fill(
+                child: CustomPaint(
+                    painter: _DashedBorderPainter(palette.outline))),
+          _centre(context),
+          if (overlays)
+            Positioned(
+              left: 8,
+              bottom: 8,
+              child: EmulatorStateBadge(state: data.state, tr: tr),
+            ),
+          if (overlays && data.windowVisible)
+            Positioned(right: 8, bottom: 8, child: _PcFlag(tr: tr)),
+        ]);
+      }),
     );
   }
 

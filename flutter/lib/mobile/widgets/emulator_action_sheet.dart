@@ -33,49 +33,6 @@ class AvdCardActions {
   final VoidCallback? onDelete;
 
   bool get hasMenu => cloningLabel == null;
-
-  List<PopupMenuEntry<String>> menuEntries(BuildContext context, bool shuttingDown) {
-    PopupMenuItem<String> item(String value, String label, VoidCallback? action,
-            {String? subtitle}) =>
-        PopupMenuItem<String>(
-          value: value,
-          enabled: !shuttingDown && action != null && subtitle == null,
-          child: subtitle == null
-              ? Text(label)
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(label),
-                    Text(subtitle,
-                        style: Theme.of(context).textTheme.bodySmall),
-                  ],
-                ),
-        );
-    return [
-      if (running && onToggleWindow != null)
-        item('avd_window', windowVisible ? 'Hide on PC' : 'Show on PC', onToggleWindow),
-      if (running) item('avd_stop', 'Stop', onStop),
-      item('avd_clone', 'Clone', onClone, subtitle: blocker),
-      item('avd_rename', 'Rename', onRename, subtitle: blocker),
-      item('avd_delete', 'Delete', onDelete, subtitle: blocker),
-    ];
-  }
-
-  void select(String value) {
-    switch (value) {
-      case 'avd_window':
-        onToggleWindow?.call();
-      case 'avd_stop':
-        onStop?.call();
-      case 'avd_clone':
-        onClone?.call();
-      case 'avd_rename':
-        onRename?.call();
-      case 'avd_delete':
-        onDelete?.call();
-    }
-  }
 }
 
 /// Bottom sheet listing everything that can be done with one emulator.

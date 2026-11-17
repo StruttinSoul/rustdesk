@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import '../../models/emulator_model.dart';
 import '../../models/model.dart';
 import '../../common.dart' show translate;
+import '../widgets/emulator_tile.dart' show EmulatorStateBadge;
 import '../widgets/mirpg_remote_theme.dart';
 import '../widgets/play_rail.dart';
 import '../widgets/startup_checklist.dart';
@@ -38,6 +39,28 @@ Duration? guestAutoReconnectDelay({
     return null;
   }
   return Duration(seconds: attempts == 0 ? 1 : 3);
+}
+
+/// Leaving a game takes two back presses: the first only warns, the second
+/// within [window] leaves. A press after the window starts a new pair.
+class DoubleBackGuard {
+  DoubleBackGuard({this.window = const Duration(seconds: 2)});
+
+  final Duration window;
+  DateTime? _first;
+
+  /// True when this press should leave.
+  bool press(DateTime now) {
+    final first = _first;
+    if (first != null && now.difference(first) <= window) {
+      _first = null;
+      return true;
+    }
+    _first = now;
+    return false;
+  }
+
+  void reset() => _first = null;
 }
 
 /// Keeps the whole guest visible, with the controls (the play rail) docked
@@ -326,6 +349,7 @@ class _EmulatorPageState extends State<EmulatorPage>
   /// Where the play rail sits; kept between layouts for the hysteresis.
   PlayRailPlacement _railPlacement = PlayRailPlacement.collapsed;
   final _banner = NameBannerController();
+  final _doubleBack = DoubleBackGuard();
 
   /// The (emulator, guest session) the name banner last announced.
   (String, int)? _bannerFor;
@@ -539,6 +563,9 @@ class _EmulatorPageState extends State<EmulatorPage>
       // A switched-to game earns its own docked rail; it never inherits one.
       _railPlacement = PlayRailPlacement.collapsed;
     }
+    if (!model.streaming || model.targetId != _observedTargetId) {
+      _doubleBack.reset();
+    }
     _observedSessionId = model.guestSessionId;
     _observedTargetId = model.targetId;
     _observedGeometry = geometry;
@@ -563,6 +590,28 @@ class _EmulatorPageState extends State<EmulatorPage>
       });
     } else if (_returning && model.error.isNotEmpty) {
       _returning = false;
+    }
+  }
+
+  /// Back inside a running game (dashboard): closes the text composer, else
+  /// the first press only warns and shows the controls, the second leaves.
+  void _gameBack() {
+    if (_textComposerVisible) {
+      setState(_discardTextComposer);
+      return;
+    }
+    if (_doubleBack.press(DateTime.now())) {
+      unawaited(_back());
+      return;
+    }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(translate('Back again to leave the game')),
+        duration: const Duration(seconds: 2),
+      ));
+    if (_railPlacement == PlayRailPlacement.collapsed) {
+      setState(() => _guestControlsVisible = true);
     }
   }
 
@@ -789,7 +838,12 @@ class _EmulatorPageState extends State<EmulatorPage>
         child: PopScope(
           canPop: !widget.dashboardMode && !model.selected && !model.connecting,
           onPopInvokedWithResult: (didPop, result) {
-            if (!didPop && !_returning) unawaited(_back());
+            if (didPop || _returning) return;
+            if (widget.dashboardMode && model.streaming) {
+              _gameBack();
+            } else {
+              unawaited(_back());
+            }
           },
           child: AnimatedBuilder(
             animation: model,
@@ -800,8 +854,9 @@ class _EmulatorPageState extends State<EmulatorPage>
                 appBar: immersive || widget.dashboardMode
                     ? null
                     : AppBar(
-                        title:
-                            Text(model.selected ? _selectedName : 'Emulators'),
+                        title: Text(model.selected
+                            ? _selectedName
+                            : translate('Emulators')),
                         leading: IconButton(
                           tooltip: model.selected
                               ? 'Return to Windows desktop'
@@ -845,10 +900,9 @@ class _EmulatorPageState extends State<EmulatorPage>
   Widget _picker() => ListView(
         padding: const EdgeInsets.all(MirpgRemoteTheme.pageMargin),
         children: [
-          const MirpgSectionHeader(
-            title: 'Android instances',
-            subtitle:
-                'Choose a BlueStacks instance to view and control directly.',
+          MirpgSectionHeader(
+            title: translate('Emulators'),
+            subtitle: translate('Choose an emulator to view and control.'),
           ),
           const SizedBox(height: 12),
           if (model.error.isNotEmpty) _error(),
@@ -858,12 +912,16 @@ class _EmulatorPageState extends State<EmulatorPage>
                     padding: EdgeInsets.all(24),
                     child: CircularProgressIndicator())),
           if (!model.loading && model.instances.isEmpty)
-            const MirpgSurface(
-              child: Text(
-                  'No emulator instances were found. Open BlueStacks on the PC, then refresh.'),
+            MirpgSurface(
+              child: Text(translate(
+                  'No emulators found on this PC. Start one on the PC, then refresh.')),
             ),
           for (final instance in model.instances)
-            Padding(
+            Builder(builder: (context) {
+              final uiState = emulatorUiState(instance);
+              final canOpen =
+                  canControl && !model.connecting && uiState.canOpen;
+              return Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: MirpgSurface(
                 child: Row(
@@ -913,27 +971,29 @@ class _EmulatorPageState extends State<EmulatorPage>
                             runSpacing: 8,
                             children: [
                               FilledButton.icon(
-                                onPressed: canControl && !model.connecting
+                                onPressed: canOpen
                                     ? () => unawaited(model.connect(instance.id,
                                         launchDefaultApp: false))
                                     : null,
                                 icon: Icon(instance.state == 'stopped'
                                     ? Icons.power_settings_new_rounded
                                     : Icons.play_arrow_rounded),
-                                label: Text(instance.state == 'stopped'
-                                    ? 'Boot'
-                                    : 'Resume'),
+                                label: Text(translate(
+                                    instance.state == 'stopped'
+                                        ? 'Start'
+                                        : 'Open')),
                               ),
                               if (instance.defaultPackage.isNotEmpty)
                                 OutlinedButton.icon(
-                                  onPressed: canControl && !model.connecting
+                                  onPressed: canOpen
                                       ? () => unawaited(model.connect(
                                           instance.id,
                                           launchDefaultApp: true))
                                       : null,
                                   icon:
                                       const Icon(Icons.sports_esports_outlined),
-                                  label: const Text('Launch game'),
+                                  label:
+                                      Text(translate('Open and launch game')),
                                 ),
                             ],
                           ),
@@ -941,19 +1001,12 @@ class _EmulatorPageState extends State<EmulatorPage>
                       ),
                     ),
                     const SizedBox(width: 8),
-                    MirpgStatusChip(
-                      label:
-                          instance.state.isEmpty ? 'Unknown' : instance.state,
-                      tone: instance.state == 'stopped'
-                          ? MirpgStatusTone.neutral
-                          : instance.error.isNotEmpty
-                              ? MirpgStatusTone.error
-                              : MirpgStatusTone.good,
-                    ),
+                    EmulatorStateBadge(state: uiState, onDarkSurface: false),
                   ],
                 ),
               ),
-            ),
+            );
+            }),
           if (!canControl)
             const MirpgSurface(
               child: Text(
@@ -1041,10 +1094,8 @@ class _EmulatorPageState extends State<EmulatorPage>
                   child: Center(
                     child: MirpgStatusChip(
                       label: !canControl
-                          ? '$_selectedName · View only'
-                          : model.guestFrameFresh
-                              ? '$_selectedName · Direct touch'
-                              : '$_selectedName · Waiting for live frame',
+                          ? '$_shownName · ${translate('View only')}'
+                          : '$_shownName · ${translate('Reconnecting…')}',
                       icon: canGuestControl
                           ? Icons.touch_app_outlined
                           : Icons.hourglass_top_rounded,

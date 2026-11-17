@@ -1651,9 +1651,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        const MirpgSectionHeader(
+        MirpgSectionHeader(
           title: 'Workspace tools',
-          subtitle: 'Manage Jarvis without leaving your connection.',
+          subtitle: translate(
+              'Manage {$_hostName} without leaving your connection.'),
         ),
         const SizedBox(height: 20),
         MirpgSurface(
@@ -1856,7 +1857,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                           style: Theme.of(context).textTheme.titleMedium),
                       const SizedBox(height: 4),
                       Text(
-                        'Refresh after a Windows display or BlueStacks instance becomes available.',
+                        translate('Refresh after a PC screen or emulator becomes available.'),
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
@@ -1902,7 +1903,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             return TargetScreenRow(
               name: target.name,
               type: 'Windows',
-              stopped: false,
               live: live,
               image: image,
               onOpen: openAction,
@@ -1912,7 +1912,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           return TargetPreviewCard(
             name: target.name,
             type: 'Windows',
-            stopped: false,
             live: live,
             image: image,
             onOpen: openAction,
@@ -2635,71 +2634,40 @@ class TargetSwitcherCards extends StatelessWidget {
       );
 }
 
-/// A dense, accessible screen-picker row for Studio V4's All screens page.
-/// The full preview card remains available on Home and in the view switcher.
+/// A dense, accessible row for a PC monitor on the Screens tab. Emulators use
+/// [EmulatorRow] instead.
 class TargetScreenRow extends StatelessWidget {
   const TargetScreenRow({
     super.key,
     required this.name,
     required this.type,
-    required this.stopped,
     required this.live,
-    this.streamDisconnected = false,
-    this.streamStalled = false,
     this.image,
     this.error = '',
     this.onOpen,
-    this.onLaunchGame,
     this.onRetry,
-    this.onShutdown,
-    this.shuttingDown = false,
-    this.stoppedNote = '',
-    this.avd,
   });
 
-  final AvdCardActions? avd;
-
-  /// Shown on a stopped card, e.g. why a copy of this emulator failed.
-  final String stoppedNote;
   final String name;
   final String type;
-  final bool stopped;
   final bool live;
-  final bool streamDisconnected;
-  final bool streamStalled;
   final ui.Image? image;
   final String error;
   final VoidCallback? onOpen;
-  final VoidCallback? onLaunchGame;
+
+  /// Offered from the row's menu while the preview is not live.
   final VoidCallback? onRetry;
-  final VoidCallback? onShutdown;
-  final bool shuttingDown;
 
   @override
   Widget build(BuildContext context) {
     final palette = MirpgStudioPalette.of(context);
-    final failure = streamDisconnected || streamStalled || error.isNotEmpty;
-    final actionLabel = stopped
-        ? 'Boot'
-        : streamDisconnected || streamStalled
-            ? 'Reconnect'
-            : 'Open';
-    final status = shuttingDown
-        ? 'Shutting down…'
-        : avd?.cloningLabel != null
-        ? avd!.cloningLabel!
-        : stopped
-        ? 'Stopped'
-        : streamDisconnected
-            ? 'Stream disconnected'
-            : streamStalled
-                ? 'Stream stalled'
-                : live
-                    ? 'Live'
-                    : failure
-                        ? 'Needs attention'
-                        : 'Waiting for preview';
-    final statusColor = shuttingDown ? palette.textSecondary : failure
+    final failure = error.isNotEmpty;
+    final status = live
+        ? 'Live'
+        : failure
+            ? 'Needs attention'
+            : 'Waiting for preview';
+    final statusColor = failure
         ? palette.error
         : live
             ? palette.good
@@ -2708,7 +2676,7 @@ class TargetScreenRow extends StatelessWidget {
       padding: EdgeInsets.zero,
       child: InkWell(
         borderRadius: BorderRadius.circular(MirpgRemoteTheme.surfaceRadius),
-        onTap: shuttingDown ? null : onOpen,
+        onTap: onOpen,
         child: Padding(
           padding: const EdgeInsets.all(10),
           child: Row(
@@ -2723,11 +2691,7 @@ class TargetScreenRow extends StatelessWidget {
                     child: image != null
                         ? RawImage(image: image, fit: BoxFit.contain)
                         : Icon(
-                            type == 'Windows'
-                                ? Icons.desktop_windows_outlined
-                                : stopped
-                                    ? Icons.power_settings_new_rounded
-                                    : Icons.android_outlined,
+                            Icons.desktop_windows_outlined,
                             color: palette.accent,
                             size: 28,
                           ),
@@ -2755,50 +2719,22 @@ class TargetScreenRow extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelSmall?.copyWith(
                             color: statusColor, fontWeight: FontWeight.w600)),
-                    if (stopped && stoppedNote.isNotEmpty)
-                      Text(stoppedNote,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context)
-                              .textTheme
-                              .bodySmall
-                              ?.copyWith(color: palette.error)),
                   ],
                 ),
               ),
-              if ((!stopped && type != 'Windows' && onShutdown != null) || onLaunchGame != null ||
-                  (!stopped && !live && onRetry != null) || avd?.hasMenu == true)
+              if (!live && onRetry != null)
                 PopupMenuButton<String>(
                   tooltip: 'More $name actions',
                   icon: const Icon(Icons.more_vert_rounded),
-                  onSelected: (value) {
-                    if (shuttingDown) return;
-                    if (value == 'shutdown') onShutdown?.call();
-                    if (value == 'game') onLaunchGame?.call();
-                    if (value == 'retry') onRetry?.call();
-                    avd?.select(value);
-                  },
-                  itemBuilder: (_) => [
-                    if (onLaunchGame != null)
-                      PopupMenuItem(
-                          value: 'game', enabled: !shuttingDown, child: Text('Launch game')),
-                    if (!stopped && !live && onRetry != null)
-                      PopupMenuItem(
-                          value: 'retry', enabled: !shuttingDown, child: Text('Retry preview')),
-                    if (avd?.hasMenu == true) ...avd!.menuEntries(context, shuttingDown),
-                    if (!stopped && type != 'Windows' && onShutdown != null)
-                      PopupMenuItem(value: 'shutdown', enabled: !shuttingDown,
-                        child: Text(shuttingDown ? 'Shutting down…' : 'Shut down emulator')),
+                  onSelected: (_) => onRetry?.call(),
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'retry', child: Text('Retry preview')),
                   ],
                 ),
               IconButton(
-                tooltip: actionLabel,
-                onPressed: shuttingDown ? null : onOpen,
-                icon: Icon(stopped
-                    ? Icons.power_settings_new_rounded
-                    : streamDisconnected || streamStalled
-                        ? Icons.refresh_rounded
-                        : Icons.arrow_forward_rounded),
+                tooltip: 'Open',
+                onPressed: onOpen,
+                icon: const Icon(Icons.arrow_forward_rounded),
               ),
             ],
           ),
@@ -2808,80 +2744,44 @@ class TargetScreenRow extends StatelessWidget {
   }
 }
 
+/// A PC monitor as a preview card. Emulators use [EmulatorTile] instead.
 class TargetPreviewCard extends StatelessWidget {
   const TargetPreviewCard(
       {super.key,
       required this.name,
       required this.type,
-      required this.stopped,
       required this.live,
-      this.instanceState = '',
-      this.streamDisconnected = false,
-      this.streamStalled = false,
       this.image,
       this.error = '',
       this.onOpen,
-      this.onLaunchGame,
-      this.onRetry,
-      this.onShutdown,
-      this.shuttingDown = false,
-      this.stoppedNote = '',
-      this.avd});
-  final AvdCardActions? avd;
-
-  /// Shown on a stopped card, e.g. why a copy of this emulator failed.
-  final String stoppedNote;
+      this.onRetry});
   final String name;
   final String type;
-  final bool stopped;
   final bool live;
-  final String instanceState;
-  final bool streamDisconnected;
-  final bool streamStalled;
   final ui.Image? image;
   final String error;
   final VoidCallback? onOpen;
-  final VoidCallback? onLaunchGame;
   final VoidCallback? onRetry;
-  final VoidCallback? onShutdown;
-  final bool shuttingDown;
 
   @override
   Widget build(BuildContext context) {
-    final runtime = instanceState.isEmpty
-        ? 'Emulator'
-        : '${instanceState[0].toUpperCase()}${instanceState.substring(1)}';
-    final stateLabel = shuttingDown
-        ? 'Shutting down…'
-        : avd?.cloningLabel != null
-        ? avd!.cloningLabel!
-        : stopped
-        ? 'Stopped'
-        : streamDisconnected
-            ? 'Disconnected'
-            : streamStalled
-                ? 'Stalled'
-                : live
-                    ? 'Live'
-                    : error.isNotEmpty
-                        ? 'Attention'
-                        : 'Connecting';
-    final stateTone = stopped || shuttingDown || avd?.cloningLabel != null
-        ? MirpgStatusTone.neutral
-        : streamDisconnected || streamStalled
+    final stateLabel = live
+        ? 'Live'
+        : error.isNotEmpty
+            ? 'Attention'
+            : 'Connecting';
+    final stateTone = live
+        ? MirpgStatusTone.good
+        : error.isNotEmpty
             ? MirpgStatusTone.error
-            : live
-                ? MirpgStatusTone.good
-                : error.isNotEmpty
-                    ? MirpgStatusTone.error
-                    : MirpgStatusTone.warning;
+            : MirpgStatusTone.warning;
     final videoOverlayPalette = MirpgStudioPalette.dark;
 
     return Card(
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: shuttingDown ? null : onOpen,
+        onTap: onOpen,
         child: Column(
           children: [
             Expanded(
@@ -2896,72 +2796,11 @@ class TargetPreviewCard extends StatelessWidget {
                         fit: BoxFit.contain,
                         filterQuality: FilterQuality.low,
                       ),
-                    if (image == null && !stopped && error.isEmpty)
+                    if (image == null && error.isEmpty)
                       const Center(
                         child: Icon(Icons.live_tv_outlined,
                             color: Color(0xFF69757A), size: 38),
-                      ),
-                    if (stopped)
-                      Center(
-                        child: LayoutBuilder(
-                          builder: (context, bounds) => bounds.maxWidth <
-                                  MediaQuery.textScalerOf(context).scale(180)
-                              ? FilledButton(
-                                  onPressed: shuttingDown ? null : onOpen,
-                                  child: const Text('Boot'),
-                                )
-                              : FilledButton.icon(
-                                  onPressed: shuttingDown ? null : onOpen,
-                                  icon: const Icon(Icons.power_settings_new_rounded),
-                                  label: const Text('Boot'),
-                                ),
-                        ),
                       )
-                    else if (streamDisconnected || streamStalled)
-                      LayoutBuilder(builder: (context, constraints) {
-                        // The footer and status badge already explain failures
-                        // on tiny cards; don't squeeze a full notice underneath.
-                        if (constraints.maxHeight < 135) {
-                          return const SizedBox.shrink();
-                        }
-                        return Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: SingleChildScrollView(
-                              child: MirpgSurface(
-                                color: videoOverlayPalette.background
-                                    .withOpacity(0.94),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text(
-                                      streamDisconnected
-                                          ? 'Stream disconnected'
-                                          : 'Stream stalled',
-                                      textAlign: TextAlign.center,
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .titleSmall
-                                          ?.copyWith(color: videoOverlayPalette.textPrimary),
-                                    ),
-                                    if (error.isNotEmpty) ...[
-                                      const SizedBox(height: 4),
-                                      Text(error,
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          textAlign: TextAlign.center,
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .bodySmall
-                                              ?.copyWith(color: videoOverlayPalette.textSecondary)),
-                                    ],
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      })
                     else if (error.isNotEmpty)
                       Center(
                         child: Padding(
@@ -2993,21 +2832,7 @@ class TargetPreviewCard extends StatelessWidget {
                           ),
                         ),
                       ),
-                    if (stopped && stoppedNote.isNotEmpty)
-                      Positioned(
-                        left: 8,
-                        right: 8,
-                        bottom: 8,
-                        child: Text(
-                          stoppedNote,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: videoOverlayPalette.textPrimary),
-                        ),
-                      ),
-                    if (!stopped) Positioned(
+                    Positioned(
                       left: 10,
                       right: 10,
                       top: 10,
@@ -3023,9 +2848,7 @@ class TargetPreviewCard extends StatelessWidget {
                                   child: MirpgStatusChip(
                                     label: type,
                                     onDarkSurface: true,
-                                    icon: type == 'Windows'
-                                        ? Icons.desktop_windows_outlined
-                                        : Icons.android_outlined,
+                                    icon: Icons.desktop_windows_outlined,
                                   ),
                                 ),
                               ),
@@ -3055,22 +2878,9 @@ class TargetPreviewCard extends StatelessWidget {
                 final narrow = constraints.maxWidth < 192;
                 final compact = constraints.maxWidth <
                     MediaQuery.textScalerOf(context).scale(280);
-                final actionLabel = type == 'Windows'
-                    ? 'Open'
-                    : streamDisconnected || streamStalled
-                        ? 'Reconnect'
-                        : 'Resume';
+                final caption = live ? 'Live' : 'Waiting for preview';
                 if (narrow) {
                   final palette = MirpgStudioPalette.of(context);
-                  final caption = shuttingDown
-                      ? 'Shutting down…'
-                      : stopped
-                      ? 'Tap to boot'
-                      : streamDisconnected || streamStalled
-                          ? 'Reconnect'
-                          : live
-                              ? 'Live · open'
-                              : 'Waiting for preview';
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
@@ -3079,29 +2889,13 @@ class TargetPreviewCard extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.titleSmall),
-                      Row(children: [
-                        Expanded(
-                          child: Text(caption,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .labelSmall
-                                  ?.copyWith(
-                                      color: live
-                                          ? palette.good
-                                          : palette.textSecondary)),
-                        ),
-                        if (avd?.hasMenu == true || (!stopped && type != 'Windows' && onShutdown != null))
-                          _EmulatorShutdownMenu(name: name, shuttingDown: shuttingDown,
-                            onShutdown: onShutdown, onLaunchGame: onLaunchGame, avd: avd)
-                        else if (onLaunchGame != null)
-                          IconButton(
-                            onPressed: onLaunchGame,
-                            icon: const Icon(Icons.sports_esports_outlined),
-                            tooltip: 'Launch game',
-                          ),
-                      ]),
+                      Text(caption,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: live
+                                  ? palette.good
+                                  : palette.textSecondary)),
                     ],
                   );
                 }
@@ -3118,13 +2912,7 @@ class TargetPreviewCard extends StatelessWidget {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          stopped
-                              ? 'Ready to boot'
-                              : streamDisconnected || streamStalled
-                                  ? '$runtime · ${streamDisconnected ? 'Stream disconnected' : 'Stream stalled'}'
-                                  : live
-                                      ? 'Tap to control'
-                                      : 'Waiting for a usable preview',
+                          caption,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.bodySmall,
@@ -3132,42 +2920,18 @@ class TargetPreviewCard extends StatelessWidget {
                       ],
                     ),
                   ),
-                  if (avd?.hasMenu == true || (!stopped && type != 'Windows' && onShutdown != null))
-                    _EmulatorShutdownMenu(name: name, shuttingDown: shuttingDown,
-                      onShutdown: onShutdown, onLaunchGame: onLaunchGame, avd: avd)
-                  else if (onLaunchGame != null)
-                    if (compact)
-                      IconButton(
-                        onPressed: onLaunchGame,
-                        icon: const Icon(Icons.sports_esports_outlined),
-                        tooltip: 'Launch game',
-                      )
-                    else
-                      TextButton.icon(
-                        onPressed: onLaunchGame,
-                        icon:
-                            const Icon(Icons.sports_esports_outlined, size: 18),
-                        label: const Text('Launch game'),
-                      ),
-                  if (!stopped)
-                    if (compact)
-                      IconButton(
-                        onPressed: shuttingDown ? null : onOpen,
-                        icon: Icon(type == 'Windows'
-                            ? Icons.open_in_full_rounded
-                            : streamDisconnected || streamStalled
-                                ? Icons.refresh_rounded
-                                : Icons.play_arrow_rounded),
-                        tooltip: actionLabel,
-                      )
-                    else
-                      TextButton.icon(
-                        onPressed: shuttingDown ? null : onOpen,
-                        icon: Icon(type == 'Windows'
-                            ? Icons.open_in_full_rounded
-                            : Icons.play_arrow_rounded),
-                        label: Text(actionLabel),
-                      ),
+                  if (compact)
+                    IconButton(
+                      onPressed: onOpen,
+                      icon: const Icon(Icons.open_in_full_rounded),
+                      tooltip: 'Open',
+                    )
+                  else
+                    TextButton.icon(
+                      onPressed: onOpen,
+                      icon: const Icon(Icons.open_in_full_rounded),
+                      label: const Text('Open'),
+                    ),
                 ]);
               }),
             ),
@@ -3187,33 +2951,6 @@ Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name,
       confirmLabel: tr('Stop'),
       cancelLabel: tr('Cancel'),
     );
-
-class _EmulatorShutdownMenu extends StatelessWidget {
-  const _EmulatorShutdownMenu({required this.name, required this.onShutdown,
-    required this.shuttingDown, this.onLaunchGame, this.avd});
-  final String name;
-  final AvdCardActions? avd;
-  final VoidCallback? onShutdown;
-  final VoidCallback? onLaunchGame;
-  final bool shuttingDown;
-  @override
-  Widget build(BuildContext context) => PopupMenuButton<String>(
-    tooltip: 'More $name actions',
-    onSelected: (value) {
-      if (shuttingDown) return;
-      if (value == 'shutdown') onShutdown?.call();
-      if (value == 'game') onLaunchGame?.call();
-      avd?.select(value);
-    },
-    itemBuilder: (context) => [
-      if (onLaunchGame != null) PopupMenuItem(value: 'game', enabled: !shuttingDown, child: const Text('Launch game')),
-      if (avd?.hasMenu == true) ...avd!.menuEntries(context, shuttingDown),
-      if (onShutdown != null)
-        PopupMenuItem(value: 'shutdown', enabled: !shuttingDown,
-          child: Text(shuttingDown ? 'Shutting down…' : 'Shut down emulator')),
-    ],
-  );
-}
 
 class _MonitorMoveSlot {
   _MonitorMoveSlot(this.point, this.index);

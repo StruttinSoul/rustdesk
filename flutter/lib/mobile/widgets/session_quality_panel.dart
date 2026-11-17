@@ -20,11 +20,11 @@ String mirpgQualityProfileLabel(MirpgQualityProfile profile) {
 String mirpgQualityProfileDescription(MirpgQualityProfile profile) {
   switch (profile) {
     case MirpgQualityProfile.auto:
-      return 'Uses RustDesk Balanced quality for an adaptive everyday profile.';
+      return 'Uses Balanced quality for an adaptive everyday profile.';
     case MirpgQualityProfile.sharpText:
-      return 'Uses RustDesk Good image quality to favor readable detail.';
+      return 'Uses Good image quality to favor readable detail.';
     case MirpgQualityProfile.smoothMotion:
-      return 'Uses RustDesk Optimize reaction time to favor responsiveness.';
+      return 'Uses Optimize reaction time to favor responsiveness.';
   }
 }
 
