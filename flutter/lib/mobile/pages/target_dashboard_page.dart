@@ -34,6 +34,7 @@ import '../widgets/monitor_key_sender.dart';
 import '../widgets/monitor_session_continuity.dart';
 import '../widgets/play_rail.dart';
 import '../widgets/pc_tab.dart';
+import '../widgets/reconnecting_banner.dart';
 import '../widgets/play_tab.dart';
 import '../widgets/privacy_controls_sheet.dart';
 import '../widgets/screens_tab.dart';
@@ -41,6 +42,7 @@ export '../widgets/screens_tab.dart' show TargetPreviewCard, TargetSwitcherGrid;
 import '../widgets/session_quality_panel.dart';
 import '../widgets/trust_phone_sheet.dart';
 import '../widgets/window_picker_sheet.dart';
+import '../../models/session_reconnect.dart';
 
 /// The dashboard's pages. `devices` is the Play tab (emulators); the bottom
 /// bar reads Screens, Play, PC.
@@ -137,6 +139,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   bool _switchPending = false;
   bool _chooser = false;
   bool _background = false;
+
+  /// Reconnects the session on its own after an unexpected drop, then reopens
+  /// the emulator or monitor that was open.
+  late final SessionReconnectController _sessionReconnect;
   bool _viewFocused = true;
   bool _monitorDown = false;
   bool _monitorRightDown = false;
@@ -260,6 +266,14 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _sessionReconnect = SessionReconnectController(
+      attempt: widget.ffi.ffiModel.reconnectQuietly,
+      onRestored: _restoreAfterReconnect,
+      onGiveUp: (event) => widget.ffi.ffiModel
+          .handleMsgBox(event, widget.ffi.sessionId, widget.ffi.id),
+      isForeground: () => !_background,
+    );
+    widget.ffi.ffiModel.sessionReconnect = _sessionReconnect;
     model.addListener(_changed);
     _labels.addListener(_labelsChanged);
     widget.ffi.ffiModel.addListener(_changed);
@@ -637,6 +651,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _background = state != AppLifecycleState.resumed;
+    _sessionReconnect.onForegroundChanged(!_background);
     if (_background) unawaited(_releaseMonitorInput());
     _subscription = '';
     _subscribe();
@@ -1338,6 +1353,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    if (identical(widget.ffi.ffiModel.sessionReconnect, _sessionReconnect)) {
+      widget.ffi.ffiModel.sessionReconnect = null;
+    }
+    _sessionReconnect.dispose();
     model.removeListener(_changed);
     _labels.removeListener(_labelsChanged);
     _labels.dispose();
@@ -1362,8 +1381,54 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     super.dispose();
   }
 
+  /// The session is back after a drop: ask the PC for its list again and
+  /// reopen what was open. The tab is unchanged (this page stayed open), and a
+  /// stopped emulator is never started by this.
+  void _restoreAfterReconnect() {
+    // Peer info is still being applied when this is called.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _subscription = '';
+      unawaited(model.refresh());
+      final active = _fullscreen;
+      final restore = reconnectRestoreFor(
+        guestId: active?.instance != null ? active!.id : null,
+        display: active?.display,
+      );
+      switch (restore.kind) {
+        case ReconnectRestoreKind.guest:
+          unawaited(model.connect(restore.guestId!, startIfStopped: false));
+        case ReconnectRestoreKind.monitor:
+          unawaited(model.desktop());
+        case ReconnectRestoreKind.none:
+          break;
+      }
+      _subscribe();
+    });
+  }
+
+  /// The page with the "Reconnecting…" state over it.
   @override
   Widget build(BuildContext context) {
+    final body = _buildPage(context);
+    final inGame = _fullscreen != null;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        body,
+        ReconnectingBanner(
+          controller: _sessionReconnect,
+          // Over a game or monitor the bottom holds controls; over a tab the
+          // navigation bar does.
+          alignment: inGame ? Alignment.topCenter : Alignment.bottomCenter,
+          padding: EdgeInsets.fromLTRB(
+              16, inGame ? 56 : 16, 16, inGame ? 16 : 96),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPage(BuildContext context) {
     final active = _fullscreen;
     if (active?.instance != null) {
       // The list refreshes, so read the emulator's current window state.

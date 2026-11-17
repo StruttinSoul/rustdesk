@@ -43,6 +43,7 @@ import '../common.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'input_model.dart';
+import 'session_reconnect.dart';
 import 'platform_model.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
@@ -125,6 +126,11 @@ class FfiModel with ChangeNotifier {
   String lastConnectionError = '';
   int peerInfoGeneration = 0;
   int _reconnectGeneration = 0;
+
+  /// Reconnects a dropped dashboard session on its own. Set by the dashboard
+  /// page while it is open; null everywhere else, so other sessions keep the
+  /// stock error dialog.
+  SessionReconnectController? sessionReconnect;
   CachedPeerData cachedPeerData = CachedPeerData();
   PeerInfo _pi = PeerInfo();
   int? lastUserDisplay;
@@ -969,6 +975,15 @@ class FfiModel with ChangeNotifier {
       return;
     }
 
+    // A dropped dashboard session reconnects on its own and shows a small
+    // "Reconnecting…" state instead of the error dialog. It hands the box back
+    // when it gives up, and for refusals and password or 2FA prompts.
+    final autoReconnect = sessionReconnect;
+    if (autoReconnect != null && autoReconnect.onMessage(evt)) {
+      _onConnectionInvalidated?.call();
+      return;
+    }
+
     // Disable relative mouse mode on any error-type message to ensure cursor is released.
     // This includes connection errors, session-ending messages, elevation errors, etc.
     // Safety: releasing pointer lock on errors prevents the user from being stuck.
@@ -1177,6 +1192,18 @@ class FfiModel with ChangeNotifier {
   void cancelPendingRestoreTimer() {
     _pendingRestoreTimer?.cancel();
     _pendingRestoreTimer = null;
+  }
+
+  /// One automatic reconnect attempt: the same session restart as above, but
+  /// without the blocking "Connecting..." dialog (the dashboard shows a small
+  /// "Reconnecting…" state instead).
+  void reconnectQuietly() {
+    if (parent.target?.closed == true) return;
+    parent.target?.inputModel.setRelativeMouseMode(false);
+    _cancelPendingMonitorRestore();
+    markReconnectStarted();
+    bind.sessionReconnect(sessionId: sessionId, forceRelay: false);
+    clearPermissions();
   }
 
   void reconnect(OverlayDialogManager dialogManager, SessionID sessionId,
@@ -1561,6 +1588,7 @@ class FfiModel with ChangeNotifier {
     if (!isCache) {
       authenticatedPeer = true;
       peerInfoGeneration++;
+      sessionReconnect?.onConnected();
       _onClipboardContextChanged?.call();
     }
     _pi.isSet.value = true;
