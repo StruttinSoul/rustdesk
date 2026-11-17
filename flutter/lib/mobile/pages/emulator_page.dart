@@ -966,6 +966,10 @@ class _EmulatorPageState extends State<EmulatorPage>
       onBack: () {
         if (!_returning) unawaited(_back());
       },
+      backLabel: startupBackLabel(dashboardMode: widget.dashboardMode),
+      backIcon: widget.dashboardMode
+          ? Icons.grid_view_rounded
+          : Icons.desktop_windows_outlined,
       onTryAgain: model.targetId.isEmpty ||
               model.connecting ||
               _returning ||

@@ -128,6 +128,35 @@ void main() {
     expect(backs, 1);
   });
 
+  test('the fallback picker page says where back goes', () {
+    expect(startupBackLabel(dashboardMode: true), 'Back to emulators');
+    expect(startupBackLabel(dashboardMode: false), 'Return to Windows desktop');
+  });
+
+  testWidgets('legacy back label replaces Back to emulators', (tester) async {
+    var backs = 0;
+    await _pump(
+        tester,
+        StartupChecklist(
+          name: 'Alt-2',
+          providerLabel: 'BlueStacks',
+          currentStep: 1,
+          elapsed: const Duration(seconds: 5),
+          onBack: () => backs++,
+          backLabel: startupBackLabel(dashboardMode: false),
+          backIcon: Icons.desktop_windows_outlined,
+          tr: fakeTr,
+        ));
+    expect(find.text('Back to emulators'), findsNothing);
+    final back = find.ancestor(
+        of: find.text('Return to Windows desktop'),
+        matching: find.byWidgetPredicate((w) => w is FilledButton));
+    expect(back, findsOneWidget);
+    await tester.tap(back);
+    await tester.pump();
+    expect(backs, 1);
+  });
+
   testWidgets('Show on PC only when offered', (tester) async {
     await _pump(tester, _checklist());
     expect(find.text('Show on PC'), findsNothing);

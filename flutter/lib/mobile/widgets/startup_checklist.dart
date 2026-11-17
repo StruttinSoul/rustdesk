@@ -23,6 +23,12 @@ int startupStepIndex(String phase, {required bool alreadyRunning}) =>
       _ => alreadyRunning ? 2 : 0,
     };
 
+/// The startup screen's back button, as a translate key. On the dashboard it
+/// returns to the emulator grid; on the fallback picker page (PCs without the
+/// dashboard) it returns to the Windows desktop, like that page's app bar.
+String startupBackLabel({required bool dashboardMode}) =>
+    dashboardMode ? 'Back to emulators' : 'Return to Windows desktop';
+
 /// `m:ss`, e.g. `0:41`, `1:05`, `12:00`.
 String formatElapsed(Duration d) {
   final seconds = d.inSeconds < 0 ? 0 : d.inSeconds;
@@ -43,6 +49,8 @@ class StartupChecklist extends StatelessWidget {
     this.failureMessage = '',
     this.retryNote = '',
     required this.onBack,
+    this.backLabel = 'Back to emulators',
+    this.backIcon = Icons.grid_view_rounded,
     this.onTryAgain,
     this.onShowOnPc,
     this.tr = translate,
@@ -65,6 +73,11 @@ class StartupChecklist extends StatelessWidget {
   /// Translate key, shown while the automatic retry is armed.
   final String retryNote;
   final VoidCallback onBack;
+
+  /// Translate key for [onBack]'s button. The fallback picker page, where
+  /// back returns to the Windows desktop, passes its own wording.
+  final String backLabel;
+  final IconData backIcon;
   final VoidCallback? onTryAgain;
   final VoidCallback? onShowOnPc;
   final String Function(String) tr;
@@ -323,7 +336,7 @@ class StartupChecklist extends StatelessWidget {
         TextButton(
           style: full,
           onPressed: onBack,
-          child: label(null, 'Back to emulators'),
+          child: label(null, backLabel),
         ),
         if (showOnPc != null) showOnPc,
       ];
@@ -332,7 +345,7 @@ class StartupChecklist extends StatelessWidget {
       FilledButton(
         style: full,
         onPressed: onBack,
-        child: label(Icons.grid_view_rounded, 'Back to emulators'),
+        child: label(backIcon, backLabel),
       ),
       if (showOnPc != null) ...[
         const SizedBox(height: MirpgRemoteTheme.rhythm),
