@@ -19,10 +19,11 @@ const kPlayRailAccountsHeight = 40.0,
     kPlayRailHysteresis = 16.0;
 
 /// Docks the rail where the contained game leaves enough black space, so the
-/// rail never covers or shrinks the game. The previous docked placement is
-/// kept until its spare space drops more than [kPlayRailHysteresis] below
-/// the need, so system bars, insets and other small viewport changes do not
-/// make the rail flicker.
+/// rail never covers or shrinks the game. The hysteresis is on the docking
+/// side: a rail docks only when the spare space is [kPlayRailHysteresis]
+/// more than it needs, stays docked while the space still holds it, and
+/// collapses as soon as it would shrink the game. So system bars, insets and
+/// other small viewport changes do not make the rail flicker.
 PlayRailPlacement playRailPlacement({
   required Size viewport,
   required int guestWidth,
@@ -38,7 +39,7 @@ PlayRailPlacement playRailPlacement({
   final spareH = viewport.height - frame.height,
       spareW = viewport.width - frame.width;
   double need(PlayRailPlacement p, double base) =>
-      p == previous ? base - kPlayRailHysteresis : base;
+      p == previous ? base : base + kPlayRailHysteresis;
   if (spareH >= need(PlayRailPlacement.bottom, kPlayRailBottomHeight)) {
     return PlayRailPlacement.bottom;
   }

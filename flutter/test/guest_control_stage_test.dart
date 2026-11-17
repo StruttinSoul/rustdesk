@@ -347,4 +347,47 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  for (final size in [const Size(384, 832), const Size(832, 384)]) {
+    testWidgets('fallback page keeps its row below the video at $size',
+        (tester) async {
+      await setSize(tester, size);
+      var visible = false;
+      final touches = <({int x, int y})?>[];
+      final width = size.width > size.height ? 2340 : 1080;
+      final height = size.width > size.height ? 1080 : 2340;
+      await tester.pumpWidget(
+          MaterialApp(home: StatefulBuilder(builder: (context, setState) {
+        return GuestControlStage(
+          legacyLayout: true,
+          controlsVisible: visible,
+          onToggleControls: () => setState(() => visible = !visible),
+          video: guestVideo(touches, width, height),
+          controls: const SizedBox(key: Key('controls'), height: 56),
+        );
+      })));
+      expect(tester.getSize(find.byKey(const Key('video'))), size);
+      await tester.tap(controlButton('Show controls'));
+      await tester.pump();
+      final video = tester.getRect(find.byKey(const Key('video')));
+      final controls = tester.getRect(find.byKey(const Key('controls')));
+      expect(video.bottom, controls.top);
+      expect(video.height, size.height - 56);
+      final frame = containedGuestFrame(
+          viewportWidth: video.width,
+          viewportHeight: video.height,
+          guestWidth: width,
+          guestHeight: height)!;
+      await tester.tapAt(video.topLeft +
+          Offset(frame.left + frame.width / 2, frame.top + frame.height / 2));
+      expect(touches.single?.x, closeTo(width / 2, 1));
+      expect(touches.single?.y, closeTo(height / 2, 1));
+      touches.clear();
+      await tester.tapAt(video.topLeft + const Offset(1, 1));
+      expect(touches.single, isNull, reason: 'Natural black bars reject input');
+      expect(find.byKey(const Key('controls')), findsOneWidget,
+          reason: 'Only the round button hides the fallback row');
+      expect(tester.takeException(), isNull);
+    });
+  }
 }

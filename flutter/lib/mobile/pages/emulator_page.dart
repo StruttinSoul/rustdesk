@@ -53,7 +53,13 @@ class GuestControlStage extends StatefulWidget {
     this.placement = PlayRailPlacement.collapsed,
     this.composer,
     this.onDoubleTapToggle,
+    this.legacyLayout = false,
   });
+
+  /// The fallback page (PCs without the dashboard): its controls row sits
+  /// below the video and shrinks it, and only the round button toggles it.
+  /// [placement], [composer] and [onDoubleTapToggle] are not used.
+  final bool legacyLayout;
 
   final Widget video;
   final Widget controls;
@@ -82,6 +88,17 @@ class _GuestControlStageState extends State<GuestControlStage> {
   // composer opens.
   @override
   Widget build(BuildContext context) {
+    if (widget.legacyLayout) {
+      return Column(children: [
+        Expanded(
+          child: Stack(children: [
+            Positioned.fill(child: widget.video),
+            Positioned.fill(child: _toggleLayer()),
+          ]),
+        ),
+        if (widget.controlsVisible) widget.controls,
+      ]);
+    }
     final composer = widget.composer;
     final placement = widget.placement;
     final collapsed = placement == PlayRailPlacement.collapsed;
@@ -517,6 +534,10 @@ class _EmulatorPageState extends State<EmulatorPage>
         geometry != _observedGeometry &&
         (_pointers.isNotEmpty || _heldKeys.isNotEmpty)) {
       _cancelGuestInput();
+    }
+    if (model.targetId != _observedTargetId) {
+      // A switched-to game earns its own docked rail; it never inherits one.
+      _railPlacement = PlayRailPlacement.collapsed;
     }
     _observedSessionId = model.guestSessionId;
     _observedTargetId = model.targetId;
@@ -983,10 +1004,20 @@ class _EmulatorPageState extends State<EmulatorPage>
                 onDoubleTapToggle: widget.dashboardMode && previous != null
                     ? () => unawaited(_switchGuest(previous))
                     : null,
-                composer: _textComposerVisible ? _guestTextComposer() : null,
+                legacyLayout: !widget.dashboardMode,
+                composer: widget.dashboardMode && _textComposerVisible
+                    ? _guestTextComposer()
+                    : null,
+                // The fallback page keeps its own row, with the composer in
+                // its place, exactly as before the play rail.
                 controls: widget.dashboardMode
                     ? _playRail(placement)
-                    : ColoredBox(color: Colors.black, child: _guestControls()),
+                    : ColoredBox(
+                        color: Colors.black,
+                        child: _textComposerVisible
+                            ? _guestTextComposer()
+                            : _guestControls(),
+                      ),
               ),
               if (widget.dashboardMode)
                 Positioned(
@@ -1257,7 +1288,9 @@ class _EmulatorPageState extends State<EmulatorPage>
   /// The collapsed rail shows over the game until the next touch on the
   /// game. Only the overlay hides: the touch itself still goes to the guest.
   void _hideOverlayRail() {
-    if (_railPlacement != PlayRailPlacement.collapsed ||
+    // The fallback page's row sits below the game and stays until toggled.
+    if (!widget.dashboardMode ||
+        _railPlacement != PlayRailPlacement.collapsed ||
         !_guestControlsVisible ||
         _textComposerVisible) {
       return;

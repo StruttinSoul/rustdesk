@@ -86,64 +86,108 @@ void main() {
         PlayRailPlacement.collapsed);
   });
   test('small viewport changes near the threshold do not flip the rail', () {
-    // 9:16 guest, width 412: frame height 732.4; bottom needs 88 dp of spare height.
-    expect(
+    // 9:16 guest, width 412: frame height 732.4. A docked bottom rail needs
+    // 88 dp of spare height; docking from collapsed needs 88 + 16.
+    PlayRailPlacement at(double height, [PlayRailPlacement? previous]) =>
         playRailPlacement(
-            viewport: const Size(412, 821),
-            guestWidth: 1080,
-            guestHeight: 1920),
-        PlayRailPlacement.bottom);
-    expect(
-        playRailPlacement(
-            viewport: const Size(412, 810),
+            viewport: Size(412, height),
             guestWidth: 1080,
             guestHeight: 1920,
-            previous: PlayRailPlacement.bottom),
-        PlayRailPlacement.bottom);
-    expect(
-        playRailPlacement(
-            viewport: const Size(412, 810),
-            guestWidth: 1080,
-            guestHeight: 1920),
-        isNot(PlayRailPlacement.bottom));
-    expect(
-        playRailPlacement(
-            viewport: const Size(412, 800),
-            guestWidth: 1080,
-            guestHeight: 1920,
-            previous: PlayRailPlacement.bottom),
-        isNot(PlayRailPlacement.bottom));
+            previous: previous);
+    expect(at(837), PlayRailPlacement.bottom, reason: '104.6 dp spare docks');
+    expect(at(821), PlayRailPlacement.collapsed,
+        reason: '88.6 dp fits but is inside the docking margin');
+    expect(at(821, PlayRailPlacement.bottom), PlayRailPlacement.bottom,
+        reason: 'A docked rail stays while it still fits');
+    // Spec 3.3 over the plan's pinned value: a docked rail never shrinks the
+    // game, so 77.6 dp spare collapses even when it was docked.
+    expect(at(810, PlayRailPlacement.bottom), isNot(PlayRailPlacement.bottom));
+    expect(at(810), isNot(PlayRailPlacement.bottom));
+    expect(at(800, PlayRailPlacement.bottom), isNot(PlayRailPlacement.bottom));
   });
-  test('every 1 to 15 dp loss (system bars, insets) keeps a docked rail', () {
+  test('1 to 15 dp jitter (system bars, insets) never flips the rail', () {
     for (var d = 1; d <= 15; d++) {
-      // Bottom: 821 dp tall leaves 88.6 dp under a 9:16 game.
+      // Docked at 104.6 dp spare: losing up to 15 dp still holds 88.
       expect(
           playRailPlacement(
-              viewport: Size(412, 821.0 - d),
+              viewport: Size(412, 837.0 - d),
               guestWidth: 1080,
               guestHeight: 1920,
               previous: PlayRailPlacement.bottom),
           PlayRailPlacement.bottom,
-          reason: 'bottom, $d dp');
-      // Side: 805 dp wide leaves 72.6 dp beside a 16:9 game.
+          reason: 'bottom loses $d dp');
+      // Side: 821 dp wide leaves 88.6 dp beside a 16:9 game (docks); losing
+      // up to 15 dp still holds the 72 dp rail.
       expect(
           playRailPlacement(
-              viewport: Size(805.0 - d, 412),
+              viewport: Size(821.0 - d, 412),
               guestWidth: 1920,
               guestHeight: 1080,
               previous: PlayRailPlacement.side),
           PlayRailPlacement.side,
-          reason: 'side, $d dp');
-      // And regaining the same few dp does not re-dock a collapsed rail
-      // until the full size fits again.
+          reason: 'side loses $d dp');
+      // Collapsed just at the docked minimum: gaining up to 15 dp does not
+      // dock it.
       expect(
           playRailPlacement(
-              viewport: Size(412, 821.0 - d),
+              viewport: Size(412, 821.0 + d),
               guestWidth: 1080,
               guestHeight: 1920,
               previous: PlayRailPlacement.collapsed),
           PlayRailPlacement.collapsed,
-          reason: 're-dock, $d dp');
+          reason: 'bottom gains $d dp');
+      expect(
+          playRailPlacement(
+              viewport: Size(805.0 + d, 412),
+              guestWidth: 1920,
+              guestHeight: 1080,
+              previous: PlayRailPlacement.collapsed),
+          PlayRailPlacement.collapsed,
+          reason: 'side gains $d dp');
+    }
+  });
+  test('a docked rail never leaves the video smaller than the game', () {
+    for (final previous in [
+      null,
+      PlayRailPlacement.bottom,
+      PlayRailPlacement.side,
+      PlayRailPlacement.collapsed,
+    ]) {
+      for (var size = 600.0; size <= 1100; size += 1) {
+        for (final (viewport, gw, gh) in [
+          (Size(412, size), 1080, 1920),
+          (Size(size, 412), 1920, 1080),
+          (Size(size, 412), 1080, 1920),
+          (Size(412, size), 1920, 1080),
+        ]) {
+          final placement = playRailPlacement(
+              viewport: viewport,
+              guestWidth: gw,
+              guestHeight: gh,
+              previous: previous);
+          final game = containedGuestFrame(
+              viewportWidth: viewport.width,
+              viewportHeight: viewport.height,
+              guestWidth: gw,
+              guestHeight: gh)!;
+          final video = switch (placement) {
+            PlayRailPlacement.bottom =>
+              Size(viewport.width, viewport.height - kPlayRailBottomHeight),
+            PlayRailPlacement.side =>
+              Size(viewport.width - kPlayRailSideWidth, viewport.height),
+            PlayRailPlacement.collapsed => viewport,
+          };
+          final shown = containedGuestFrame(
+              viewportWidth: video.width,
+              viewportHeight: video.height,
+              guestWidth: gw,
+              guestHeight: gh)!;
+          expect(shown.width, closeTo(game.width, 1e-6),
+              reason: '$viewport $gw×$gh after $previous: $placement');
+          expect(shown.height, closeTo(game.height, 1e-6),
+              reason: '$viewport $gw×$gh after $previous: $placement');
+        }
+      }
     }
   });
   test('a missing guest size collapses the rail', () {
