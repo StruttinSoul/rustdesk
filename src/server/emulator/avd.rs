@@ -189,8 +189,9 @@ pub(crate) trait AvdSystem: Send + Sync {
     fn kill(&self, serial: &str) -> ResultType<()>;
     /// Powers Android off, which ends the emulator too.
     fn power_off(&self, serial: &str) -> ResultType<()>;
-    /// Reports when `name`'s emulator exits without a stop from Aperture.
-    fn watch_exit(&self, _name: &str) {}
+    /// Reports when `name`'s emulator exits without a stop from Aperture;
+    /// `launched` when Aperture has just started it.
+    fn watch_exit(&self, _name: &str, _launched: bool) {}
 }
 
 /// The real PC: sysinfo processes, the default ADB server, Windows memory.
@@ -257,8 +258,8 @@ impl AvdSystem for HostSystem {
         adb_command(&adb, serial, &["shell", "reboot", "-p"]).map(|_| ())
     }
 
-    fn watch_exit(&self, name: &str) {
-        super::avd_exit_watch::watch(name)
+    fn watch_exit(&self, name: &str, launched: bool) {
+        super::avd_exit_watch::watch(name, launched)
     }
 }
 
@@ -512,7 +513,7 @@ impl AvdProvider {
                     .map(|index| guests.remove(index));
                 let is_running = guest.is_some() || running.contains(&entry.name);
                 if is_running {
-                    self.system.watch_exit(&entry.name);
+                    self.system.watch_exit(&entry.name, false);
                 }
                 Instance {
                     running: is_running,
@@ -691,7 +692,7 @@ impl EmulatorProvider for AvdProvider {
             bail!("Not enough free memory on atlas to start {name}")
         }
         self.system.launch(name)?;
-        self.system.watch_exit(name);
+        self.system.watch_exit(name, true);
         starts.push((Instant::now(), name.to_owned(), ram_mb));
         log::info!("Started Android Emulator {name} ({ram_mb} MB)");
         Ok(())

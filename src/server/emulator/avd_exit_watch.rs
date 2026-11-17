@@ -16,7 +16,6 @@ const STOP_EXPECTED_FOR: Duration = Duration::from_secs(60);
 /// How long after a launch the emulator process may take to appear.
 const FIND_WAIT: Duration = Duration::from_secs(90);
 const FIND_POLL: Duration = Duration::from_secs(1);
-const LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]
 struct ExitBook {
@@ -68,9 +67,11 @@ pub(super) fn expect_stop(name: &str) {
     book().expect_stop(name, Instant::now());
 }
 
-/// Watches the emulator process of `name` (running, or launched moments ago)
-/// until it exits. Cheap when `name` is already watched.
-pub(super) fn watch(name: &str) {
+/// Watches the emulator process of `name` until it exits: one launched moments
+/// ago is looked for during 90 s, one already running (seen by an inventory
+/// scan) only once. Cheap when `name` is already watched.
+pub(super) fn watch(name: &str, launched: bool) {
+    let find_wait = if launched { FIND_WAIT } else { Duration::ZERO };
     if !book().begin(name) {
         return;
     }
@@ -78,7 +79,7 @@ pub(super) fn watch(name: &str) {
     let spawned = thread::Builder::new()
         .name("aperture-avd-exit".to_owned())
         .spawn(move || {
-            let exit_code = match find_and_wait(&owned) {
+            let exit_code = match find_and_wait(&owned, find_wait) {
                 Ok(Some(code)) => code,
                 Ok(None) => {
                     book().end(&owned);
@@ -90,8 +91,9 @@ pub(super) fn watch(name: &str) {
                     return;
                 }
             };
+            // One line per emulator process: the book ends this watch here.
             if let Some(message) = book().finish(&owned, exit_code, Instant::now()) {
-                hbb_common::throttled_log!(LOG_INTERVAL, warn, "{message}");
+                log::warn!("{message}");
             }
         });
     if let Err(error) = spawned {
@@ -100,9 +102,10 @@ pub(super) fn watch(name: &str) {
     }
 }
 
-/// The exit code of `name`'s emulator once it exits; None if it never ran.
-fn find_and_wait(name: &str) -> ResultType<Option<u32>> {
-    let deadline = Instant::now() + FIND_WAIT;
+/// The exit code of `name`'s emulator once it exits; None if it did not
+/// appear within `find_wait`.
+fn find_and_wait(name: &str, find_wait: Duration) -> ResultType<Option<u32>> {
+    let deadline = Instant::now() + find_wait;
     loop {
         if let Some(pid) = emulator_pid(name) {
             return wait_exit_code(pid).map(Some);
@@ -210,10 +213,17 @@ mod tests {
             .args(["/D", "/C", "ping -n 3 127.0.0.1 >nul & exit 5", "-avd", &name])
             .spawn()
             .unwrap();
-        assert_eq!(find_and_wait(&name).unwrap(), Some(5));
+        assert_eq!(find_and_wait(&name, FIND_WAIT).unwrap(), Some(5));
         child.wait().unwrap();
         assert_eq!(emulator_pid(&name), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_running_emulator_that_is_not_found_is_not_polled_for() {
+        let started = Instant::now();
+        assert_eq!(find_and_wait("Exit_Watch_Absent", Duration::ZERO).unwrap(), None);
+        assert!(started.elapsed() < FIND_POLL, "{:?}", started.elapsed());
     }
 
     #[test]
