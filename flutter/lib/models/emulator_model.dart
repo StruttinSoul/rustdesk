@@ -244,6 +244,11 @@ class EmulatorModel extends ChangeNotifier {
   int width = 0;
   int height = 0;
   String error = '';
+
+  /// Why the emulator list is missing or incomplete (timeout, provider errors,
+  /// a failed list send). Kept apart from [error] so a start or stream failure
+  /// never shows as a list problem, and the reverse.
+  String listError = '';
   String targetId = '';
   String startupPhase = '';
   bool connecting = false;
@@ -565,6 +570,7 @@ class EmulatorModel extends ChangeNotifier {
       _inventoryCurrent = false;
       _clearShutdownState();
       error = failure.toString();
+      if (payload['action'] == 'list') listError = failure.toString();
       connecting = false;
       loading = false;
       notifyListeners();
@@ -606,6 +612,7 @@ class EmulatorModel extends ChangeNotifier {
   Future<void> refresh() {
     loading = true;
     error = '';
+    listError = '';
     _inventoryRequest = ++_sequence;
     _inventoryRequestedAt = DateTime.now();
     _inventoryTimeout?.cancel();
@@ -614,6 +621,7 @@ class EmulatorModel extends ChangeNotifier {
       _inventoryCurrent = false;
       _clearShutdownState();
       error = 'The PC did not return its emulator list. Refresh to try again.';
+      listError = error;
       notifyListeners();
     });
     notifyListeners();
@@ -1903,6 +1911,7 @@ class EmulatorModel extends ChangeNotifier {
       listRequestedAt = _inventoryRequestedAt;
       loading = false;
       error = (response['provider_errors'] as List? ?? []).join('\n');
+      listError = error;
       if (!_capabilities.allows('host.emulator_shutdown.v1')) _clearShutdownState();
       _shutdownPending.removeWhere((id) => !instances.any((item) => item.id == id) ||
           instances.any((item) => item.id == id && ['stopped', 'stopping', 'shutdown_failed'].contains(item.state)));

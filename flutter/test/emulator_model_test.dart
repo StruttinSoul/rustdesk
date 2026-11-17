@@ -188,6 +188,58 @@ void main() {
     model.dispose();
   });
 
+  testWidgets('list error is kept apart from start and stream errors',
+      (tester) async {
+    final listing = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, __) async {});
+    expect(listing.listError, isEmpty);
+    await listing.refresh();
+    await tester.pump(const Duration(seconds: 25));
+    expect(listing.listError,
+        'The PC did not return its emulator list. Refresh to try again.');
+    listing.dispose();
+
+    final starting = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, __) async {});
+    await starting.connect('avd:Main');
+    await tester.pump(const Duration(seconds: 120));
+    expect(starting.error, 'Took too long to start. Try again, or go back.');
+    expect(starting.listError, '');
+    starting.dispose();
+  });
+
+  test('provider errors are list errors and clear on the next refresh',
+      () async {
+    final sent = <Map<String, dynamic>>[];
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, value) async => sent.add(jsonDecode(value)));
+    await model.refresh();
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'inventory',
+      'request_id': sent.last['request_id'],
+      'instances': const [],
+      'provider_errors': const ['BlueStacks is not installed'],
+      'capabilities': const [],
+    });
+    expect(model.listError, 'BlueStacks is not installed');
+    await model.refresh();
+    expect(model.listError, '');
+    model.dispose();
+  });
+
+  test('a failed list send is a list error', () async {
+    final model = EmulatorModel(Uuid().v4obj(), commandSender: (_, value) async {
+      if ((jsonDecode(value) as Map)['action'] == 'list') {
+        throw StateError('offline');
+      }
+    });
+    await model.refresh();
+    await Future<void>.delayed(Duration.zero);
+    expect(model.listError, contains('offline'));
+    model.dispose();
+  });
+
   test('queued guest text is dropped if its guest session changes', () async {
     final sent = <Map<String, dynamic>>[];
     final navigationStarted = Completer<void>();

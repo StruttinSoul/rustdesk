@@ -179,13 +179,12 @@ void main() {
     expect(find.text('PC'), findsOneWidget);
   });
 
-  testWidgets('Studio screen rows keep boot, open and game actions accessible',
+  testWidgets('Studio emulator rows keep boot, open and game actions accessible',
       (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(320, 700);
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    var monitorOpens = 0;
     var emulatorStarts = 0;
     var gameLaunches = 0;
     const stopped = EmulatorUiState(EmulatorUiWord.stopped, 'Stopped');
@@ -198,12 +197,6 @@ void main() {
             data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
             child: Builder(
               builder: (context) => Column(children: [
-                TargetScreenRow(
-                  name: 'Monitor 1',
-                  type: 'Windows',
-                  live: true,
-                  onOpen: () => monitorOpens++,
-                ),
                 EmulatorRow(
                   data: const EmulatorTileData(
                     id: 'bs3',
@@ -233,16 +226,13 @@ void main() {
       ));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      expect(find.text('Monitor 1'), findsOneWidget);
       expect(find.text('BlueStacks App Player 3'), findsOneWidget);
-      await tester.tap(find.byTooltip('Open'));
       await tester.tap(find.byTooltip('Start'));
       await tester.tap(find.byTooltip('More BlueStacks App Player 3 actions'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Open and launch game'));
       await tester.pumpAndSettle();
     }
-    expect(monitorOpens, 2);
     expect(emulatorStarts, 2);
     expect(gameLaunches, 2);
   });
@@ -407,9 +397,10 @@ void main() {
       home: Scaffold(
         body: TargetPreviewCard(
           name: 'Monitor 1',
-          type: 'Windows',
+          detail: '2560 × 1440',
           live: true,
           onOpen: () => opens++,
+          tr: fakeTr,
         ),
       ),
     ));
@@ -431,12 +422,12 @@ void main() {
       tester.view.physicalSize = size;
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
-          body: TargetSwitcherCards(cards: [
+          body: TargetSwitcherGrid(cards: [
             TargetPreviewCard(
               name: 'Monitor 1',
-              type: 'Windows',
               live: true,
               onOpen: () {},
+              tr: fakeTr,
             ),
             EmulatorTile(
               data: const EmulatorTileData(
@@ -574,49 +565,5 @@ void main() {
       await tester.tap(find.text('Reconnect'));
     }
     expect(reconnects, 2);
-  });
-
-  testWidgets(
-      'preview failure remains usable in a compact chooser at large font size',
-      (tester) async {
-    await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-            body: MediaQuery(
-      data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
-      child: const Align(
-          alignment: Alignment.topLeft,
-          child: SizedBox(
-            width: 230,
-            height: 145,
-            child: TargetPreviewCard(
-                name: 'Monitor 1',
-                type: 'Windows',
-                live: false,
-                error:
-                    'Enable ADB debugging in this emulator instance before connecting'),
-          )),
-    ))));
-    expect(tester.takeException(), isNull);
-    expect(find.text('Retry preview'), findsOneWidget);
-  });
-
-  testWidgets('monitor row offers Retry preview only while not live',
-      (tester) async {
-    var retries = 0;
-    Widget row({required bool live}) => MaterialApp(
-        home: Scaffold(
-            body: TargetScreenRow(
-                name: 'Monitor 1',
-                type: 'Windows',
-                live: live,
-                onRetry: () => retries++)));
-    await tester.pumpWidget(row(live: true));
-    expect(find.byTooltip('More Monitor 1 actions'), findsNothing);
-    await tester.pumpWidget(row(live: false));
-    await tester.tap(find.byTooltip('More Monitor 1 actions'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Retry preview'));
-    await tester.pumpAndSettle();
-    expect(retries, 1);
   });
 }

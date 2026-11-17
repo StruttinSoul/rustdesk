@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
@@ -34,6 +35,8 @@ import '../widgets/play_rail.dart';
 import '../widgets/pc_tab.dart';
 import '../widgets/play_tab.dart';
 import '../widgets/privacy_controls_sheet.dart';
+import '../widgets/screens_tab.dart';
+export '../widgets/screens_tab.dart' show TargetPreviewCard, TargetSwitcherGrid;
 import '../widgets/session_quality_panel.dart';
 import '../widgets/trust_phone_sheet.dart';
 import '../widgets/window_picker_sheet.dart';
@@ -46,8 +49,6 @@ enum _ConnectedPcSection {
   files,
   powershell,
 }
-
-enum _ScreenFilter { all, windows, android }
 
 class TargetDashboardPage extends StatefulWidget {
   const TargetDashboardPage({
@@ -64,6 +65,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     with WidgetsBindingObserver {
   final _scroll = ScrollController();
   final _playScroll = ScrollController();
+  final _chooserScroll = ScrollController();
   final _monitorFocus = FocusNode();
 
   /// Height of one Play grid row (tile + spacing) from the last layout.
@@ -138,12 +140,13 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   int _windowFocusRevision = 0;
   bool? _landscape;
   String _subscription = '';
-  double _viewport = 1;
-  double _extent = 1;
-  int _columns = 1;
-  int _chooserStart = 0;
+  /// Distance between the tops of the Screens cards (card plus spacing), from
+  /// the last layout, for choosing which monitors get a preview.
+  List<double> _screensExtents = const [];
+
+  /// Size of the view switcher's grid from its last layout.
+  Size _chooserSize = Size.zero;
   _ConnectedPcSection _section = _ConnectedPcSection.devices;
-  _ScreenFilter _screenFilter = _ScreenFilter.all;
   bool _filesOpened = false;
   bool _systemOpened = false;
   bool _powershellOpened = false;
@@ -231,6 +234,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     _reconnectGeneration = widget.ffi.ffiModel.reconnectGeneration;
     _scroll.addListener(_scrolled);
     _playScroll.addListener(_scrolled);
+    _chooserScroll.addListener(_scrolled);
     widget.ffi.aperturePairResult.addListener(_pairResultChanged);
     unawaited(_refreshPairingState());
     unawaited(model.refresh());
@@ -631,7 +635,25 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             _section == _ConnectedPcSection.screens);
     if (!_background && active?.display != null) displays.add(active!.display!);
     if (!_background && previewsEnabled && (active == null || _chooser)) {
-      if (!_chooser && _section == _ConnectedPcSection.devices) {
+      if (_chooser) {
+        // The view switcher: the first four monitors or running emulators
+        // from the grid's first visible card. Stopped instances consume no
+        // stream, so they must not take up preview slots.
+        final first = switcherGridFirstVisibleIndex(
+            _chooserSize, _chooserScroll.hasClients ? _chooserScroll.offset : 0);
+        for (final target in all.skip(first)) {
+          if (guestIds.length + displays.length >= 4) break;
+          if (target.display != null) {
+            if (!displays.contains(target.display)) {
+              displays.add(target.display!);
+            }
+          } else if (target.id != active?.id &&
+              target.instance!.state != 'stopped' &&
+              !model.isEmulatorShuttingDown(target.id)) {
+            guestIds.add(target.id);
+          }
+        }
+      } else if (_section == _ConnectedPcSection.devices) {
         // Play: all four slots go to running emulators nearest the top of
         // the viewport; no monitor preview on this tab.
         guestIds.addAll(playTabPreviewIds(
@@ -644,39 +666,13 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           shuttingDown: model.isEmulatorShuttingDown,
           activeId: active?.id,
         ));
-      } else {
-        final screenTargets = _section == _ConnectedPcSection.screens
-            ? all.where((target) => switch (_screenFilter) {
-                  _ScreenFilter.all => true,
-                  _ScreenFilter.windows => target.display != null,
-                  _ScreenFilter.android => target.instance != null,
-                }).toList(growable: false)
-            : all;
-        final first = _chooser
-            ? _chooserStart
-            : math.min(
-                math.max(0, screenTargets.length - 4),
-                ((math.max(0, _scroll.hasClients ? _scroll.offset - 176 : 0) /
-                            _extent)
-                        .floor()) *
-                    _columns,
-              );
-        final count =
-            _chooser ? 4 : ((_viewport / _extent).ceil() + 1) * _columns;
-        // Inspect the visible rows even if some guests are stopped; stopped
-        // instances consume no stream, so they must not take up preview slots.
-        for (final target in screenTargets.skip(first).take(count)) {
-          if (guestIds.length + displays.length >= 4) break;
-          if (target.display != null) {
-            if (!displays.contains(target.display)) {
-              displays.add(target.display!);
-            }
-          } else if (target.id != active?.id &&
-              target.instance!.state != 'stopped' &&
-              !model.isEmulatorShuttingDown(target.id)) {
-            guestIds.add(target.id);
-          }
-        }
+      } else if (_section == _ConnectedPcSection.screens) {
+        // Screens shows monitors only; emulators never take a slot here.
+        displays.addAll(screensPreviewDisplays(
+          monitorCount: widget.ffi.ffiModel.pi.displays.length,
+          firstVisibleIndex: screensTabFirstVisibleIndex(
+              _screensExtents, _scroll.hasClients ? _scroll.offset : 0),
+        ));
       }
     }
     final signature = '${guestIds.join(',')}|${displays.join(',')}';
@@ -1251,7 +1247,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     await _releaseMonitorInput();
     if (!mounted) return;
     _chooser = true;
-    _chooserStart = 0;
+    _chooserSize = Size.zero;
     _subscription = '';
     _subscribe();
     final selected = await showModalBottomSheet<_Target>(
@@ -1262,36 +1258,34 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         heightFactor: 0.85,
         child: Column(children: [
           ListTile(
-            title: const Text('Switch view'),
+            title: Text(translate('Switch view')),
             trailing: IconButton(
-                tooltip: 'Dashboard',
+                tooltip: translate('Exit'),
                 icon: const Icon(Icons.grid_view_outlined),
                 onPressed: () =>
                     Navigator.of(sheetContext).pop(const _Target.dashboard())),
           ),
           Expanded(
-              child: PageView.builder(
-            itemCount: (targets.length / 2).ceil(),
-            onPageChanged: (page) {
-              _chooserStart = page * 2;
-              _subscription = '';
-              _subscribe();
-            },
-            itemBuilder: (_, page) => TargetSwitcherCards(
+              child: LayoutBuilder(builder: (_, box) {
+            if (box.biggest != _chooserSize) {
+              _chooserSize = box.biggest;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _subscription = '';
+                _subscribe();
+              });
+            }
+            return TargetSwitcherGrid(
+              controller: _chooserScroll,
               cards: [
-                for (final target in targets.skip(page * 2).take(2))
+                for (final target in targets)
                   target.instance == null
                       ? _monitorCard(
                           target, () => Navigator.of(sheetContext).pop(target))
                       : _guestSwitcherTile(
                           target, () => Navigator.of(sheetContext).pop(target))
               ],
-            ),
-          )),
-          if (targets.length > 4)
-            const Padding(
-                padding: EdgeInsets.all(12),
-                child: Text('Swipe for more views')),
+            );
+          })),
         ]),
       ),
     );
@@ -1323,6 +1317,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     _healthTimer?.cancel();
     _scroll.dispose();
     _playScroll.dispose();
+    _chooserScroll.dispose();
     _monitorFocus.dispose();
     model.framePacer.focused = true;
     unawaited(model.setMonitorPreviewMode(false));
@@ -1393,7 +1388,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final connToken = bind.sessionGetConnToken(sessionId: widget.ffi.sessionId);
     final pages = <Widget>[
       _homeBody(hostName),
-      _devicesBody(),
+      _screensBody(hostName),
       PcTabBody(
         onSystem: hostManagementAvailable
             ? () => _openToolsSection(_ConnectedPcSection.system)
@@ -1526,17 +1521,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               now: DateTime.now(),
               onPressed: () => unawaited(_showQualityConnection()),
             ),
-            // Play refreshes by pulling the grid down.
-            if (activeSection == _ConnectedPcSection.screens)
-              IconButton(
-                  tooltip: 'Refresh views',
-                  icon: const Icon(Icons.refresh),
-                  onPressed: model.loading
-                      ? null
-                      : () {
-                          _subscription = '';
-                          unawaited(model.refresh());
-                        }),
+            // Play refreshes by pulling the grid down; Screens has nothing to
+            // refresh (monitors come with the connection).
             if (activeSection == _ConnectedPcSection.system)
               IconButton(
                   tooltip: 'Refresh system status',
@@ -1659,15 +1645,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         animation: Listenable.merge([widget.ffi.imageModel, model, _labels]),
         builder: (context, _) {
           final tiles = _playTiles();
-          // A stream failure belongs on its tile, not on the list card.
-          final listError = model.guestFailures.containsValue(model.error)
-              ? ''
-              : model.error;
           return PlayTabBody(
             tiles: tiles,
             hostName: hostName,
             firstLoad: !_listSeen && tiles.isEmpty,
-            listError: listError,
+            listError: model.listError,
             monitorCount: monitorCount,
             scrollController: _playScroll,
             onRefresh: _pullToRefresh,
@@ -1686,215 +1668,49 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     });
   }
 
-  Widget _devicesBody() {
-    return Builder(builder: (context) {
-      final palette = MirpgStudioPalette.of(context);
-      final desktopTargets = targets
-        .where((target) => target.display != null)
-        .toList(growable: false);
-    final androidTargets = targets
-        .where((target) => target.instance != null)
-        .toList(growable: false);
-      return Column(children: [
-      Expanded(child: LayoutBuilder(builder: (context, box) {
-        // Compact V4 screen rows make both monitors and multiple emulators
-        // accessible without scrolling through full-size video cards.
-        const columns = 1;
-        const extent = 100.0;
-        if (_viewport != box.maxHeight ||
-            _extent != extent ||
-            _columns != columns) {
-          _viewport = box.maxHeight;
-          _extent = extent;
-          _columns = columns;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            _subscription = '';
-            _subscribe();
-          });
-        }
-        final slivers = <Widget>[
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
-              child: MirpgSectionHeader(
-                title: 'All screens',
-                subtitle: '${targets.length} available targets · Windows and Android',
-                trailing: model.loading
-                    ? const SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : MirpgStatusChip(
-                        label: switch (widget.ffi.ffiModel.direct) {
-                          true => 'Direct',
-                          false => 'Relay',
-                          null => 'Connecting',
-                        },
-                        tone: widget.ffi.ffiModel.direct == true
-                            ? MirpgStatusTone.good
-                            : MirpgStatusTone.neutral,
-                      ),
-              ),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-              child: MirpgSurface(
-                padding: const EdgeInsets.all(4),
-                child: Row(children: [
-                  for (final filter in _ScreenFilter.values)
-                    Expanded(
-                      child: Semantics(
-                        button: true,
-                        selected: _screenFilter == filter,
-                        label: switch (filter) {
-                          _ScreenFilter.all => 'Show all screens',
-                          _ScreenFilter.windows => 'Show Windows screens',
-                          _ScreenFilter.android => 'Show Android screens',
-                        },
-                        child: Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(12),
-                            onTap: () {
-                              if (_screenFilter == filter) return;
-                              setState(() => _screenFilter = filter);
-                              if (_scroll.hasClients) _scroll.jumpTo(0);
-                              _subscription = '';
-                              _subscribe();
-                            },
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 160),
-                              alignment: Alignment.center,
-                              constraints: const BoxConstraints(minHeight: 48),
-                              padding: const EdgeInsets.symmetric(horizontal: 4),
-                              decoration: BoxDecoration(
-                                color: _screenFilter == filter
-                                    ? palette.accent.withOpacity(0.14)
-                                    : Colors.transparent,
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                switch (filter) {
-                                  _ScreenFilter.all => 'All (${targets.length})',
-                                  _ScreenFilter.windows => 'Windows',
-                                  _ScreenFilter.android => 'Android',
-                                },
-                                textAlign: TextAlign.center,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                                      color: _screenFilter == filter
-                                          ? palette.accent
-                                          : palette.textSecondary,
-                                    ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ]),
-              ),
-            ),
-          ),
-          // The emulator list error is shown on Play only.
-        ];
+  /// Screens: one card per PC monitor, nothing else.
+  Widget _screensBody(String hostName) {
+    final displays = widget.ffi.ffiModel.pi.displays;
+    ScreensTabCard cardFor(int index) {
+      final display = displays[index];
+      return ScreensTabCard(
+        aspectRatio: display.width > 0 && display.height > 0
+            ? display.width / display.height
+            : 16 / 9,
+        child: _monitorCard(
+          _Target.monitor(index),
+          () => unawaited(_open(_Target.monitor(index))),
+          windows: () => unawaited(_monitorWindows(index)),
+        ),
+      );
+    }
 
-        void addTargetGroup(
-            String title, String? subtitle, List<_Target> group,
-            {Widget? trailing}) {
-          if (group.isEmpty && trailing == null) return;
-          slivers.add(SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-              child: MirpgSectionHeader(
-                  title: title, subtitle: subtitle, trailing: trailing),
-            ),
-          ));
-          slivers.add(SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            sliver: SliverList(
-              delegate: SliverChildBuilderDelegate((_, index) {
-                final target = group[index];
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: target.instance == null
-                      ? _monitorCard(target, () => unawaited(_open(target)),
-                          row: true)
-                      : _guestRow(target),
-                );
-              }, childCount: group.length),
-            ),
-          ));
-        }
-
-        if (_screenFilter != _ScreenFilter.android) {
-          addTargetGroup(
-            'Windows · ${desktopTargets.length}',
-            'Live PC monitors',
-            desktopTargets,
-          );
-        }
-        if (_screenFilter != _ScreenFilter.windows) {
-          addTargetGroup(
-            '${translate('Emulators')} · ${androidTargets.length}',
-            null,
-            androidTargets,
-            trailing: model.canManageAvds
-                ? TextButton.icon(
-                    onPressed: () => unawaited(_newAvd()),
-                    icon: const Icon(Icons.add, size: 18),
-                    label: const Text('New'),
-                  )
-                : null,
-          );
-        }
-
-        if (targets.isEmpty ||
-            (_screenFilter == _ScreenFilter.android && androidTargets.isEmpty) ||
-            (_screenFilter == _ScreenFilter.windows && desktopTargets.isEmpty)) {
-          slivers.add(SliverFillRemaining(
-            hasScrollBody: false,
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: MirpgSurface(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.devices_outlined,
-                          size: 36, color: palette.textSecondary),
-                      const SizedBox(height: 12),
-                      Text('No views available',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 4),
-                      Text(
-                        translate('Refresh after a PC screen or emulator becomes available.'),
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ));
-        }
-
-        return CustomScrollView(
-          controller: _scroll,
-          slivers: slivers,
-        );
-      })),
-      ]);
+    return LayoutBuilder(builder: (context, constraints) {
+      final cards = [for (var i = 0; i < displays.length; i++) cardFor(i)];
+      final cardWidth = math.max(
+          0.0, constraints.maxWidth - 2 * MirpgRemoteTheme.pageMargin);
+      final extents = [
+        for (final card in cards)
+          screensTabCardExtent(
+              cardWidth, card.aspectRatio, MediaQuery.textScalerOf(context))
+      ];
+      if (!listEquals(extents, _screensExtents)) {
+        _screensExtents = extents;
+        WidgetsBinding.instance.addPostFrameCallback((_) => _subscribe());
+      }
+      return ScreensTabBody(
+        cards: cards,
+        hostName: hostName,
+        scrollController: _scroll,
+        tr: translate,
+      );
     });
   }
 
-  /// A PC monitor as a preview card, or as a row on the Screens tab.
-  Widget _monitorCard(_Target target, VoidCallback onOpen, {bool row = false}) =>
+  /// A PC monitor as a preview card, on Screens (with [windows]) or in the
+  /// view switcher.
+  Widget _monitorCard(_Target target, VoidCallback onOpen,
+          {VoidCallback? windows}) =>
       AnimatedBuilder(
         animation: Listenable.merge([widget.ffi.imageModel, model]),
         builder: (_, __) {
@@ -1909,45 +1725,22 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               !frameAge.isNegative &&
               frameAge < const Duration(seconds: 8) &&
               _monitorPreviewFrameIsCurrent(display);
-          final openAction = model.connecting ? null : onOpen;
-          void retry() {
-            _subscription = '';
-            _subscribe();
-          }
-          if (row) {
-            return TargetScreenRow(
-              name: target.name,
-              type: 'Windows',
-              live: live,
-              image: image,
-              onOpen: openAction,
-              onRetry: retry,
-            );
-          }
+          final info = display < widget.ffi.ffiModel.pi.displays.length
+              ? widget.ffi.ffiModel.pi.displays[display]
+              : null;
           return TargetPreviewCard(
             name: target.name,
-            type: 'Windows',
+            detail: info == null || info.width <= 0 || info.height <= 0
+                ? ''
+                : '${info.width} × ${info.height}',
             live: live,
             image: image,
-            onOpen: openAction,
-            onRetry: retry,
-          );
-        },
-      );
-
-  /// An emulator as a list row on the Screens tab.
-  Widget _guestRow(_Target target) => AnimatedBuilder(
-        animation: Listenable.merge([widget.ffi.imageModel, model, _labels]),
-        builder: (_, __) {
-          final data = _guestTile(target);
-          return MirpgSurface(
-            padding: EdgeInsets.zero,
-            child: EmulatorRow(
-              data: data,
-              onOpen:
-                  data.state.canOpen ? () => _openGuest(target.id) : null,
-              onMore: () => _showGuestActions(target.id),
-            ),
+            onOpen: model.connecting ? null : onOpen,
+            onRetry: () {
+              _subscription = '';
+              _subscribe();
+            },
+            onWindows: windows,
           );
         },
       );
@@ -2503,350 +2296,6 @@ class _Target {
   final int? display;
   String get id => instance?.id ?? (display == null ? '' : 'monitor:$display');
   String get name => instance?.name ?? 'Monitor ${display! + 1}';
-}
-
-/// Shows two fully visible previews per switcher page, including their actions.
-/// A landscape grid of four cards clipped the bottom of each card on phones.
-class TargetSwitcherCards extends StatelessWidget {
-  const TargetSwitcherCards({super.key, required this.cards});
-
-  final List<Widget> cards;
-
-  @override
-  Widget build(BuildContext context) => LayoutBuilder(
-        builder: (_, constraints) {
-          final horizontal = constraints.maxWidth > constraints.maxHeight;
-          return Padding(
-            padding: const EdgeInsets.all(12),
-            child: Flex(
-              direction: horizontal ? Axis.horizontal : Axis.vertical,
-              children: [
-                for (var i = 0; i < cards.length; i++)
-                  Expanded(
-                    child: Padding(
-                      padding: EdgeInsets.only(
-                        right: horizontal && i == 0 && cards.length > 1 ? 6 : 0,
-                        left: horizontal && i > 0 ? 6 : 0,
-                        bottom:
-                            !horizontal && i == 0 && cards.length > 1 ? 6 : 0,
-                        top: !horizontal && i > 0 ? 6 : 0,
-                      ),
-                      child: cards[i],
-                    ),
-                  ),
-              ],
-            ),
-          );
-        },
-      );
-}
-
-/// A dense, accessible row for a PC monitor on the Screens tab. Emulators use
-/// [EmulatorRow] instead.
-class TargetScreenRow extends StatelessWidget {
-  const TargetScreenRow({
-    super.key,
-    required this.name,
-    required this.type,
-    required this.live,
-    this.image,
-    this.error = '',
-    this.onOpen,
-    this.onRetry,
-  });
-
-  final String name;
-  final String type;
-  final bool live;
-  final ui.Image? image;
-  final String error;
-  final VoidCallback? onOpen;
-
-  /// Offered from the row's menu while the preview is not live.
-  final VoidCallback? onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = MirpgStudioPalette.of(context);
-    final failure = error.isNotEmpty;
-    final status = live
-        ? 'Live'
-        : failure
-            ? 'Needs attention'
-            : 'Waiting for preview';
-    final statusColor = failure
-        ? palette.error
-        : live
-            ? palette.good
-            : palette.textSecondary;
-    return MirpgSurface(
-      padding: EdgeInsets.zero,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(MirpgRemoteTheme.surfaceRadius),
-        onTap: onOpen,
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: SizedBox(
-                  width: 76,
-                  height: 62,
-                  child: ColoredBox(
-                    color: image == null ? palette.raised : Colors.black,
-                    child: image != null
-                        ? RawImage(image: image, fit: BoxFit.contain)
-                        : Icon(
-                            Icons.desktop_windows_outlined,
-                            color: palette.accent,
-                            size: 28,
-                          ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleSmall),
-                    const SizedBox(height: 2),
-                    Text(type,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall),
-                    const SizedBox(height: 2),
-                    Text(status,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: statusColor, fontWeight: FontWeight.w600)),
-                  ],
-                ),
-              ),
-              if (!live && onRetry != null)
-                PopupMenuButton<String>(
-                  tooltip: 'More $name actions',
-                  icon: const Icon(Icons.more_vert_rounded),
-                  onSelected: (_) => onRetry?.call(),
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'retry', child: Text('Retry preview')),
-                  ],
-                ),
-              IconButton(
-                tooltip: 'Open',
-                onPressed: onOpen,
-                icon: const Icon(Icons.arrow_forward_rounded),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// A PC monitor as a preview card. Emulators use [EmulatorTile] instead.
-class TargetPreviewCard extends StatelessWidget {
-  const TargetPreviewCard(
-      {super.key,
-      required this.name,
-      required this.type,
-      required this.live,
-      this.image,
-      this.error = '',
-      this.onOpen,
-      this.onRetry});
-  final String name;
-  final String type;
-  final bool live;
-  final ui.Image? image;
-  final String error;
-  final VoidCallback? onOpen;
-  final VoidCallback? onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final stateLabel = live
-        ? 'Live'
-        : error.isNotEmpty
-            ? 'Attention'
-            : 'Connecting';
-    final stateTone = live
-        ? MirpgStatusTone.good
-        : error.isNotEmpty
-            ? MirpgStatusTone.error
-            : MirpgStatusTone.warning;
-    final videoOverlayPalette = MirpgStudioPalette.dark;
-
-    return Card(
-      margin: EdgeInsets.zero,
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onOpen,
-        child: Column(
-          children: [
-            Expanded(
-              child: ColoredBox(
-                color: Colors.black,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (image != null)
-                      RawImage(
-                        image: image,
-                        fit: BoxFit.contain,
-                        filterQuality: FilterQuality.low,
-                      ),
-                    if (image == null && error.isEmpty)
-                      const Center(
-                        child: Icon(Icons.live_tv_outlined,
-                            color: Color(0xFF69757A), size: 38),
-                      )
-                    else if (error.isNotEmpty)
-                      Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: SingleChildScrollView(
-                            child: MirpgSurface(
-                              padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-                              color: videoOverlayPalette.background.withOpacity(0.94),
-                              borderColor: videoOverlayPalette.error.withOpacity(0.45),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    error,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    textAlign: TextAlign.center,
-                                    style:
-                                        Theme.of(context).textTheme.bodySmall?.copyWith(
-                                            color: videoOverlayPalette.textPrimary),
-                                  ),
-                                  TextButton(
-                                    onPressed: onRetry,
-                                    child: const Text('Retry preview'),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    Positioned(
-                      left: 10,
-                      right: 10,
-                      top: 10,
-                      child: LayoutBuilder(builder: (context, constraints) {
-                        final showType = constraints.maxWidth >=
-                            MediaQuery.textScalerOf(context).scale(260);
-                        return Row(
-                          children: [
-                            if (showType)
-                              Flexible(
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: MirpgStatusChip(
-                                    label: type,
-                                    onDarkSurface: true,
-                                    icon: Icons.desktop_windows_outlined,
-                                  ),
-                                ),
-                              ),
-                            if (showType) const SizedBox(width: 8),
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.centerRight,
-                                child: MirpgStatusChip(
-                                  label: stateLabel,
-                                  onDarkSurface: true,
-                                  icon: live ? Icons.circle : null,
-                                  tone: stateTone,
-                                ),
-                              ),
-                            ),
-                          ],
-                        );
-                      }),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
-              child: LayoutBuilder(builder: (context, constraints) {
-                final narrow = constraints.maxWidth < 192;
-                final compact = constraints.maxWidth <
-                    MediaQuery.textScalerOf(context).scale(280);
-                final caption = live ? 'Live' : 'Waiting for preview';
-                if (narrow) {
-                  final palette = MirpgStudioPalette.of(context);
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleSmall),
-                      Text(caption,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                              color: live
-                                  ? palette.good
-                                  : palette.textSecondary)),
-                    ],
-                  );
-                }
-                return Row(children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          caption,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (compact)
-                    IconButton(
-                      onPressed: onOpen,
-                      icon: const Icon(Icons.open_in_full_rounded),
-                      tooltip: 'Open',
-                    )
-                  else
-                    TextButton.icon(
-                      onPressed: onOpen,
-                      icon: const Icon(Icons.open_in_full_rounded),
-                      label: const Text('Open'),
-                    ),
-                ]);
-              }),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name,

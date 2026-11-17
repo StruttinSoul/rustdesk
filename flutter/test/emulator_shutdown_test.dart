@@ -99,7 +99,7 @@ void main() {
                 width: 172,
                 height: 218,
                 child: TargetPreviewCard(
-                    name: 'Target', type: 'Windows', live: false)))));
+                    name: 'Target', live: false, tr: fakeTr)))));
     expect(find.byTooltip('More Target actions'), findsNothing);
   });
 
