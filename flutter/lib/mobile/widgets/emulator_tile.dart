@@ -255,22 +255,6 @@ class EmulatorTile extends StatelessWidget {
           ),
         if (!data.placeholder && data.windowVisible)
           Positioned(right: 8, bottom: 8, child: _PcFlag(tr: tr)),
-        if (!data.placeholder)
-          Positioned(
-            top: 4,
-            right: 4,
-            child: IconButton(
-              padding: EdgeInsets.zero,
-              constraints:
-                  const BoxConstraints.tightFor(width: 40, height: 40),
-              style: IconButton.styleFrom(
-                  backgroundColor: const Color(0x99101923),
-                  foregroundColor: const Color(0xFFE6EDF3)),
-              icon: const Icon(Icons.more_vert),
-              tooltip: tr('More {${data.title}} actions'),
-              onPressed: onMore,
-            ),
-          ),
       ]),
     );
   }
@@ -283,7 +267,7 @@ class EmulatorTile extends StatelessWidget {
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.only(top: 4, right: 4),
+            padding: const EdgeInsets.only(top: 4),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -291,7 +275,7 @@ class EmulatorTile extends StatelessWidget {
                 Text(data.title,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: text.titleMedium?.copyWith(fontSize: 12)),
+                    style: text.titleMedium),
                 if (data.secondary.isNotEmpty)
                   Text(data.secondary,
                       maxLines: 1,
@@ -302,6 +286,12 @@ class EmulatorTile extends StatelessWidget {
             ),
           ),
         ),
+        if (!data.placeholder)
+          IconButton(
+            icon: const Icon(Icons.more_vert),
+            tooltip: tr('More {${data.title}} actions'),
+            onPressed: onMore,
+          ),
       ]),
     );
   }

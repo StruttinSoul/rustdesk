@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_hbb/mobile/widgets/emulator_tile.dart';
 import 'package:flutter_hbb/mobile/widgets/mirpg_remote_theme.dart';
 import 'package:flutter_hbb/models/emulator_model.dart';
@@ -63,9 +62,10 @@ void main() {
     const title = 'BlueStacks App Player 3';
     await pumpIn(tester,
         tile(const EmulatorTileData(id: 'a', title: title, state: live)));
-    expect(
-        tester.renderObject<RenderParagraph>(find.text(title)).didExceedMaxLines,
-        isFalse);
+    final text = tester.widget<Text>(find.text(title));
+    expect(text.data, title);
+    expect(text.maxLines, 2);
+    expect(text.overflow, TextOverflow.ellipsis);
   });
 
   testWidgets('labelled tile shows the label and the emulator name',
