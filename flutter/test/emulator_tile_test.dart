@@ -154,6 +154,43 @@ void main() {
     expect(more, 2);
   });
 
+  testWidgets('without actions the tile has no more button and keeps its layout',
+      (tester) async {
+    const data = EmulatorTileData(id: 'a', title: 'Main', state: live);
+    double nameWidth() => tester
+        .renderObject<RenderBox>(find.text('Main'))
+        .constraints
+        .maxWidth;
+    await pumpIn(tester, tile(data, onMore: () {}));
+    expect(find.byTooltip('More Main actions'), findsOneWidget);
+    final withMore = nameWidth();
+    await pumpIn(tester, tile(data));
+    expect(find.byTooltip('More Main actions'), findsNothing);
+    expect(find.byIcon(Icons.more_vert), findsNothing);
+    expect(nameWidth(), withMore);
+  });
+
+  testWidgets('without actions the row has no more button and keeps its layout',
+      (tester) async {
+    const data = EmulatorTileData(id: 'a', title: 'Main', state: live);
+    Widget row({VoidCallback? onMore}) => SizedBox(
+        width: 360,
+        child: EmulatorRow(
+            data: data, onOpen: () {}, onMore: onMore, tr: fakeTr));
+    double nameWidth() => tester
+        .renderObject<RenderBox>(find.text('Main'))
+        .constraints
+        .maxWidth;
+    await pumpIn(tester, row(onMore: () {}));
+    expect(find.byTooltip('More Main actions'), findsOneWidget);
+    final withMore = nameWidth();
+    await pumpIn(tester, row());
+    expect(find.byTooltip('More Main actions'), findsNothing);
+    expect(find.byIcon(Icons.more_vert), findsNothing);
+    expect(nameWidth(), withMore);
+    expect(find.byTooltip('Open'), findsOneWidget);
+  });
+
   testWidgets('placeholder tile has no actions', (tester) async {
     var opens = 0;
     await pumpIn(

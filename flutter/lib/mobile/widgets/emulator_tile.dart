@@ -135,6 +135,25 @@ class _PcFlag extends StatelessWidget {
   }
 }
 
+/// The ⋮ button, or the same 48 dp of empty space where a surface offers no
+/// actions (the rail's "+" sheet), so names wrap the same either way.
+class _MoreButton extends StatelessWidget {
+  const _MoreButton(
+      {required this.title, required this.onMore, required this.tr});
+  final String title;
+  final VoidCallback? onMore;
+  final EmulatorTr tr;
+
+  @override
+  Widget build(BuildContext context) => onMore == null
+      ? const SizedBox.square(dimension: kMinInteractiveDimension)
+      : IconButton(
+          icon: const Icon(Icons.more_vert),
+          tooltip: tr('More {$title} actions'),
+          onPressed: onMore,
+        );
+}
+
 /// Below this preview height the state badge would sit on top of the action
 /// in the middle of the preview, so the action wins.
 const double _kTightPreview = 120;
@@ -319,11 +338,7 @@ class EmulatorTile extends StatelessWidget {
           ),
         ),
         if (!data.placeholder)
-          IconButton(
-            icon: const Icon(Icons.more_vert),
-            tooltip: tr('More {${data.title}} actions'),
-            onPressed: onMore,
-          ),
+          _MoreButton(title: data.title, onMore: onMore, tr: tr),
       ]),
     );
   }
@@ -430,11 +445,7 @@ class EmulatorRow extends StatelessWidget {
             ),
           ),
           if (!data.placeholder)
-            IconButton(
-              icon: const Icon(Icons.more_vert),
-              tooltip: tr('More {${data.title}} actions'),
-              onPressed: onMore,
-            ),
+            _MoreButton(title: data.title, onMore: onMore, tr: tr),
           if (action != null)
             IconButton(
               icon: Icon(action.$1),

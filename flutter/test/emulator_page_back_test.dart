@@ -1,4 +1,5 @@
 import 'package:flutter_hbb/mobile/pages/emulator_page.dart';
+import 'package:flutter_hbb/mobile/widgets/play_rail.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -15,6 +16,20 @@ void main() {
     expect(g.press(t0), isFalse);
     expect(g.press(t0.add(const Duration(milliseconds: 2100))), isFalse);
     expect(g.press(t0.add(const Duration(milliseconds: 2500))), isTrue);
+  });
+
+  test('the back hint floats clear of the rail', () {
+    for (final placement in [
+      PlayRailPlacement.bottom,
+      PlayRailPlacement.collapsed,
+    ]) {
+      final margin = backHintMargin(placement);
+      expect(margin.bottom, greaterThanOrEqualTo(kPlayRailBottomHeight),
+          reason: placement.name);
+    }
+    final side = backHintMargin(PlayRailPlacement.side);
+    expect(side.right, greaterThanOrEqualTo(kPlayRailSideWidth));
+    expect(side.bottom, lessThan(kPlayRailBottomHeight));
   });
 
   test('reset forgets the first press', () {

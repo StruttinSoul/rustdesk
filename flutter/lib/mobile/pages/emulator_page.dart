@@ -63,6 +63,14 @@ class DoubleBackGuard {
   void reset() => _first = null;
 }
 
+/// Where the "Back again to leave the game" hint floats: above the rail at
+/// the bottom (docked, or revealed by the first back when collapsed), or
+/// beside the rail docked on the right.
+EdgeInsets backHintMargin(PlayRailPlacement placement) =>
+    placement == PlayRailPlacement.side
+        ? const EdgeInsets.fromLTRB(16, 0, kPlayRailSideWidth + 8, 16)
+        : const EdgeInsets.fromLTRB(16, 0, 16, kPlayRailBottomHeight + 8);
+
 /// Keeps the whole guest visible, with the controls (the play rail) docked
 /// in the letterbox beside it, or, when collapsed, behind a round button and
 /// shown over the bottom edge without changing the game's size.
@@ -284,7 +292,8 @@ class EmulatorPage extends StatefulWidget {
       this.accounts = const [],
       this.onSelectTarget,
       this.onPreviousTarget,
-      this.onCurrentActions});
+      this.onCurrentActions,
+      this.alreadyRunning});
   final FFI ffi;
   final bool dashboardMode;
 
@@ -315,6 +324,11 @@ class EmulatorPage extends StatefulWidget {
 
   /// Opens the current emulator's action sheet (long press on ▦).
   final VoidCallback? onCurrentActions;
+
+  /// Whether an emulator is running and ready as far as the dashboard knows
+  /// (its list is not refreshed during a game), so opening it skips the
+  /// checklist. Without it, the PC's list decides.
+  final bool Function(String targetId)? alreadyRunning;
 
   @override
   State<EmulatorPage> createState() => _EmulatorPageState();
@@ -350,6 +364,9 @@ class _EmulatorPageState extends State<EmulatorPage>
   PlayRailPlacement _railPlacement = PlayRailPlacement.collapsed;
   final _banner = NameBannerController();
   final _doubleBack = DoubleBackGuard();
+
+  /// The "Back again to leave the game" snackbar, while it shows.
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _backHint;
 
   /// The (emulator, guest session) the name banner last announced.
   (String, int)? _bannerFor;
@@ -400,8 +417,10 @@ class _EmulatorPageState extends State<EmulatorPage>
     _banner.show('$_shownName · ${translate('Live')}');
   }
 
-  bool _targetRunning(String target) => model.instances
-      .any((instance) => instance.id == target && instance.readyForReconnect);
+  bool _targetRunning(String target) =>
+      widget.alreadyRunning?.call(target) ??
+      model.instances.any(
+          (instance) => instance.id == target && instance.readyForReconnect);
 
   /// Follows the start phases for the checklist: which step was reached,
   /// whether the emulator was already running, and the elapsed clock.
@@ -604,12 +623,17 @@ class _EmulatorPageState extends State<EmulatorPage>
       unawaited(_back());
       return;
     }
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(translate('Back again to leave the game')),
-        duration: const Duration(seconds: 2),
-      ));
+    final hint = (ScaffoldMessenger.of(context)..hideCurrentSnackBar())
+        .showSnackBar(SnackBar(
+      content: Text(translate('Back again to leave the game')),
+      duration: const Duration(seconds: 2),
+      behavior: SnackBarBehavior.floating,
+      margin: backHintMargin(_railPlacement),
+    ));
+    _backHint = hint;
+    hint.closed.then((_) {
+      if (_backHint == hint) _backHint = null;
+    });
     if (_railPlacement == PlayRailPlacement.collapsed) {
       setState(() => _guestControlsVisible = true);
     }
@@ -619,6 +643,11 @@ class _EmulatorPageState extends State<EmulatorPage>
     _cancelGuestRecovery();
     _cancelGuestInput();
     _discardTextComposer(restoreKeyboardFocus: false);
+    // The hint is about the game; it must not outlive it on the grid.
+    if (_backHint != null) {
+      _backHint = null;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    }
     if (widget.onReturn != null) {
       await widget.onReturn!();
       return false;

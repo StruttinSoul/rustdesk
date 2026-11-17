@@ -104,6 +104,75 @@ void main() {
     });
   });
 
+  group('running as far as the phone knows (start one, go back, start the next)',
+      () {
+    final t0 = DateTime(2026, 11, 17, 12);
+
+    bool running(
+      RemoteEmulator e, {
+      Map<String, DateTime> requests = const {},
+      Map<String, DateTime> seen = const {},
+      DateTime? listRequestedAt,
+      DateTime? now,
+    }) =>
+        emulatorRunningAsKnown(e,
+            startRequests: requests,
+            seenLive: seen,
+            listRequestedAt: listRequestedAt,
+            now: now ?? t0);
+
+    test('a stopped emulator never seen live is not running', () {
+      expect(running(g(0, 'stopped')), isFalse);
+      expect(running(g(0, 'stopped'), listRequestedAt: t0), isFalse);
+    });
+    test('an emulator this phone streamed is running though the list says '
+        'stopped', () {
+      final seen = <String, DateTime>{};
+      // The list the cache came from was asked for before the game went live.
+      final listAt = t0.subtract(const Duration(seconds: 30));
+      noteSeenLive(seen, 'avd:E0', t0);
+      // Long after the 120 s start request would have expired.
+      final later = t0.add(const Duration(minutes: 10));
+      expect(
+          running(g(0, 'stopped'),
+              seen: seen, listRequestedAt: listAt, now: later),
+          isTrue);
+      expect(seenLiveSinceList(seen, 'avd:E0', listAt), isTrue);
+      expect(seenLiveSinceList(seen, 'avd:E0', null), isTrue);
+      expect(seenLiveSinceList(seen, 'avd:E1', listAt), isFalse);
+    });
+    test('a list asked for after the sighting that says stopped wins', () {
+      final seen = <String, DateTime>{};
+      noteSeenLive(seen, 'avd:E0', t0);
+      final listAt = t0.add(const Duration(seconds: 5));
+      expect(running(g(0, 'stopped'), seen: seen, listRequestedAt: listAt),
+          isFalse);
+      expect(seenLiveSinceList(seen, 'avd:E0', listAt), isFalse);
+      // Seen live again after that list: running again.
+      noteSeenLive(seen, 'avd:E0', t0.add(const Duration(seconds: 9)));
+      expect(running(g(0, 'stopped'), seen: seen, listRequestedAt: listAt),
+          isTrue);
+    });
+    test('a start request within the hold is running, after it is not', () {
+      final requests = <String, DateTime>{};
+      noteStartRequest(requests, g(0, 'stopped'), t0);
+      expect(
+          running(g(0, 'stopped'),
+              requests: requests, now: t0.add(const Duration(seconds: 119))),
+          isTrue);
+      expect(
+          running(g(0, 'stopped'),
+              requests: requests, now: t0.add(const Duration(seconds: 120))),
+          isFalse);
+    });
+    test('the PC\'s own state counts when it is not stopped', () {
+      for (final state in ['running', 'ready', 'booting', 'stopping']) {
+        expect(running(g(0, state)), isTrue, reason: state);
+      }
+      expect(running(g(0, 'cloning')), isFalse);
+    });
+  });
+
   group('PlayTabBody', () {
     late int refreshes;
     late int retries;

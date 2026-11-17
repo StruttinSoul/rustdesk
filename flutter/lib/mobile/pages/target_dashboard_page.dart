@@ -71,6 +71,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   /// them as no longer stopped (or 120 s pass), so their tile reads Starting.
   final Map<String, DateTime> _startRequested = {};
 
+  /// When this phone last saw each emulator live (a fresh frame of the game).
+  /// The list is not refreshed during a game, so this keeps an emulator
+  /// started from the phone running until a newer list says otherwise.
+  final Map<String, DateTime> _seenLive = {};
+
   /// New emulators the PC is creating (id -> name shown), until it lists them.
   final Map<String, String> _settingUp = {};
 
@@ -492,7 +497,14 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   void _changed() {
     if (!mounted) return;
     if (!model.loading) _listSeen = true;
-    pruneStartRequests(_startRequested, model.instances, DateTime.now());
+    final now = DateTime.now();
+    pruneStartRequests(_startRequested, model.instances, now);
+    // Only a fresh frame of the open game counts. Previews never go to an
+    // emulator the list calls stopped, and a stale preview state must not
+    // keep one "running" past the next list.
+    if (model.streaming && model.guestFrameFresh && model.targetId.isNotEmpty) {
+      noteSeenLive(_seenLive, model.targetId, now);
+    }
     _settingUp
         .removeWhere((id, _) => model.instances.any((item) => item.id == id));
     if (!widget.ffi.ffiModel.keyboard || widget.ffi.ffiModel.viewOnly) {
@@ -765,8 +777,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final result = await model.renameAvd(target.id, name);
     final newId = 'avd:$name';
     if (result.ok) await _labels.moveLabel(target.id, newId);
-    _reportAvdResult(result,
-        success: translate('Renamed to {${_shownName(newId, name)}}'));
+    // The label moved with it, so name what the PC now calls it.
+    _reportAvdResult(result, success: translate('Renamed to {$name}'));
   }
 
   Future<void> _deleteAvd(_Target target) async {
@@ -838,8 +850,30 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             shuttingDown: model.isEmulatorShuttingDown(target.id),
             startRequested: startRequestPending(
                 _startRequested, target.id, DateTime.now()),
+            seenLive:
+                seenLiveSinceList(_seenLive, target.id, model.listRequestedAt),
             guestFailure: model.guestFailures[target.id] ?? '',
           ));
+
+  /// Opening [id] needs no startup checklist: the PC lists it ready, or this
+  /// phone has played it since that list. A start request alone does not
+  /// count; that emulator is still booting and the checklist shows it.
+  bool _alreadyRunning(String id) {
+    final instance = _targetById(id)?.instance;
+    return instance != null &&
+        (instance.readyForReconnect ||
+            (_runningAsKnown(instance) &&
+                seenLiveSinceList(_seenLive, id, model.listRequestedAt)));
+  }
+
+  /// [emulatorRunningAsKnown] with this page's start requests and sightings.
+  bool _runningAsKnown(RemoteEmulator instance) => emulatorRunningAsKnown(
+        instance,
+        startRequests: _startRequested,
+        seenLive: _seenLive,
+        listRequestedAt: model.listRequestedAt,
+        now: DateTime.now(),
+      );
 
   EmulatorTileData _guestTile(_Target target) {
     final instance = target.instance!;
@@ -904,13 +938,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         !_canControl) {
       return null;
     }
-    final stopped = instance.state == 'stopped';
     final cloning = instance.state == 'cloning';
+    // The list may still say stopped for the emulator being played.
+    final running = _runningAsKnown(instance);
     return AvdCardActions(
       cloningLabel: cloning ? instance.runtimeLabel : null,
-      running: !stopped && !cloning,
+      running: running,
       windowVisible: instance.windowVisible,
-      blocker: model.avdActionBlocker(target.id, 'avd_delete'),
+      blocker: model.avdActionBlocker(target.id, 'avd_delete') ??
+          (running ? 'Stop it first' : null),
       onToggleWindow: () => unawaited(_toggleAvdWindow(target)),
       onStop: model.canShutdownEmulator(target.id)
           ? () => unawaited(_shutdownEmulator(target))
@@ -929,6 +965,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final control = _canControl;
     final stopped = instance.state == 'stopped';
     final cloning = instance.state == 'cloning';
+    // Open on the game being played would only reconnect its stream.
+    final playing = target.id == _fullscreen?.id && model.streaming;
     final label = _labels.labelFor(target.id);
     final subtitle = [
       if (label.isNotEmpty) instance.name,
@@ -943,7 +981,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         subtitle: subtitle,
         state: state,
         stopped: state.word == EmulatorUiWord.stopped,
-        onOpen: control && state.canOpen && !model.connecting
+        onOpen: control && state.canOpen && !model.connecting && !playing
             ? () => unawaited(_open(target))
             : null,
         openBlocker: !control
@@ -1026,7 +1064,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     if (id == null || id == _fullscreen?.id) return null;
     final instance = _targetById(id)?.instance;
     if (instance == null ||
-        instance.state == 'stopped' ||
+        !_runningAsKnown(instance) ||
         model.isEmulatorShuttingDown(id)) {
       return null;
     }
@@ -1116,6 +1154,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     await _releaseMonitorInput();
     await model.desktop();
     if (!mounted) return;
+    // The list is not refreshed during a game; catch up on what was started
+    // or stopped meanwhile before the grid shows it.
+    if (!model.loading) unawaited(model.refresh());
     setState(() {
       // Start one, go back, start the next: the one left is "previous".
       if (_fullscreen?.instance != null) _previousGuestId = _fullscreen!.id;
@@ -1277,7 +1318,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             accounts: _playAccounts(),
             onSelectTarget: _switchTo,
             onPreviousTarget: _previousTarget(),
-            onCurrentActions: () => unawaited(_showEmulatorActions(current))),
+            onCurrentActions: () => unawaited(_showEmulatorActions(current)),
+            alreadyRunning: _alreadyRunning),
       );
     }
     if (active?.display != null) {

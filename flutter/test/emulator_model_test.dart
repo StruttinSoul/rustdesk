@@ -133,6 +133,61 @@ void main() {
     model.dispose();
   });
 
+  test('listRequestedAt is when the list behind the instances was asked for',
+      () async {
+    final sent = <Map<String, dynamic>>[];
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, value) async => sent.add(jsonDecode(value)));
+    expect(model.listRequestedAt, isNull);
+
+    final before = DateTime.now();
+    await model.refresh();
+    final after = DateTime.now();
+    final first = sent.last['request_id'];
+    // Asked for, not answered yet: the cache is still from no list.
+    expect(model.listRequestedAt, isNull);
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'inventory',
+      'request_id': first,
+      'instances': const [],
+      'provider_errors': const [],
+      'capabilities': const [],
+    });
+    final listed = model.listRequestedAt;
+    expect(listed, isNotNull);
+    expect(listed!.isBefore(before), isFalse);
+    expect(listed.isAfter(after), isFalse);
+
+    // A newer request changes nothing until its own answer arrives.
+    await Future<void>.delayed(const Duration(milliseconds: 2));
+    await model.refresh();
+    expect(model.listRequestedAt, listed);
+    model.handleResponse({
+      'protocol_version': 1,
+      'type': 'inventory',
+      'request_id': sent.last['request_id'],
+      'instances': const [],
+      'provider_errors': const [],
+      'capabilities': const [],
+    });
+    expect(model.listRequestedAt!.isAfter(listed), isTrue);
+    model.dispose();
+  });
+
+  testWidgets('the 120 s start timeout points at Try again and going back',
+      (tester) async {
+    final model = EmulatorModel(Uuid().v4obj(),
+        commandSender: (_, __) async {});
+    await model.connect('avd:Main');
+    await tester.pump(const Duration(seconds: 119));
+    expect(model.error, isEmpty);
+    await tester.pump(const Duration(seconds: 1));
+    expect(model.connecting, isFalse);
+    expect(model.error, 'Took too long to start. Try again, or go back.');
+    model.dispose();
+  });
+
   test('queued guest text is dropped if its guest session changes', () async {
     final sent = <Map<String, dynamic>>[];
     final navigationStarted = Completer<void>();

@@ -80,6 +80,35 @@ void pruneStartRequests(Map<String, DateTime> requests,
       !instances.any((item) => item.id == id && item.state == 'stopped'));
 }
 
+/// Records that this phone saw [id] live at [now] (a fresh frame of it).
+void noteSeenLive(Map<String, DateTime> seenLive, String id, DateTime now) =>
+    seenLive[id] = now;
+
+/// Whether the phone saw [id] live after the PC's cached list was asked for
+/// ([listRequestedAt]), so a "stopped" in that list is out of date. A list
+/// asked for after the sighting is newer and wins.
+bool seenLiveSinceList(
+    Map<String, DateTime> seenLive, String id, DateTime? listRequestedAt) {
+  final at = seenLive[id];
+  return at != null && (listRequestedAt == null || at.isAfter(listRequestedAt));
+}
+
+/// Whether [instance] is running as far as this phone knows. The PC's list
+/// is not refreshed while a game streams, so a "stopped" in it may be stale:
+/// a start request within [kPlayStartRequestHold] or a live sighting since
+/// that list was asked for overrides it. Copying never counts as running.
+bool emulatorRunningAsKnown(
+  RemoteEmulator instance, {
+  required Map<String, DateTime> startRequests,
+  required Map<String, DateTime> seenLive,
+  required DateTime? listRequestedAt,
+  required DateTime now,
+}) {
+  if (instance.state != 'stopped') return instance.state != 'cloning';
+  return startRequestPending(startRequests, instance.id, now) ||
+      seenLiveSinceList(seenLive, instance.id, listRequestedAt);
+}
+
 /// The Play tab: every emulator as a tile in the PC's list order, then one
 /// row for the PC's monitors.
 class PlayTabBody extends StatelessWidget {

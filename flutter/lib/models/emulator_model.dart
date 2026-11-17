@@ -136,10 +136,15 @@ class EmulatorUiFlags {
       {this.frameCurrent = false,
       this.shuttingDown = false,
       this.startRequested = false,
+      this.seenLive = false,
       this.guestFailure = ''});
   final bool frameCurrent;
   final bool shuttingDown;
   final bool startRequested;
+
+  /// The phone saw it live after the list that still says "stopped" was
+  /// asked for.
+  final bool seenLive;
   final String guestFailure;
 }
 
@@ -168,6 +173,9 @@ EmulatorUiState emulatorUiState(RemoteEmulator instance,
         pcMessage: previewError.isNotEmpty ? previewError : flags.guestFailure);
   }
   if (state == 'stopped') {
+    if (flags.seenLive) {
+      return const EmulatorUiState(EmulatorUiWord.live, 'Live');
+    }
     if (flags.startRequested) {
       return const EmulatorUiState(EmulatorUiWord.starting, 'Starting');
     }
@@ -224,6 +232,11 @@ class EmulatorModel extends ChangeNotifier {
   bool _guestFrameFresh = false;
   bool _disposed = false;
   List<RemoteEmulator> instances = [];
+
+  /// When the list [instances] came from was asked for (null before the
+  /// first). A state in it is no newer than this.
+  DateTime? listRequestedAt;
+  DateTime? _inventoryRequestedAt;
   bool loading = false;
   bool selected = false;
   bool streaming = false;
@@ -594,6 +607,7 @@ class EmulatorModel extends ChangeNotifier {
     loading = true;
     error = '';
     _inventoryRequest = ++_sequence;
+    _inventoryRequestedAt = DateTime.now();
     _inventoryTimeout?.cancel();
     _inventoryTimeout = Timer(const Duration(seconds: 25), () {
       loading = false;
@@ -622,8 +636,7 @@ class EmulatorModel extends ChangeNotifier {
     _selectionTimeout?.cancel();
     _selectionTimeout = Timer(const Duration(seconds: 120), () {
       connecting = false;
-      error =
-          'The emulator did not become ready. Return to the desktop or reconnect.';
+      error = 'Took too long to start. Try again, or go back.';
       notifyListeners();
     });
     notifyListeners();
@@ -1887,6 +1900,7 @@ class EmulatorModel extends ChangeNotifier {
               progressPercent: (item['progress_percent'] as num?)?.toInt() ?? 0,
               windowVisible: item['window_visible'] == true))
           .toList();
+      listRequestedAt = _inventoryRequestedAt;
       loading = false;
       error = (response['provider_errors'] as List? ?? []).join('\n');
       if (!_capabilities.allows('host.emulator_shutdown.v1')) _clearShutdownState();

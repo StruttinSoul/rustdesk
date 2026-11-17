@@ -13,6 +13,19 @@ RemoteEmulator emu(String state, {String error = '', int progress = 0}) =>
         progressPercent: progress);
 
 void main() {
+  test('a stopped emulator the phone has seen live since the list reads Live',
+      () {
+    final s = emulatorUiState(emu('stopped'),
+        flags: const EmulatorUiFlags(seenLive: true, startRequested: true));
+    expect((s.word, s.label), (EmulatorUiWord.live, 'Live'));
+    expect(
+        emulatorUiState(emu('stopped'),
+                flags: const EmulatorUiFlags(seenLive: true, shuttingDown: true))
+            .word,
+        EmulatorUiWord.stopping);
+    expect(emulatorUiState(emu('stopped')).word, EmulatorUiWord.stopped);
+  });
+
   test('stopping wins over every other signal', () {
     final s = emulatorUiState(emu('running'),
         flags: const EmulatorUiFlags(shuttingDown: true, guestFailure: 'x'));
