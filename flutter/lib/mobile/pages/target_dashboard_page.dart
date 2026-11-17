@@ -79,6 +79,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   Timer? _refreshTimer;
   Timer? _healthTimer;
   _Target? _fullscreen;
+
+  /// A copy of the opened emulator's last preview frame, shown dimmed until
+  /// its stream is live. Preview images are disposed when no longer retained,
+  /// so this page owns its copy.
+  ui.Image? _switchFrame;
   bool _chooser = false;
   bool _background = false;
   bool _viewFocused = true;
@@ -514,6 +519,14 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       unawaited(_dashboard());
       return;
     }
+    if (_switchFrame != null &&
+        model.streaming &&
+        !model.connecting &&
+        model.targetId == _fullscreen?.id) {
+      // Cleared in the same rebuild, so the page never shows a disposed image.
+      _switchFrame!.dispose();
+      _switchFrame = null;
+    }
     _presentation();
     setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) => _subscribe());
@@ -637,10 +650,13 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       noteStartRequest(_startRequested, instance, DateTime.now());
     }
     await _releaseMonitorInput();
+    final frame = instance == null ? null : _guestFrame(target).image;
     setState(() {
       _fullscreen = target;
       _focusedWindow = focusedWindow;
       if (focusedWindow != null) _windowFocusRevision++;
+      _switchFrame?.dispose();
+      _switchFrame = frame?.clone();
     });
     _resetMonitorLivenessForCurrentTarget();
     _subscription = '';
@@ -960,7 +976,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     await _releaseMonitorInput();
     await model.desktop();
     if (!mounted) return;
-    setState(() => _fullscreen = null);
+    setState(() {
+      _fullscreen = null;
+      _switchFrame?.dispose();
+      _switchFrame = null;
+    });
     _resetMonitorLivenessForCurrentTarget();
     _landscape = null;
     await SystemChrome.setPreferredOrientations(const []);
@@ -1070,6 +1090,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     model.removeListener(_changed);
     _labels.removeListener(_labelsChanged);
     _labels.dispose();
+    _switchFrame?.dispose();
+    _switchFrame = null;
     widget.ffi.ffiModel.removeListener(_changed);
     widget.ffi.qualityMonitorModel.removeListener(_qualityChanged);
     widget.ffi.aperturePairResult.removeListener(_pairResultChanged);
@@ -1092,13 +1114,24 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   Widget build(BuildContext context) {
     final active = _fullscreen;
     if (active?.instance != null) {
+      // The list refreshes, so read the emulator's current window state.
+      final current = _targetById(active!.id) ?? active;
+      final instance = current.instance!;
+      final offerShowOnPc = instance.provider == 'avd' &&
+          model.canManageAvds &&
+          !instance.windowVisible;
       return Theme(
         data: MirpgRemoteTheme.build(Theme.of(context)),
         child: EmulatorPage(
             ffi: widget.ffi,
             dashboardMode: true,
             onSwitch: _choose,
-            onReturn: _dashboard),
+            onReturn: _dashboard,
+            nameFor: (id) =>
+                _labels.displayName(id, _targetById(id)?.name ?? ''),
+            switchFrame: _switchFrame,
+            onShowOnPc:
+                offerShowOnPc ? () => _toggleAvdWindow(current) : null),
       );
     }
     if (active?.display != null) {

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import '../../models/emulator_model.dart';
 import '../../models/model.dart';
 import '../widgets/mirpg_remote_theme.dart';
+import '../widgets/startup_checklist.dart';
 
 bool shouldCancelGuestComposition({
   required int previousSessionId,
@@ -185,11 +186,24 @@ class EmulatorPage extends StatefulWidget {
       required this.ffi,
       this.dashboardMode = false,
       this.onSwitch,
-      this.onReturn});
+      this.onReturn,
+      this.nameFor,
+      this.switchFrame,
+      this.onShowOnPc});
   final FFI ffi;
   final bool dashboardMode;
   final Future<void> Function()? onSwitch;
   final Future<void> Function()? onReturn;
+
+  /// The name shown for an emulator id (the phone-side label when set).
+  final String Function(String targetId)? nameFor;
+
+  /// The opened emulator's last preview frame, shown dimmed while switching
+  /// to an emulator that is already running. Owned by the caller.
+  final ui.Image? switchFrame;
+
+  /// Shows the emulator's window on the PC; null when not offered.
+  final Future<void> Function()? onShowOnPc;
 
   @override
   State<EmulatorPage> createState() => _EmulatorPageState();
@@ -220,6 +234,15 @@ class _EmulatorPageState extends State<EmulatorPage>
   int _observedSessionId = 0;
   String _observedTargetId = '';
   (int, int)? _observedGeometry;
+
+  /// The emulator the startup screen describes, and whether it was already
+  /// running (ready to reconnect) when it was opened.
+  String _startupTarget = '';
+  bool _openedRunning = false;
+  String _startupPhase = '';
+  int _lastStartupStep = 0;
+  final Stopwatch _startupClock = Stopwatch();
+  Timer? _startupTicker;
   EmulatorModel get model => widget.ffi.emulatorModel;
   bool get _hostCanControl =>
       widget.ffi.ffiModel.keyboard && !widget.ffi.ffiModel.viewOnly;
@@ -242,6 +265,54 @@ class _EmulatorPageState extends State<EmulatorPage>
     }
     if (!widget.dashboardMode) unawaited(model.refresh());
     _updateGuestRecovery();
+    _trackStartup();
+  }
+
+  bool _targetRunning(String target) => model.instances
+      .any((instance) => instance.id == target && instance.readyForReconnect);
+
+  /// Follows the start phases for the checklist: which step was reached,
+  /// whether the emulator was already running, and the elapsed clock.
+  void _trackStartup() {
+    final phase = model.startupPhase;
+    if (_startupTarget != model.targetId) {
+      _startupTarget = model.targetId;
+      _openedRunning = _targetRunning(_startupTarget);
+      _startupClock
+        ..reset()
+        ..start();
+    } else if (phase == 'requesting' && _startupPhase != 'requesting') {
+      _startupClock
+        ..reset()
+        ..start();
+    }
+    _startupPhase = phase;
+    if (phase != 'failed') {
+      _lastStartupStep =
+          startupStepIndex(phase, alreadyRunning: _openedRunning);
+    }
+    _syncStartupTicker();
+  }
+
+  bool get _showsChecklist =>
+      !model.streaming &&
+      (model.error.isNotEmpty ||
+          !_openedRunning ||
+          model.startupPhase == 'boot_requested' ||
+          model.startupPhase == 'starting_android');
+
+  /// The elapsed time only needs a repaint while the checklist shows it.
+  void _syncStartupTicker() {
+    final visible =
+        mounted && (model.selected || widget.dashboardMode) && _showsChecklist;
+    if (visible && _startupTicker == null) {
+      _startupTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!visible && _startupTicker != null) {
+      _startupTicker!.cancel();
+      _startupTicker = null;
+    }
   }
 
   void _cancelGuestRecovery() {
@@ -369,6 +440,7 @@ class _EmulatorPageState extends State<EmulatorPage>
       }
     }
     _updateGuestRecovery();
+    _trackStartup();
     setState(() {});
     _syncGuestPresentation();
     if (_returning && !model.selected && !model.connecting) {
@@ -399,6 +471,9 @@ class _EmulatorPageState extends State<EmulatorPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _cancelGuestRecovery();
+    _startupTicker?.cancel();
+    _startupTicker = null;
+    _startupClock.stop();
     _cancelGuestInput();
     if (_textComposerVisible) {
       _cancelGuestInput();
@@ -608,7 +683,7 @@ class _EmulatorPageState extends State<EmulatorPage>
               final immersive = model.selected && model.streaming;
               return Scaffold(
                 backgroundColor: immersive ? Colors.black : null,
-                appBar: immersive
+                appBar: immersive || widget.dashboardMode
                     ? null
                     : AppBar(
                         title:
@@ -640,21 +715,6 @@ class _EmulatorPageState extends State<EmulatorPage>
                 body: model.selected || widget.dashboardMode
                     ? _guest()
                     : _picker(),
-                bottomNavigationBar: model.selected &&
-                        !model.streaming &&
-                        model.error.isEmpty
-                    ? SafeArea(
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            _navigation('Back', Icons.arrow_back, 'back'),
-                            _navigation('Home', Icons.home_outlined, 'home'),
-                            _navigation(
-                                'Recents', Icons.crop_square, 'recents'),
-                          ],
-                        ),
-                      )
-                    : null,
               );
             },
           ),
@@ -806,47 +866,7 @@ class _EmulatorPageState extends State<EmulatorPage>
       );
 
   Widget _guest() {
-    if (!model.streaming) {
-      return Center(
-          child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                if (model.error.isEmpty) const CircularProgressIndicator(),
-                const SizedBox(height: 16),
-                Text(
-                    _returning
-                        ? 'Returning to the desktop…'
-                        : model.error.isEmpty
-                            ? _startupLabel
-                            : model.error,
-                    textAlign: TextAlign.center),
-                if (model.error.isNotEmpty && _guestReconnectTimer != null)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 8),
-                    child: Text('Reconnecting automatically…',
-                        textAlign: TextAlign.center),
-                  ),
-                if (model.error.isNotEmpty)
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    spacing: 8,
-                    children: [
-                      TextButton(
-                          onPressed: () => unawaited(_back()),
-                          child: const Text('Return to desktop')),
-                      if (model.targetId.isNotEmpty)
-                        FilledButton.icon(
-                          onPressed:
-                              model.connecting || _returning || !_hostCanControl
-                                  ? null
-                                  : _reconnectGuest,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Reconnect emulator'),
-                        ),
-                    ],
-                  ),
-              ])));
-    }
+    if (!model.streaming) return _starting();
     return KeyboardListener(
       focusNode: _keyboardFocus,
       autofocus: true,
@@ -894,6 +914,65 @@ class _EmulatorPageState extends State<EmulatorPage>
           ),
         ),
       ),
+    );
+  }
+
+  String get _shownName {
+    final target = model.targetId;
+    final shown = target.isEmpty ? '' : widget.nameFor?.call(target) ?? '';
+    return shown.isEmpty ? _selectedName : shown;
+  }
+
+  String get _providerLine {
+    final instance = model.instances
+        .where((instance) => instance.id == model.targetId)
+        .firstOrNull;
+    if (instance == null) return '';
+    return [
+      emulatorProviderLabel(instance.provider),
+      if (instance.androidVersion.isNotEmpty)
+        'Android ${instance.androidVersion}',
+    ].join(' · ');
+  }
+
+  /// Before the stream is live: the startup checklist (or the failure on
+  /// it), or, when switching to an emulator that was already running, its
+  /// last frame with its name.
+  Widget _starting() {
+    final name = _shownName;
+    if (!_showsChecklist) {
+      return SwitchPlaceholder(frame: widget.switchFrame, name: name);
+    }
+    final failed = model.error.isNotEmpty;
+    final retryArmed = failed && _guestReconnectTimer != null;
+    final showOnPc = widget.onShowOnPc;
+    return StartupChecklist(
+      name: name,
+      providerLabel: _providerLine,
+      currentStep: _lastStartupStep,
+      failedStep: failed ? (_guestWasLive ? 3 : _lastStartupStep) : null,
+      elapsed: _startupClock.elapsed,
+      failureTitle: !failed
+          ? ''
+          : _guestWasLive
+              ? 'Lost the screen for {$name}'
+              : "Couldn't start {$name}",
+      failureMessage: model.error,
+      retryNote: !retryArmed
+          ? ''
+          : _guestReconnectAttempts == 0
+              ? 'Trying again in 1 s (1 of 2)'
+              : 'Trying again in 3 s (2 of 2)',
+      onBack: () {
+        if (!_returning) unawaited(_back());
+      },
+      onTryAgain: model.targetId.isEmpty ||
+              model.connecting ||
+              _returning ||
+              !_hostCanControl
+          ? null
+          : _reconnectGuest,
+      onShowOnPc: showOnPc == null ? null : () => unawaited(showOnPc()),
     );
   }
 
@@ -1036,15 +1115,6 @@ class _EmulatorPageState extends State<EmulatorPage>
     unawaited(model.touch(action, event.pointer, x, y));
   }
 
-  Widget _navigation(String label, IconData icon, String action) =>
-      TextButton.icon(
-        onPressed: canGuestControl && model.streaming && !_returning
-            ? () => unawaited(model.navigation(action))
-            : null,
-        icon: Icon(icon),
-        label: Text(label),
-      );
-
   Widget _overlayButton({
     required String tooltip,
     required IconData icon,
@@ -1102,21 +1172,6 @@ class _EmulatorPageState extends State<EmulatorPage>
         _heldKeys.remove(code);
       }
       unawaited(model.key(code, down));
-    }
-  }
-
-  String get _startupLabel {
-    switch (model.startupPhase) {
-      case 'boot_requested':
-        return 'Boot requested…';
-      case 'starting_android':
-        return 'Starting Android…';
-      case 'waiting_screen':
-        return 'Android ready · starting remote screen…';
-      case 'stream_ready':
-        return 'Stream ready';
-      default:
-        return 'Connecting to Android…';
     }
   }
 }
