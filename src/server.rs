@@ -68,6 +68,8 @@ pub mod input_service {
     pub const NAME_WINDOW_FOCUS: &'static str = "";
 }
 
+#[cfg(windows)]
+mod cm_recovery;
 mod connection;
 mod login_failure_check;
 pub(crate) mod port_forward_mux;

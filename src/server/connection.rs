@@ -514,6 +514,8 @@ pub struct Connection {
     port_forward_mux: Option<super::port_forward_mux::PortForwardMux>,
     port_forward_address: String,
     tx_to_cm: mpsc::UnboundedSender<ipc::Data>,
+    #[cfg(windows)]
+    cm_recovery: super::cm_recovery::CmRecovery,
     authorized: bool,
     // The place among the unauthorized connections; given back at authorization.
     unauthorized_id: Option<UnauthorizedID>,
@@ -768,6 +770,8 @@ impl Connection {
             port_forward_mux: None,
             port_forward_address: "".to_owned(),
             tx_to_cm,
+            #[cfg(windows)]
+            cm_recovery: Default::default(),
             authorized: false,
             unauthorized_id: Some(unauthorized),
             keyboard: Self::permission(keys::OPTION_ENABLE_KEYBOARD, &control_permissions),
@@ -988,6 +992,10 @@ impl Connection {
                             break;
                         }
                         ipc::Data::CmErr(e) => {
+                            #[cfg(windows)]
+                            if e != "expected" && conn.try_restore_cm(&e, &tx_from_cm_holder) {
+                                continue;
+                            }
                             if e != "expected" {
                                 // cm closed before connection
                                 conn.on_close(&format!("connection manager error: {}", e), false).await;
@@ -3187,6 +3195,36 @@ impl Connection {
             }
         }
         self.video_ack_required = lr.video_ack_required;
+    }
+
+    /// Keeps an authorized session when its cm process went away: registers it
+    /// with a fresh cm instead of closing it. False means close as before.
+    #[cfg(windows)]
+    fn try_restore_cm(&mut self, error: &str, tx_from_cm: &mpsc::UnboundedSender<ipc::Data>) -> bool {
+        use super::cm_recovery::CmLoss;
+        if self.cm_recovery.on_cm_error(error, self.authorized, std::time::Instant::now()) != CmLoss::Restore {
+            return false;
+        }
+        log::warn!(
+            "Connection manager lost under authorized connection #{} ({}); restoring it",
+            self.inner.id(),
+            error
+        );
+        let (tx_to_cm, rx_to_cm) = mpsc::unbounded_channel::<ipc::Data>();
+        self.tx_to_cm = tx_to_cm;
+        self.try_start_cm(self.lr.my_id.clone(), self.lr.my_name.clone(), true);
+        let tx_from_cm = tx_from_cm.clone();
+        tokio::spawn(async move {
+            let result = match super::cm_recovery::wait_for_cm().await {
+                Ok(()) => start_ipc(rx_to_cm, tx_from_cm.clone()).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                log::warn!("ipc to restored connection manager exit: {}", error);
+                allow_err!(tx_from_cm.send(Data::CmErr(error.to_string())));
+            }
+        });
+        true
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
