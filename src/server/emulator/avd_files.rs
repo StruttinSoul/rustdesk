@@ -481,12 +481,26 @@ impl AvdHome {
         Ok(())
     }
 
-    /// Gives a stopped emulator's `config.ini` the managed screen size. Returns
-    /// the size it had when it was changed. Callers check it is not running.
-    pub fn ensure_managed_screen(&self, name: &str) -> ResultType<Option<String>> {
+    /// The folder of `name` when Aperture may rewrite its configuration: inside
+    /// this root, and never in a `.android` folder (Android Studio's AVDs).
+    fn managed_dir(&self, name: &str) -> ResultType<PathBuf> {
         let name = Self::checked_name(name)?;
         let dir = self.avd_dir(name);
         self.ensure_inside(&dir)?;
+        let resolved = fs::canonicalize(&dir)?;
+        if resolved
+            .components()
+            .any(|part| part.as_os_str().eq_ignore_ascii_case(".android"))
+        {
+            bail!("{name} is an Android Studio emulator; Aperture does not change it")
+        }
+        Ok(dir)
+    }
+
+    /// Gives a stopped emulator's `config.ini` the managed screen size. Returns
+    /// the size it had when it was changed. Callers check it is not running.
+    pub fn ensure_managed_screen(&self, name: &str) -> ResultType<Option<String>> {
+        let dir = self.managed_dir(name)?;
         let path = dir.join("config.ini");
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Cannot read the configuration of {name}"))?;
@@ -1008,6 +1022,20 @@ hw.lcd.height=2208
         assert!(leftovers.is_empty(), "{leftovers:?}");
         assert!(home.ensure_managed_screen("../x").is_err());
         cleanup(home);
+    }
+
+    #[test]
+    fn ensure_managed_screen_refuses_a_root_under_dot_android() {
+        let outer = temp_home("dotandroid");
+        let home = AvdHome::new(outer.root().join(".android").join("avd"));
+        fs::create_dir_all(home.root()).unwrap();
+        let dir = make_source(&home, "Dev_1");
+        let config = dir.join("config.ini");
+        let old = read(&config).replace("hw.lcd.height=2208", "hw.lcd.height=2400");
+        fs::write(&config, &old).unwrap();
+        assert!(home.ensure_managed_screen("Dev_1").is_err());
+        assert_eq!(read(&config), old);
+        cleanup(outer);
     }
 
     /// Run only while the trial AVD is stopped: Aperture's start does the same.

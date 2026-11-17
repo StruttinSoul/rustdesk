@@ -678,10 +678,6 @@ impl EmulatorProvider for AvdProvider {
         }
         self.check_not_cloning(name)?;
         self.home.check_ini_path(name)?;
-        if let Some(old) = self.home.ensure_managed_screen(name)? {
-            let (width, height) = super::avd_files::MANAGED_SCREEN;
-            log::info!("Changed the screen of {name} from {old} to {width}x{height}");
-        }
         starts.retain(|(at, _, _)| at.elapsed() < START_RESERVATION);
         let reserved = starts.iter().map(|(_, _, mb)| u64::from(*mb)).sum();
         let ram_mb = match instance.entry.ram_mb {
@@ -690,6 +686,10 @@ impl EmulatorProvider for AvdProvider {
         };
         if !memory_allows(self.system.available_memory_mb(), ram_mb, reserved) {
             bail!("Not enough free memory on atlas to start {name}")
+        }
+        if let Some(old) = self.home.ensure_managed_screen(name)? {
+            let (width, height) = super::avd_files::MANAGED_SCREEN;
+            log::info!("Changed the screen of {name} from {old} to {width}x{height}");
         }
         self.system.launch(name)?;
         self.system.watch_exit(name, true);
