@@ -821,7 +821,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Emulators", ""),
         ("{} running", ""),
         ("PC screens", ""),
-        ("Monitor", ""),
+        ("Monitor {}", ""),
         ("New", ""),
         ("New emulator", ""),
         ("No emulators on {} yet", ""),
