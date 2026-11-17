@@ -2147,6 +2147,79 @@ mod tests {
         None
     }
 
+    /// Consumes events until the stream has been ready in the expected
+    /// orientation, with no geometry change, for 1 s; returns its size.
+    /// The fixture stops reading events while it drives the guest over adb.
+    /// The session then stalls on the full event queue in the middle of a
+    /// geometry change (HOME turns the guest portrait), and a tap sent before
+    /// that backlog clears arrives while the geometry is not ready.
+    fn settle_stream(
+        runtime: &TestRuntime,
+        events: &mut Events,
+        ready: &mut Option<(u32, u32)>,
+        landscape: bool,
+        within: Duration,
+    ) -> Option<(u32, u32)> {
+        let started = Instant::now();
+        let mut changed = Instant::now();
+        while started.elapsed() < within {
+            if let Some(size) = *ready {
+                if (size.0 > size.1) == landscape && changed.elapsed() >= Duration::from_secs(1) {
+                    return Some(size);
+                }
+            }
+            if let Some(GuestEvent::Response(response)) =
+                next_event(runtime, events, Duration::from_millis(50))
+            {
+                if let Some(base::message_proto::emulator_response::Union::Status(status)) =
+                    response.union
+                {
+                    let state = status.state.enum_value_or_default();
+                    assert_ne!(state, EmulatorSessionState::EmulatorFailed, "{}", status.error);
+                    match status.phase.as_str() {
+                        "stream_ready" => *ready = Some((status.width, status.height)),
+                        "waiting_screen" => *ready = None,
+                        _ => {}
+                    }
+                    changed = Instant::now();
+                }
+            }
+        }
+        None
+    }
+
+    /// Puts the guest in `rotation` (accelerometer off) and waits until the
+    /// stream has settled in that orientation; returns the stream size.
+    /// The setting is re-put while waiting: Android can rewrite user_rotation
+    /// when Settings starts (it restores the rotation it was last shown in).
+    fn force_rotation(
+        runtime: &TestRuntime,
+        events: &mut Events,
+        serial: &str,
+        current: (u32, u32),
+        rotation: u32,
+    ) -> (u32, u32) {
+        let rotation_value = rotation.to_string();
+        let wanted = [("accelerometer_rotation", "0"), ("user_rotation", rotation_value.as_str())];
+        let mut ready = Some(current);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(15) {
+            for (key, value) in wanted {
+                if trial_setting(serial, key) != value {
+                    trial_shell(serial, &["shell", "settings", "put", "system", key, value]);
+                }
+            }
+            let settled =
+                settle_stream(runtime, events, &mut ready, rotation % 2 == 1, Duration::from_secs(3));
+            if let Some(size) = settled {
+                if wanted.iter().all(|(key, value)| trial_setting(serial, key) == *value) {
+                    return size;
+                }
+            }
+        }
+        panic!("the stream did not settle at rotation {rotation}: {ready:?}");
+    }
+
     /// Consumes events for `duration`: (frames, key frames).
     fn pump(runtime: &TestRuntime, events: &mut Events, duration: Duration) -> (usize, usize) {
         let started = Instant::now();
@@ -2247,6 +2320,13 @@ mod tests {
         let size = wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), None)
             .expect("no stream_ready within 10 s");
         let ready_after = started.elapsed();
+        // The hook counts after `stream_ready` is sent, so it can lag the event.
+        let counted = Instant::now();
+        while avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire) == host_streams
+            && counted.elapsed() < Duration::from_secs(1)
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire) > host_streams,
             "the session fell back to in-Android video"
@@ -2301,8 +2381,9 @@ mod tests {
         eprintln!("RESULT refresh keyframe after {refresh_latency:?}");
 
         // A tap through input() at the centre of the stream.
-        let main = trial_open_settings(&serial);
-        while events.try_recv().is_ok() {}
+        trial_open_settings(&serial);
+        let size = force_rotation(&runtime, &mut events, &serial, size, 0);
+        let main = trial_screen_texts(&serial);
         tap(&session, size);
         pump(&runtime, &mut events, Duration::from_millis(1500));
         let after = trial_screen_texts(&serial);
@@ -2322,8 +2403,9 @@ mod tests {
                 wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), Some(true));
             eprintln!("RESULT landscape stream_ready: {rotated:?}");
             rotated.map(|rotated| {
-                let main = trial_open_settings(&serial);
-                while events.try_recv().is_ok() {}
+                trial_open_settings(&serial);
+                let rotated = force_rotation(&runtime, &mut events, &serial, rotated, 1);
+                let main = trial_screen_texts(&serial);
                 tap(&session, rotated);
                 pump(&runtime, &mut events, Duration::from_millis(1500));
                 let after = trial_screen_texts(&serial);
@@ -2334,6 +2416,8 @@ mod tests {
                 // bounds in the rotated display. A swapped mapping would put
                 // this tap far outside the 1080-pixel-high landscape screen.
                 trial_open_settings(&serial);
+                let settled = force_rotation(&runtime, &mut events, &serial, rotated, 1);
+                assert_eq!(settled, rotated, "the landscape stream size changed");
                 let display = trial_landscape_display(&serial);
                 let target = trial_centre_of(&trial_ui_xml(&serial), "Network &amp; internet")
                     .expect("Network & internet in landscape Settings");
@@ -2341,7 +2425,6 @@ mod tests {
                     target.0 * rotated.0 / display.0,
                     target.1 * rotated.1 / display.1,
                 );
-                while events.try_recv().is_ok() {}
                 tap_at(&session, rotated, point);
                 pump(&runtime, &mut events, Duration::from_millis(1500));
                 let after = trial_screen_texts(&serial);
@@ -2367,18 +2450,19 @@ mod tests {
     #[ignore = "Rotates the running Aperture_Trial_Play35 emulator"]
     fn real_rotation_watcher_follows_the_guest() {
         let serial = trial_serial();
-        trial_open_settings(&serial);
+        // Captured before Settings opens: opening it can rewrite user_rotation.
         let _restore = RotationGuard {
             serial: serial.clone(),
             accelerometer: trial_setting(&serial, "accelerometer_rotation"),
             user_rotation: trial_setting(&serial, "user_rotation"),
         };
+        trial_open_settings(&serial);
         trial_shell(&serial, &["shell", "settings", "put", "system", "accelerometer_rotation", "0"]);
         trial_shell(&serial, &["shell", "settings", "put", "system", "user_rotation", "0"]);
         let watcher = avd_host_video::RotationWatcher::start(&trial_adb(), &serial).unwrap();
         let wait_for = |rotation: u32| {
             let started = Instant::now();
-            while started.elapsed() < Duration::from_secs(3) {
+            while started.elapsed() < Duration::from_secs(6) {
                 if watcher.rotation() == Some(rotation) {
                     return Some(started.elapsed());
                 }
@@ -2387,23 +2471,198 @@ mod tests {
             None
         };
         assert!(wait_for(0).is_some(), "no initial rotation");
+        // The guest's own rotation (its animation) can take seconds; the
+        // watcher is measured against when the display itself reports it.
+        let display_reports = |serial: String, rotation: u32, started: Instant| {
+            thread::spawn(move || {
+                let wanted = format!("mCurrentOrientation={rotation}");
+                while started.elapsed() < Duration::from_secs(6) {
+                    if trial_shell(
+                        &serial,
+                        &["shell", "dumpsys display | grep -m1 -o 'mCurrentOrientation=[0-3]'"],
+                    )
+                    .contains(&wanted)
+                    {
+                        return Some(started.elapsed());
+                    }
+                }
+                None
+            })
+        };
         let mut latencies = Vec::new();
         for rotation in [1, 2, 3, 0] {
+            let started = Instant::now();
             trial_shell(
                 &serial,
                 &["shell", "settings", "put", "system", "user_rotation", &rotation.to_string()],
             );
-            latencies.push((rotation, wait_for(rotation)));
+            let display = display_reports(serial.clone(), rotation, started);
+            // Both measured from `started`.
+            let seen = wait_for(rotation).map(|_| started.elapsed());
+            let display = display.join().unwrap();
+            latencies.push((rotation, display, seen));
         }
         drop(watcher);
-        thread::sleep(Duration::from_secs(1));
-        let leftover = trial_shell(&serial, &["shell", "ps -A -o ARGS | grep -c '[m]CurrentOrientation'"]);
-        eprintln!("RESULT rotation latencies {latencies:?}; leftover loops {}", leftover.trim());
-        for (rotation, latency) in latencies {
-            let latency = latency.unwrap_or_else(|| panic!("rotation {rotation} not seen"));
-            assert!(latency <= Duration::from_millis(1500), "rotation {rotation}: {latency:?}");
+        // The guest loop ends at its next echo, after the dumpsys it may be
+        // in (slow while the guest is still rotating).
+        let dropped = Instant::now();
+        let leftover = loop {
+            thread::sleep(Duration::from_millis(500));
+            let leftover =
+                trial_shell(&serial, &["shell", "ps -A -o ARGS | grep -c '[m]CurrentOrientation'"]);
+            if leftover.trim() == "0" || dropped.elapsed() >= Duration::from_secs(5) {
+                break leftover;
+            }
+        };
+        eprintln!(
+            "RESULT rotation (rotation, display, watcher) {latencies:?}; leftover loops {}",
+            leftover.trim()
+        );
+        for (rotation, display, seen) in latencies {
+            let seen = seen.unwrap_or_else(|| panic!("rotation {rotation} not seen"));
+            let display = display.unwrap_or_else(|| panic!("the display never reached {rotation}"));
+            // The watcher polls every 250 ms (plus a dumpsys); the display
+            // time is itself an adb poll, so allow for both.
+            let lag = seen.saturating_sub(display);
+            assert!(lag <= Duration::from_secs(1), "rotation {rotation}: watcher {lag:?} behind");
         }
         assert_eq!(leftover.trim(), "0", "the guest loop outlived the watcher");
+    }
+
+    /// Soak length and sample interval: APERTURE_SOAK_MINUTES (30) and
+    /// APERTURE_SOAK_SAMPLE_SECS (300).
+    fn soak_timing() -> (Duration, Duration) {
+        let read = |key: &str, default: u64| {
+            std::env::var(key)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(default)
+        };
+        (
+            Duration::from_secs(read("APERTURE_SOAK_MINUTES", 30) * 60),
+            Duration::from_secs(read("APERTURE_SOAK_SAMPLE_SECS", 300)),
+        )
+    }
+
+    /// Guest memory and process counts, for the soak samples.
+    fn trial_guest_stats(serial: &str) -> String {
+        trial_shell(
+            serial,
+            &[
+                "shell",
+                "echo \"avail=$(grep MemAvailable /proc/meminfo | tr -s ' ' | cut -d' ' -f2)kB procs=$(ps -A | wc -l) watch_loops=$(ps -A -o ARGS | grep -c '[m]CurrentOrientation') helpers=$(ps -A -o ARGS | grep -c '[c]om.genymobile.scrcpy') load=$(cut -d' ' -f1-3 /proc/loadavg)\"",
+            ],
+        )
+        .trim()
+        .to_owned()
+    }
+
+    #[test]
+    #[ignore = "Streams the running Aperture_Trial_Play35 emulator through the host GPU for 30 minutes"]
+    fn soak_host_stream() {
+        let serial = trial_serial();
+        capture_log();
+        let (length, every) = soak_timing();
+        let runtime = test_runtime();
+        trial_open_settings(&serial);
+        let (sender, mut events) =
+            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
+        let session = GuestSession::start(trial_select(), sender).unwrap();
+        wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), None)
+            .expect("no stream_ready within 10 s");
+        // One time-bounded on-device loop keeps the Settings list moving.
+        let swiper = {
+            let serial = serial.clone();
+            let secs = length.as_secs() + 30;
+            thread::spawn(move || {
+                trial_shell(
+                    &serial,
+                    &[
+                        "shell",
+                        &format!("end=$(( $(date +%s) + {secs} )); while [ $(date +%s) -lt $end ]; do input swipe 540 1700 540 900 400; input swipe 540 900 540 1700 400; done"),
+                    ],
+                );
+            })
+        };
+        let started = Instant::now();
+        let mut frame_times: std::collections::VecDeque<Instant> = Default::default();
+        let mut next_sample = started + Duration::from_secs(30);
+        while started.elapsed() < length + Duration::from_secs(31) {
+            if let Some(GuestEvent::Frame(_)) =
+                next_event(&runtime, &mut events, Duration::from_millis(50))
+            {
+                frame_times.push_back(Instant::now());
+            }
+            while frame_times
+                .front()
+                .is_some_and(|time| time.elapsed() > Duration::from_secs(60))
+            {
+                frame_times.pop_front();
+            }
+            if Instant::now() >= next_sample {
+                next_sample += every;
+                let last_5s = frame_times
+                    .iter()
+                    .filter(|time| time.elapsed() <= Duration::from_secs(5))
+                    .count();
+                let per_5s_over_minute = frame_times.len() as f64 / 12.0;
+                let timing = CAPTURED_LOG
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|line| line.contains("Guest video (host GPU)"))
+                    .cloned()
+                    .unwrap_or_default();
+                eprintln!(
+                    "SOAK host t={:>4}s frames/5s={last_5s} (minute avg {per_5s_over_minute:.0}) guest[{}] timing[{timing}]",
+                    started.elapsed().as_secs(),
+                    trial_guest_stats(&serial)
+                );
+            }
+        }
+        close(&runtime, session, events);
+        let _ = swiper.join();
+        eprintln!("SOAK host end guest[{}]", trial_guest_stats(&serial));
+    }
+
+    #[test]
+    #[ignore = "Runs the rotation watcher shell in the running Aperture_Trial_Play35 emulator"]
+    fn real_closed_job_ends_the_watcher_shell() {
+        use std::io::BufRead;
+        let serial = trial_serial();
+        let loops = || {
+            trial_shell(&serial, &["shell", "ps -A -o ARGS | grep -c '[m]CurrentOrientation'"])
+                .trim()
+                .to_owned()
+        };
+        assert_eq!(loops(), "0", "a watcher loop is already running");
+        let (mut child, stdout) =
+            avd_host_video::spawn_rotation_shell(&trial_adb(), &serial).unwrap();
+        // Stands in for this process's lifetime job: closing it is what an
+        // abrupt exit does.
+        let job = super::super::guest_runtime::KillOnCloseJob::new().unwrap();
+        job.assign(&child).unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stdout).read_line(&mut line).unwrap();
+        assert!(line.starts_with("r="), "{line:?}");
+        assert_eq!(loops(), "1");
+        drop(job);
+        let closed = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(closed.elapsed() < Duration::from_secs(2), "adb outlived the job");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let host_gone = closed.elapsed();
+        let guest_gone = loop {
+            if loops() == "0" {
+                break closed.elapsed();
+            }
+            assert!(closed.elapsed() < Duration::from_secs(10), "the guest loop outlived adb");
+            thread::sleep(Duration::from_millis(250));
+        };
+        eprintln!("RESULT job closed: adb gone after {host_gone:?}, guest loop gone after {guest_gone:?}");
     }
 
     #[test]

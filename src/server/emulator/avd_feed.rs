@@ -629,6 +629,82 @@ mod tests {
         assert!(count >= 400, "only {count} images");
     }
 
+    /// The raw feed alone (no session, watcher or helper) under the same
+    /// moving screen as the host soak: APERTURE_SOAK_MINUTES (30),
+    /// APERTURE_SOAK_SAMPLE_SECS (300).
+    #[test]
+    #[ignore = "reads the running Aperture_Trial_Play35 emulator's feed for 30 minutes"]
+    fn soak_raw_feed() {
+        use std::time::{Duration, Instant};
+        let read = |key: &str, default: u64| {
+            std::env::var(key)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(default)
+        };
+        let length = Duration::from_secs(read("APERTURE_SOAK_MINUTES", 30) * 60);
+        let every = Duration::from_secs(read("APERTURE_SOAK_SAMPLE_SECS", 300));
+        let serial = trial_serial();
+        let stats = |serial: &str| {
+            adb(&[
+                "-s",
+                serial,
+                "shell",
+                "echo \"avail=$(grep MemAvailable /proc/meminfo | tr -s ' ' | cut -d' ' -f2)kB procs=$(ps -A | wc -l) watch_loops=$(ps -A -o ARGS | grep -c '[m]CurrentOrientation') helpers=$(ps -A -o ARGS | grep -c '[c]om.genymobile.scrcpy') load=$(cut -d' ' -f1-3 /proc/loadavg)\"",
+            ])
+            .trim()
+            .to_owned()
+        };
+        for package in ["com.android.settings", "com.google.android.settings.intelligence"] {
+            adb(&["-s", &serial, "shell", "am", "force-stop", package]);
+        }
+        adb(&["-s", &serial, "shell", "am", "start", "-f", "0x10008000", "-a", "android.settings.SETTINGS"]);
+        std::thread::sleep(Duration::from_secs(3));
+        let (feed, rx) = ScreenFeed::start(discover(TRIAL_AVD).unwrap(), 1280, 1280).unwrap();
+        let swiper = {
+            let serial = serial.clone();
+            let secs = length.as_secs() + 30;
+            std::thread::spawn(move || {
+                adb(&[
+                    "-s",
+                    &serial,
+                    "shell",
+                    &format!("end=$(( $(date +%s) + {secs} )); while [ $(date +%s) -lt $end ]; do input swipe 540 1700 540 900 400; input swipe 540 900 540 1700 400; done"),
+                ]);
+            })
+        };
+        let started = Instant::now();
+        let mut times: std::collections::VecDeque<Instant> = Default::default();
+        let mut next_sample = started + Duration::from_secs(30);
+        while started.elapsed() < length + Duration::from_secs(31) {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(_)) => times.push_back(Instant::now()),
+                Ok(Err(e)) => panic!("feed error: {e}"),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(e) => panic!("feed stopped: {e}"),
+            }
+            while times.front().is_some_and(|time| time.elapsed() > Duration::from_secs(60)) {
+                times.pop_front();
+            }
+            if Instant::now() >= next_sample {
+                next_sample += every;
+                let last_5s = times
+                    .iter()
+                    .filter(|time| time.elapsed() <= Duration::from_secs(5))
+                    .count();
+                eprintln!(
+                    "SOAK feed t={:>4}s images/5s={last_5s} (minute avg {:.0}) guest[{}]",
+                    started.elapsed().as_secs(),
+                    times.len() as f64 / 12.0,
+                    stats(&serial)
+                );
+            }
+        }
+        drop(feed);
+        let _ = swiper.join();
+        eprintln!("SOAK feed end guest[{}]", stats(&serial));
+    }
+
     #[test]
     #[ignore = "needs the running Aperture_Trial_Play35 emulator"]
     fn unauthenticated_feed_is_an_error() {
