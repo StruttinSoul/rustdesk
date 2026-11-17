@@ -2061,7 +2061,7 @@ impl Connection {
                 bail!("{}", err);
             }
             if paused {
-                log::debug!("Audit post paused (attempt {}/{}): {}", attempt, ATTEMPTS, err);
+                log::trace!("Audit post paused (attempt {}/{}): {}", attempt, ATTEMPTS, err);
             } else {
                 log::warn!(
                     "Audit post failed (attempt {}/{}): {}",
