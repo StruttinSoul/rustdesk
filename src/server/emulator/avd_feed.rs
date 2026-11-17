@@ -7,7 +7,18 @@ use hbb_common::{
     protobuf::{CodedInputStream, CodedOutputStream},
     ResultType,
 };
-use std::{fmt, path::PathBuf};
+use hbb_common::tokio::{self, sync::Notify};
+use std::{
+    fmt,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, TrySendError},
+        Arc,
+    },
+    thread::JoinHandle,
+    time::Duration,
+};
 
 const RGBA8888: i32 = 1;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -246,6 +257,220 @@ impl GrpcDeframer {
     }
 }
 
+const STREAM_PATH: &str = "/android.emulation.control.EmulatorController/streamScreenshot";
+const WINDOW_BYTES: u32 = 32 * 1024 * 1024;
+const FRAME_BYTES: u32 = 1024 * 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn grpc_code_name(code: i32) -> &'static str {
+    match code {
+        1 => "CANCELLED",
+        2 => "UNKNOWN",
+        3 => "INVALID_ARGUMENT",
+        5 => "NOT_FOUND",
+        7 => "PERMISSION_DENIED",
+        8 => "RESOURCE_EXHAUSTED",
+        12 => "UNIMPLEMENTED",
+        13 => "INTERNAL",
+        14 => "UNAVAILABLE",
+        16 => "UNAUTHENTICATED",
+        _ => "ERROR",
+    }
+}
+
+/// An error for a non-zero `grpc-status` in `headers` (response headers or
+/// trailers); `None` when there is no status or it is 0. Only the status and
+/// message are used, never other header values.
+fn grpc_status_error(headers: &http::HeaderMap) -> Option<hbb_common::anyhow::Error> {
+    let code: i32 = headers
+        .get("grpc-status")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if code == 0 {
+        return None;
+    }
+    let message = headers
+        .get("grpc-message")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect::<String>();
+    Some(hbb_common::anyhow::anyhow!(
+        "the screen feed failed: gRPC status {code} ({}) {message}",
+        grpc_code_name(code)
+    ))
+}
+
+/// Validates the decoded image and hands it to the consumer. Latest-wins: if
+/// the consumer has not taken the previous image yet, this newer one is
+/// dropped. Returns false once the consumer is gone.
+fn deliver(tx: &mpsc::SyncSender<ResultType<FeedImage>>, message: &[u8]) -> ResultType<bool> {
+    let image = decode_image(message)?;
+    let expected = (image.width as usize)
+        .checked_mul(image.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4));
+    if image.width == 0 || image.height == 0 || expected != Some(image.pixels.len()) {
+        bail!(
+            "the screen feed sent a {}x{} image with {} pixel bytes",
+            image.width,
+            image.height,
+            image.pixels.len()
+        );
+    }
+    match tx.try_send(Ok(image)) {
+        Ok(()) | Err(TrySendError::Full(_)) => Ok(true),
+        Err(TrySendError::Disconnected(_)) => Ok(false),
+    }
+}
+
+async fn stream_images(
+    endpoint: FeedEndpoint,
+    width: u32,
+    height: u32,
+    tx: &mpsc::SyncSender<ResultType<FeedImage>>,
+) -> ResultType<()> {
+    let tcp = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect(("127.0.0.1", endpoint.port)),
+    )
+    .await
+    .map_err(|_| hbb_common::anyhow::anyhow!("timed out connecting to the emulator screen feed"))?
+    .map_err(|e| hbb_common::anyhow::anyhow!("cannot connect to the emulator screen feed: {e}"))?;
+    let _ = tcp.set_nodelay(true);
+    let (sender, connection) = h2::client::Builder::new()
+        .initial_window_size(WINDOW_BYTES)
+        .initial_connection_window_size(WINDOW_BYTES)
+        .max_frame_size(FRAME_BYTES)
+        .handshake::<_, hbb_common::bytes::Bytes>(tcp)
+        .await?;
+    let driver = tokio::spawn(connection);
+    let result = async {
+        let mut auth = http::HeaderValue::from_str(&endpoint.token.bearer())
+            .map_err(|_| hbb_common::anyhow::anyhow!("the emulator gRPC token is not valid"))?;
+        auth.set_sensitive(true);
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{}{STREAM_PATH}", endpoint.port))
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .header("authorization", auth)
+            .body(())?;
+        let mut sender = sender.ready().await?;
+        let (response, mut send_body) = sender.send_request(request, false)?;
+        send_body.send_data(
+            hbb_common::bytes::Bytes::from(grpc_frame(&encode_image_format(width, height))),
+            true,
+        )?;
+        let response = response.await?;
+        if let Some(error) = grpc_status_error(response.headers()) {
+            return Err(error);
+        }
+        if response.status() != http::StatusCode::OK {
+            bail!("the screen feed answered HTTP {}", response.status().as_u16());
+        }
+        let mut body = response.into_body();
+        let mut deframer = GrpcDeframer::default();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk?;
+            let _ = body.flow_control().release_capacity(chunk.len());
+            for message in deframer.push(&chunk)? {
+                if !deliver(tx, &message)? {
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(error) = body.trailers().await?.as_ref().and_then(grpc_status_error) {
+            return Err(error);
+        }
+        bail!("the screen feed ended")
+    }
+    .await;
+    driver.abort();
+    result
+}
+
+/// A running AVD screen feed. Dropping it cancels the stream and joins its
+/// thread.
+pub struct ScreenFeed {
+    cancelled: Arc<AtomicBool>,
+    cancel: Arc<Notify>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ScreenFeed {
+    /// Starts streaming `width`x`height` RGBA frames. Returns promptly; a
+    /// connect or auth failure arrives as the first `Err` on the channel. The
+    /// channel holds one image: while the consumer is behind, newer images are
+    /// dropped. An `Err` is always delivered and is the last item.
+    pub fn start(
+        endpoint: FeedEndpoint,
+        width: u32,
+        height: u32,
+    ) -> ResultType<(ScreenFeed, mpsc::Receiver<ResultType<FeedImage>>)> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(Notify::new());
+        let thread = {
+            let cancelled = cancelled.clone();
+            let cancel = cancel.clone();
+            std::thread::Builder::new()
+                .name("emulator-feed".to_owned())
+                .spawn(move || {
+                    let error = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => runtime.block_on(async {
+                            tokio::select! {
+                                _ = cancel.notified() => None,
+                                result = stream_images(endpoint, width, height, &tx) => {
+                                    result.err()
+                                }
+                            }
+                        }),
+                        Err(e) => Some(hbb_common::anyhow::anyhow!(
+                            "cannot start the screen feed runtime: {e}"
+                        )),
+                    };
+                    let Some(error) = error else { return };
+                    // Unlike images, the terminal error is never dropped.
+                    let mut item = Err(error);
+                    while !cancelled.load(Ordering::Relaxed) {
+                        match tx.try_send(item) {
+                            Err(TrySendError::Full(back)) => {
+                                item = back;
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Ok(()) | Err(TrySendError::Disconnected(_)) => break,
+                        }
+                    }
+                })?
+        };
+        Ok((
+            ScreenFeed {
+                cancelled,
+                cancel,
+                thread: Some(thread),
+            },
+            rx,
+        ))
+    }
+}
+
+impl Drop for ScreenFeed {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.cancel.notify_one();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +551,95 @@ mod tests {
         assert!(GrpcDeframer::default()
             .push(&[1, 0, 0, 0, 1, 0])
             .is_err());
+    }
+
+    const TRIAL_AVD: &str = "Aperture_Trial_Play35";
+
+    fn adb_path() -> PathBuf {
+        PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
+            .join("Android")
+            .join("Sdk")
+            .join("platform-tools")
+            .join("adb.exe")
+    }
+
+    fn adb(args: &[&str]) -> String {
+        let out = std::process::Command::new(adb_path()).args(args).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn trial_serial() -> String {
+        let devices = adb(&["devices"]);
+        for line in devices.lines().skip(1) {
+            let serial = line.split_whitespace().next().unwrap_or("");
+            if !serial.starts_with("emulator-") {
+                continue;
+            }
+            if adb(&["-s", serial, "emu", "avd", "name"])
+                .lines()
+                .next()
+                .map(str::trim)
+                == Some(TRIAL_AVD)
+            {
+                return serial.to_owned();
+            }
+        }
+        panic!("{TRIAL_AVD} is not running");
+    }
+
+    #[test]
+    #[ignore = "needs the running Aperture_Trial_Play35 emulator"]
+    fn real_feed_streams_moving_screen_near_sixty_fps() {
+        let serial = trial_serial();
+        let endpoint = discover(TRIAL_AVD).unwrap();
+        let (feed, rx) = ScreenFeed::start(endpoint, 1280, 1280).unwrap();
+        // One bounded on-device loop: no adb round trips between swipes, so the
+        // screen keeps moving for the whole measurement.
+        adb(&["-s", &serial, "shell", "input", "keyevent", "KEYCODE_HOME"]);
+        let swiper = {
+            let serial = serial.clone();
+            std::thread::spawn(move || {
+                adb(&[
+                    "-s",
+                    &serial,
+                    "shell",
+                    "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do input swipe 800 1500 100 1500 250; input swipe 100 1500 800 1500 250; done",
+                ]);
+            })
+        };
+        let begin = std::time::Instant::now();
+        let mut count = 0usize;
+        while begin.elapsed() < std::time::Duration::from_secs(8) {
+            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(Ok(image)) => {
+                    assert_eq!(image.width.max(image.height), 1280);
+                    assert_eq!(image.pixels.len(), (image.width * image.height * 4) as usize);
+                    count += 1;
+                }
+                Ok(Err(e)) => panic!("feed error: {e}"),
+                Err(e) => panic!("no image: {e}"),
+            }
+        }
+        let secs = begin.elapsed().as_secs_f64();
+        let _ = swiper.join();
+        let dropped = std::time::Instant::now();
+        drop(feed);
+        assert!(dropped.elapsed() < std::time::Duration::from_secs(2));
+        println!("feed fps: {:.1} ({count} images in {secs:.1}s)", count as f64 / secs);
+        assert!(count >= 400, "only {count} images");
+    }
+
+    #[test]
+    #[ignore = "needs the running Aperture_Trial_Play35 emulator"]
+    fn unauthenticated_feed_is_an_error() {
+        let real = discover(TRIAL_AVD).unwrap();
+        let wrong = FeedEndpoint {
+            port: real.port,
+            token: FeedToken("wrong".to_owned()),
+        };
+        let (_feed, rx) = ScreenFeed::start(wrong, 1280, 1280).unwrap();
+        let first = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let error = first.unwrap_err().to_string();
+        assert!(error.contains("UNAUTHENTICATED") || error.contains("16"), "{error}");
     }
 }
