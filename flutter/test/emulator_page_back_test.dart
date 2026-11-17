@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart' show Axis;
 import 'package:flutter_hbb/mobile/pages/emulator_page.dart';
 import 'package:flutter_hbb/mobile/widgets/play_rail.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -18,18 +19,13 @@ void main() {
     expect(g.press(t0.add(const Duration(milliseconds: 2500))), isTrue);
   });
 
-  test('the back hint floats clear of the rail', () {
-    for (final placement in [
-      PlayRailPlacement.bottom,
-      PlayRailPlacement.collapsed,
-    ]) {
-      final margin = backHintMargin(placement);
-      expect(margin.bottom, greaterThanOrEqualTo(kPlayRailBottomHeight),
-          reason: placement.name);
-    }
-    final side = backHintMargin(PlayRailPlacement.side);
-    expect(side.right, greaterThanOrEqualTo(kPlayRailSideWidth));
-    expect(side.bottom, lessThan(kPlayRailBottomHeight));
+  test('the back hint floats clear of the navigation bar', () {
+    final bottom = backHintMargin(Axis.horizontal);
+    expect(bottom.bottom, greaterThanOrEqualTo(kPlayNavBarThickness));
+    expect(bottom.right, lessThan(kPlayNavBarThickness));
+    final side = backHintMargin(Axis.vertical);
+    expect(side.right, greaterThanOrEqualTo(kPlayNavBarThickness));
+    expect(side.bottom, lessThan(kPlayNavBarThickness));
   });
 
   test('reset forgets the first press', () {

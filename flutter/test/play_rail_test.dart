@@ -14,18 +14,13 @@ const _accounts = [
   PlayAccount(id: 'avd:Alt-2', label: 'Alt-2', word: EmulatorUiWord.starting),
 ];
 
-Future<void> _pumpRail(
+Future<void> _pumpBar(
   WidgetTester tester, {
   required Size size,
   Axis axis = Axis.horizontal,
-  List<PlayAccount> accounts = _accounts,
-  bool switching = false,
-  List<String>? selected,
   List<String>? nav,
-  void Function()? onAll,
-  void Function()? onGrid,
-  void Function()? onActions,
-  void Function()? onType,
+  bool navigable = true,
+  VoidCallback? onMenu,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -33,169 +28,68 @@ Future<void> _pumpRail(
   await tester.pumpWidget(MaterialApp(
     theme: MirpgRemoteTheme.build(ThemeData.dark()),
     home: Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Colors.grey,
       body: Align(
         alignment: axis == Axis.horizontal
             ? Alignment.bottomCenter
             : Alignment.centerRight,
-        child: SizedBox(
-          width: axis == Axis.horizontal ? size.width : kPlayRailSideWidth,
-          height: axis == Axis.horizontal ? kPlayRailBottomHeight : size.height,
-          child: PlayRail(
-            accounts: accounts,
-            currentId: 'avd:Main',
-            axis: axis,
-            onSelect: (id) => selected?.add(id),
-            onShowAll: onAll,
-            onGrid: onGrid ?? () {},
-            onGridLongPress: onActions,
-            onType: onType,
-            onNavigate: nav?.add,
-            switching: switching,
-            tr: fakeTr,
-          ),
+        child: PlayNavBar(
+          axis: axis,
+          onNavigate: navigable ? (action) => nav?.add(action) : null,
+          onMenu: onMenu ?? () {},
+          tr: fakeTr,
         ),
       ),
     ),
   ));
 }
 
+/// The whole button (its touch target) for a tooltip.
+Rect _button(WidgetTester tester, String tooltip) => tester.getRect(find
+    .ancestor(of: find.byTooltip(tooltip), matching: find.byType(IconButton))
+    .first);
+
+/// A page with one button that opens the menu, as the game does.
+Future<void> _openMenu(
+  WidgetTester tester, {
+  List<PlayAccount> accounts = _accounts,
+  bool switching = false,
+  List<String>? selected,
+  VoidCallback? onAll,
+  VoidCallback? onGrid,
+  VoidCallback? onActions,
+  VoidCallback? onType,
+}) async {
+  tester.view.physicalSize = const Size(412, 915);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(MaterialApp(
+    theme: MirpgRemoteTheme.build(ThemeData.dark()),
+    home: Scaffold(
+      body: Builder(
+        builder: (context) => TextButton(
+          onPressed: () => showPlayMenu(
+            context,
+            accounts: accounts,
+            currentId: 'avd:Main',
+            switching: switching,
+            onSelect: (id) => selected?.add(id),
+            onShowAll: onAll,
+            onGrid: onGrid ?? () {},
+            onCurrentActions: onActions,
+            onType: onType,
+            tr: fakeTr,
+          ),
+          child: const Text('open'),
+        ),
+      ),
+    ),
+  ));
+  await tester.tap(find.text('open'));
+  await tester.pumpAndSettle();
+}
+
 void main() {
-  test('portrait 9:16 game on a 19.5:9 phone docks the rail at the bottom', () {
-    expect(
-        playRailPlacement(
-            viewport: const Size(412, 915),
-            guestWidth: 1080,
-            guestHeight: 1920),
-        PlayRailPlacement.bottom);
-  });
-  test('landscape 16:9 game docks the rail on the short edge', () {
-    expect(
-        playRailPlacement(
-            viewport: const Size(915, 412),
-            guestWidth: 1920,
-            guestHeight: 1080),
-        PlayRailPlacement.side);
-  });
-  test('a game that fills the screen collapses the rail', () {
-    expect(
-        playRailPlacement(
-            viewport: const Size(915, 412),
-            guestWidth: 2400,
-            guestHeight: 1080),
-        PlayRailPlacement.collapsed);
-  });
-  test('small viewport changes near the threshold do not flip the rail', () {
-    // 9:16 guest, width 412: frame height 732.4. A docked bottom rail needs
-    // 88 dp of spare height; docking from collapsed needs 88 + 16.
-    PlayRailPlacement at(double height, [PlayRailPlacement? previous]) =>
-        playRailPlacement(
-            viewport: Size(412, height),
-            guestWidth: 1080,
-            guestHeight: 1920,
-            previous: previous);
-    expect(at(837), PlayRailPlacement.bottom, reason: '104.6 dp spare docks');
-    expect(at(821), PlayRailPlacement.collapsed,
-        reason: '88.6 dp fits but is inside the docking margin');
-    expect(at(821, PlayRailPlacement.bottom), PlayRailPlacement.bottom,
-        reason: 'A docked rail stays while it still fits');
-    // Spec 3.3 over the plan's pinned value: a docked rail never shrinks the
-    // game, so 77.6 dp spare collapses even when it was docked.
-    expect(at(810, PlayRailPlacement.bottom), isNot(PlayRailPlacement.bottom));
-    expect(at(810), isNot(PlayRailPlacement.bottom));
-    expect(at(800, PlayRailPlacement.bottom), isNot(PlayRailPlacement.bottom));
-  });
-  test('1 to 15 dp jitter (system bars, insets) never flips the rail', () {
-    for (var d = 1; d <= 15; d++) {
-      // Docked at 104.6 dp spare: losing up to 15 dp still holds 88.
-      expect(
-          playRailPlacement(
-              viewport: Size(412, 837.0 - d),
-              guestWidth: 1080,
-              guestHeight: 1920,
-              previous: PlayRailPlacement.bottom),
-          PlayRailPlacement.bottom,
-          reason: 'bottom loses $d dp');
-      // Side: 821 dp wide leaves 88.6 dp beside a 16:9 game (docks); losing
-      // up to 15 dp still holds the 72 dp rail.
-      expect(
-          playRailPlacement(
-              viewport: Size(821.0 - d, 412),
-              guestWidth: 1920,
-              guestHeight: 1080,
-              previous: PlayRailPlacement.side),
-          PlayRailPlacement.side,
-          reason: 'side loses $d dp');
-      // Collapsed just at the docked minimum: gaining up to 15 dp does not
-      // dock it.
-      expect(
-          playRailPlacement(
-              viewport: Size(412, 821.0 + d),
-              guestWidth: 1080,
-              guestHeight: 1920,
-              previous: PlayRailPlacement.collapsed),
-          PlayRailPlacement.collapsed,
-          reason: 'bottom gains $d dp');
-      expect(
-          playRailPlacement(
-              viewport: Size(805.0 + d, 412),
-              guestWidth: 1920,
-              guestHeight: 1080,
-              previous: PlayRailPlacement.collapsed),
-          PlayRailPlacement.collapsed,
-          reason: 'side gains $d dp');
-    }
-  });
-  test('a docked rail never leaves the video smaller than the game', () {
-    for (final previous in [
-      null,
-      PlayRailPlacement.bottom,
-      PlayRailPlacement.side,
-      PlayRailPlacement.collapsed,
-    ]) {
-      for (var size = 600.0; size <= 1100; size += 1) {
-        for (final (viewport, gw, gh) in [
-          (Size(412, size), 1080, 1920),
-          (Size(size, 412), 1920, 1080),
-          (Size(size, 412), 1080, 1920),
-          (Size(412, size), 1920, 1080),
-        ]) {
-          final placement = playRailPlacement(
-              viewport: viewport,
-              guestWidth: gw,
-              guestHeight: gh,
-              previous: previous);
-          final game = containedGuestFrame(
-              viewportWidth: viewport.width,
-              viewportHeight: viewport.height,
-              guestWidth: gw,
-              guestHeight: gh)!;
-          final video = switch (placement) {
-            PlayRailPlacement.bottom =>
-              Size(viewport.width, viewport.height - kPlayRailBottomHeight),
-            PlayRailPlacement.side =>
-              Size(viewport.width - kPlayRailSideWidth, viewport.height),
-            PlayRailPlacement.collapsed => viewport,
-          };
-          final shown = containedGuestFrame(
-              viewportWidth: video.width,
-              viewportHeight: video.height,
-              guestWidth: gw,
-              guestHeight: gh)!;
-          expect(shown.width, closeTo(game.width, 1e-6),
-              reason: '$viewport $gw×$gh after $previous: $placement');
-          expect(shown.height, closeTo(game.height, 1e-6),
-              reason: '$viewport $gw×$gh after $previous: $placement');
-        }
-      }
-    }
-  });
-  test('a missing guest size collapses the rail', () {
-    expect(
-        playRailPlacement(
-            viewport: const Size(412, 915), guestWidth: 0, guestHeight: 0),
-        PlayRailPlacement.collapsed);
-  });
   test('chips list live and starting emulators plus the current one', () {
     const all = [
       PlayAccount(id: 'a', label: 'A', word: EmulatorUiWord.live),
@@ -238,113 +132,216 @@ void main() {
     expect(c.visible, isFalse);
   });
 
-  testWidgets('chips follow grid order and mark the current account',
-      (tester) async {
-    final selected = <String>[];
-    await _pumpRail(tester, size: const Size(412, 915), selected: selected);
-    final main = tester.getCenter(find.text('Main')).dx;
-    final alt1 = tester.getCenter(find.text('Alt-1')).dx;
-    final alt2 = tester.getCenter(find.text('Alt-2')).dx;
-    expect(main, lessThan(alt1));
-    expect(alt1, lessThan(alt2));
-    expect(
-        tester
-            .getSemantics(find.text('Main'))
-            .hasFlag(SemanticsFlag.isSelected),
-        isTrue);
-    expect(
-        tester
-            .getSemantics(find.text('Alt-1'))
-            .hasFlag(SemanticsFlag.isSelected),
-        isFalse);
-    await tester.tap(find.text('Alt-1'));
-    await tester.pump();
-    expect(selected, ['avd:Alt-1']);
-    await tester.tap(find.text('Main'));
-    await tester.pump();
-    expect(selected, ['avd:Alt-1'], reason: 'The current chip does nothing');
-    expect(tester.takeException(), isNull);
+  group('PlayNavBar', () {
+    testWidgets('portrait: a 48 dp bar, full width, at the bottom',
+        (tester) async {
+      await _pumpBar(tester, size: const Size(412, 915));
+      final bar = tester.getRect(find.byType(PlayNavBar));
+      expect(bar.height, kPlayNavBarThickness);
+      expect(bar.width, 412);
+      expect(bar.bottom, 915);
+      expect(
+          tester.widget<Material>(find.descendant(
+              of: find.byType(PlayNavBar), matching: find.byType(Material))
+              .first).color,
+          const Color(0xFF000000),
+          reason: 'Near black like the system navigation bar');
+      expect(find.byType(FloatingActionButton), findsNothing);
+    });
+
+    testWidgets('Back, Home and Recents send the same keys as before',
+        (tester) async {
+      final nav = <String>[];
+      await _pumpBar(tester, size: const Size(412, 915), nav: nav);
+      for (final key in ['Back', 'Home', 'Recents']) {
+        await tester.tap(find.byTooltip(key));
+        await tester.pump();
+      }
+      expect(nav, ['back', 'home', 'recents']);
+    });
+
+    testWidgets('keys are evenly spaced and every target is 48 dp',
+        (tester) async {
+      await _pumpBar(tester, size: const Size(412, 915));
+      final back = _button(tester, 'Back');
+      final home = _button(tester, 'Home');
+      final recents = _button(tester, 'Recents');
+      final more = _button(tester, 'More');
+      expect(back.center.dx, lessThan(home.center.dx));
+      expect(home.center.dx, lessThan(recents.center.dx));
+      expect(recents.center.dx, lessThan(more.center.dx));
+      expect(home.center.dx - back.center.dx,
+          closeTo(recents.center.dx - home.center.dx, 0.5));
+      expect(more.right, closeTo(412, 0.5),
+          reason: 'The menu icon is at the far right');
+      for (final rect in [back, home, recents, more]) {
+        expect(rect.width, greaterThanOrEqualTo(48));
+        expect(rect.height, greaterThanOrEqualTo(48));
+      }
+    });
+
+    testWidgets('the menu icon opens the menu', (tester) async {
+      var menus = 0;
+      await _pumpBar(tester,
+          size: const Size(412, 915), onMenu: () => menus++);
+      await tester.tap(find.byTooltip('More'));
+      expect(menus, 1);
+    });
+
+    testWidgets('keys are disabled without navigation, the menu stays',
+        (tester) async {
+      var menus = 0;
+      await _pumpBar(tester,
+          size: const Size(412, 915),
+          navigable: false,
+          onMenu: () => menus++);
+      for (final key in ['Back', 'Home', 'Recents']) {
+        final button = tester.widget<IconButton>(find.ancestor(
+            of: find.byTooltip(key), matching: find.byType(IconButton)));
+        expect(button.onPressed, isNull, reason: key);
+      }
+      await tester.tap(find.byTooltip('More'));
+      expect(menus, 1);
+    });
+
+    testWidgets('landscape: a 48 dp strip on the right with icons stacked',
+        (tester) async {
+      final nav = <String>[];
+      await _pumpBar(tester,
+          size: const Size(915, 412), axis: Axis.vertical, nav: nav);
+      final bar = tester.getRect(find.byType(PlayNavBar));
+      expect(bar.width, kPlayNavBarThickness);
+      expect(bar.height, 412);
+      expect(bar.right, 915);
+      final back = _button(tester, 'Back');
+      final home = _button(tester, 'Home');
+      final recents = _button(tester, 'Recents');
+      final more = _button(tester, 'More');
+      for (final rect in [back, home, recents, more]) {
+        expect(rect.center.dx, closeTo(915 - 24, 0.5));
+        expect(rect.width, greaterThanOrEqualTo(48));
+      }
+      // Android stacks them Recents, Home, Back from the top.
+      expect(more.center.dy, lessThan(recents.center.dy));
+      expect(recents.center.dy, lessThan(home.center.dy));
+      expect(home.center.dy, lessThan(back.center.dy));
+      await tester.tap(find.byTooltip('Back'));
+      await tester.tap(find.byTooltip('Home'));
+      await tester.tap(find.byTooltip('Recents'));
+      expect(nav, ['back', 'home', 'recents']);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a very short landscape screen does not overflow',
+        (tester) async {
+      await _pumpBar(tester, size: const Size(915, 200), axis: Axis.vertical);
+      expect(tester.takeException(), isNull);
+    });
   });
 
-  testWidgets('chips are disabled while a switch is connecting',
-      (tester) async {
-    final selected = <String>[];
-    await _pumpRail(tester,
-        size: const Size(412, 915), selected: selected, switching: true);
-    await tester.tap(find.text('Alt-1'));
-    await tester.pump();
-    expect(selected, isEmpty);
-  });
+  group('showPlayMenu', () {
+    testWidgets('holds the switcher, keyboard, grid and emulator actions',
+        (tester) async {
+      await _openMenu(tester,
+          onAll: () {}, onType: () {}, onActions: () {});
+      for (final name in ['Main', 'Alt-1', 'Alt-2']) {
+        expect(find.text(name), findsOneWidget, reason: name);
+      }
+      expect(find.byTooltip('Show all emulators'), findsOneWidget);
+      expect(find.text('Type text'), findsOneWidget);
+      expect(find.text('Emulators'), findsOneWidget);
+      expect(find.text('More Main actions'), findsOneWidget);
+      expect(find.byType(FloatingActionButton), findsNothing);
+    });
 
-  testWidgets('plus opens the full list and keys keep their actions',
-      (tester) async {
-    var all = 0, grid = 0, actions = 0, typed = 0;
-    final nav = <String>[];
-    await _pumpRail(
-      tester,
-      size: const Size(412, 915),
-      nav: nav,
-      onAll: () => all++,
-      onGrid: () => grid++,
-      onActions: () => actions++,
-      onType: () => typed++,
-    );
-    await tester.tap(find.byTooltip('Show all emulators'));
-    await tester.pump();
-    expect(all, 1);
-    await tester.tap(find.byTooltip('Type text'));
-    await tester.pump();
-    expect(typed, 1);
-    for (final key in ['Back', 'Home', 'Recents']) {
-      await tester.tap(find.byTooltip(key));
-      await tester.pump();
-    }
-    expect(nav, ['back', 'home', 'recents']);
-    await tester.longPress(find.byTooltip('Emulators'));
-    await tester.pump();
-    expect(actions, 1);
-    expect(grid, 0);
-    await tester.tap(find.byTooltip('Emulators'));
-    await tester.pump();
-    expect(grid, 1);
-    expect(actions, 1);
-    expect(tester.takeException(), isNull);
-  });
+    testWidgets('chips follow grid order and mark the current emulator',
+        (tester) async {
+      final selected = <String>[];
+      await _openMenu(tester, selected: selected);
+      final main = tester.getCenter(find.text('Main')).dx;
+      final alt1 = tester.getCenter(find.text('Alt-1')).dx;
+      final alt2 = tester.getCenter(find.text('Alt-2')).dx;
+      expect(main, lessThan(alt1));
+      expect(alt1, lessThan(alt2));
+      expect(
+          tester
+              .getSemantics(find.text('Main'))
+              .hasFlag(SemanticsFlag.isSelected),
+          isTrue);
+      expect(
+          tester
+              .getSemantics(find.text('Alt-1'))
+              .hasFlag(SemanticsFlag.isSelected),
+          isFalse);
+      // The current chip does nothing and leaves the menu open.
+      await tester.tap(find.text('Main'));
+      await tester.pumpAndSettle();
+      expect(selected, isEmpty);
+      expect(find.text('Alt-1'), findsOneWidget);
+      // Another chip switches and closes the menu.
+      await tester.tap(find.text('Alt-1'));
+      await tester.pumpAndSettle();
+      expect(selected, ['avd:Alt-1']);
+      expect(find.text('Alt-2'), findsNothing);
+    });
 
-  testWidgets('keys are disabled without their callbacks', (tester) async {
-    await _pumpRail(tester, size: const Size(412, 915));
-    for (final key in ['Type text', 'Back', 'Home', 'Recents']) {
-      final button = tester.widget<IconButton>(find.ancestor(
-          of: find.byTooltip(key), matching: find.byType(IconButton)));
-      expect(button.onPressed, isNull, reason: key);
-    }
-  });
+    testWidgets('chips are disabled while a switch is connecting',
+        (tester) async {
+      final selected = <String>[];
+      await _openMenu(tester, selected: selected, switching: true);
+      await tester.tap(find.text('Alt-1'));
+      await tester.pumpAndSettle();
+      expect(selected, isEmpty);
+    });
 
-  testWidgets('vertical rail fits 72 dp wide at 412 dp tall with four accounts',
-      (tester) async {
-    await _pumpRail(
-      tester,
-      size: const Size(915, 412),
-      axis: Axis.vertical,
-      accounts: const [
-        PlayAccount(id: 'avd:Main', label: 'Main', word: EmulatorUiWord.live),
-        PlayAccount(id: 'avd:Alt-1', label: 'Alt-1', word: EmulatorUiWord.live),
-        PlayAccount(
-            id: 'avd:Alt-2', label: 'Alt-2', word: EmulatorUiWord.starting),
-        PlayAccount(
-            id: 'avd:Alt-3-with-a-long-name',
-            label: 'Alt-3-with-a-long-name',
-            word: EmulatorUiWord.live),
-      ],
-    );
-    expect(tester.takeException(), isNull);
-    expect(find.byTooltip('Recents'), findsOneWidget);
-    expect(tester.getRect(find.byType(PlayRail)).width, kPlayRailSideWidth);
-  });
+    testWidgets('chip touch targets are 48 dp', (tester) async {
+      await _openMenu(tester);
+      final chip = tester.getRect(find
+          .ancestor(of: find.text('Alt-1'), matching: find.byType(InkWell))
+          .first);
+      expect(chip.height, greaterThanOrEqualTo(48));
+    });
 
-  testWidgets('vertical rail survives a very short viewport', (tester) async {
-    await _pumpRail(tester, size: const Size(915, 200), axis: Axis.vertical);
-    expect(tester.takeException(), isNull);
+    testWidgets('each row closes the menu and runs its action',
+        (tester) async {
+      var all = 0, grid = 0, actions = 0, typed = 0;
+      Future<void> open() => _openMenu(tester,
+          onAll: () => all++,
+          onGrid: () => grid++,
+          onActions: () => actions++,
+          onType: () => typed++);
+
+      await open();
+      await tester.tap(find.byTooltip('Show all emulators'));
+      await tester.pumpAndSettle();
+      expect((all, find.text('Type text').evaluate().length), (1, 0));
+
+      await open();
+      await tester.tap(find.text('Type text'));
+      await tester.pumpAndSettle();
+      expect(typed, 1);
+
+      await open();
+      await tester.tap(find.text('Emulators'));
+      await tester.pumpAndSettle();
+      expect(grid, 1);
+
+      await open();
+      await tester.tap(find.text('More Main actions'));
+      await tester.pumpAndSettle();
+      expect(actions, 1);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('keyboard row is disabled when typing is unavailable',
+        (tester) async {
+      await _openMenu(tester);
+      final tile = tester.widget<ListTile>(
+          find.ancestor(of: find.text('Type text'), matching: find.byType(ListTile)));
+      expect(tile.enabled, isFalse);
+      expect(find.text('More Main actions'), findsNothing,
+          reason: 'No actions row without a callback');
+    });
   });
 
   testWidgets('banner widget fades out', (tester) async {

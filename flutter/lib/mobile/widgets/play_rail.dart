@@ -7,49 +7,11 @@ import '../../models/emulator_model.dart';
 import 'emulator_tile.dart' show emulatorStateTone;
 import 'mirpg_remote_theme.dart';
 
-/// Where the in-game play rail goes: docked in the letterbox under the game
-/// (portrait games) or beside it (landscape games), or collapsed to the
-/// round button when the game leaves no room.
-enum PlayRailPlacement { bottom, side, collapsed }
+/// Thickness of the in-game navigation bar: 48 dp tall at the bottom of a
+/// portrait game, 48 dp wide on the right edge of a landscape game.
+const double kPlayNavBarThickness = 48.0;
 
-const kPlayRailAccountsHeight = 40.0,
-    kPlayRailKeysHeight = 48.0,
-    kPlayRailBottomHeight = 88.0,
-    kPlayRailSideWidth = 72.0,
-    kPlayRailHysteresis = 16.0;
-
-/// Docks the rail where the contained game leaves enough black space, so the
-/// rail never covers or shrinks the game. The hysteresis is on the docking
-/// side: a rail docks only when the spare space is [kPlayRailHysteresis]
-/// more than it needs, stays docked while the space still holds it, and
-/// collapses as soon as it would shrink the game. So system bars, insets and
-/// other small viewport changes do not make the rail flicker.
-PlayRailPlacement playRailPlacement({
-  required Size viewport,
-  required int guestWidth,
-  required int guestHeight,
-  PlayRailPlacement? previous,
-}) {
-  final frame = containedGuestFrame(
-      viewportWidth: viewport.width,
-      viewportHeight: viewport.height,
-      guestWidth: guestWidth,
-      guestHeight: guestHeight);
-  if (frame == null) return PlayRailPlacement.collapsed;
-  final spareH = viewport.height - frame.height,
-      spareW = viewport.width - frame.width;
-  double need(PlayRailPlacement p, double base) =>
-      p == previous ? base : base + kPlayRailHysteresis;
-  if (spareH >= need(PlayRailPlacement.bottom, kPlayRailBottomHeight)) {
-    return PlayRailPlacement.bottom;
-  }
-  if (spareW >= need(PlayRailPlacement.side, kPlayRailSideWidth)) {
-    return PlayRailPlacement.side;
-  }
-  return PlayRailPlacement.collapsed;
-}
-
-/// One emulator as a chip on the rail.
+/// One emulator as a chip in the menu.
 class PlayAccount {
   const PlayAccount(
       {required this.id, required this.label, required this.word});
@@ -61,7 +23,7 @@ class PlayAccount {
   final EmulatorUiWord word;
 }
 
-/// The rail's chips: every Live or Starting emulator, plus the one open
+/// The menu's chips: every Live or Starting emulator, plus the one open
 /// (whatever its state), in the order given (the grid order).
 List<PlayAccount> playRailAccounts(Iterable<PlayAccount> all,
         {String? currentId}) =>
@@ -83,201 +45,273 @@ bool playRailCanSwitch({
 }) =>
     id.isNotEmpty && id != currentId && !connecting && !pending;
 
-/// Account chips over the Android keys (mockups 1e, 1f′), or the same items
-/// stacked in a 72 dp column beside a landscape game. Opaque, so a touch
-/// anywhere on the rail never reaches the game under it.
-class PlayRail extends StatelessWidget {
-  const PlayRail({
+/// The in-game controls: a slim bar styled like Android's 3-button
+/// navigation bar. Back, Home and Recents are the guest's Android keys (the
+/// same actions as before); the fourth icon opens the menu with everything
+/// else. Opaque, so a touch anywhere on the bar never reaches the game.
+///
+/// [axis] horizontal is the bottom bar of a portrait game; vertical is the
+/// strip on the right edge of a landscape game, where Android stacks the keys
+/// Recents, Home, Back from the top.
+class PlayNavBar extends StatelessWidget {
+  const PlayNavBar({
     super.key,
-    required this.accounts,
-    required this.currentId,
     required this.axis,
-    required this.onSelect,
-    this.onShowAll,
-    required this.onGrid,
-    this.onGridLongPress,
-    this.onType,
-    this.onNavigate,
-    this.switching = false,
+    required this.onNavigate,
+    required this.onMenu,
     this.tr = translate,
   });
 
-  final List<PlayAccount> accounts;
-  final String currentId;
   final Axis axis;
-  final ValueChanged<String> onSelect;
-  final VoidCallback? onShowAll;
-  final VoidCallback onGrid;
-  final VoidCallback? onGridLongPress;
-  final VoidCallback? onType;
 
   /// `'back' | 'home' | 'recents'`; null while the keys are unavailable.
   final ValueChanged<String>? onNavigate;
-
-  /// A switch is connecting: every chip is disabled.
-  final bool switching;
+  final VoidCallback? onMenu;
   final String Function(String) tr;
 
   static const _palette = MirpgStudioPalette.dark;
 
-  bool get _horizontal => axis == Axis.horizontal;
+  /// Near black like the system bar the game sits above.
+  static const background = Color(0xFF000000);
 
   @override
   Widget build(BuildContext context) {
-    final border = BorderSide(color: _palette.outline);
-    // An opaque Material absorbs every touch on it, so gaps between chips
-    // and keys are still rail, and it gives the ink splashes a surface.
+    final navigate = onNavigate;
+    Widget key(_NavGlyphShape shape, String tooltip, String action) => _NavKey(
+          shape: shape,
+          tooltip: tr(tooltip),
+          onPressed: navigate == null ? null : () => navigate(action),
+        );
+    final back = key(_NavGlyphShape.back, 'Back', 'back');
+    final home = key(_NavGlyphShape.home, 'Home', 'home');
+    final recents = key(_NavGlyphShape.recents, 'Recents', 'recents');
+    final menu = SizedBox.square(
+      dimension: kPlayNavBarThickness,
+      child: IconButton(
+        style: _fixedKey,
+        tooltip: tr('More'),
+        color: _palette.textPrimary,
+        disabledColor: _palette.textSecondary.withOpacity(0.38),
+        onPressed: onMenu,
+        icon: const Icon(Icons.more_vert),
+      ),
+    );
+    final horizontal = axis == Axis.horizontal;
+    final keys = horizontal ? [back, home, recents] : [recents, home, back];
     return Material(
-      color: _palette.background,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          border: _horizontal ? Border(top: border) : Border(left: border),
+      color: background,
+      child: SizedBox(
+        width: horizontal ? null : kPlayNavBarThickness,
+        height: horizontal ? kPlayNavBarThickness : null,
+        child: Flex(
+          direction: axis,
+          children: [
+            // The keys share the space the menu icon leaves.
+            if (!horizontal) menu,
+            Expanded(
+              child: Flex(
+                direction: axis,
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: keys,
+              ),
+            ),
+            if (horizontal) menu,
+          ],
         ),
-        child: _horizontal ? _horizontalRail(context) : _verticalRail(context),
       ),
     );
   }
+}
 
-  Widget _horizontalRail(BuildContext context) => Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            height: kPlayRailAccountsHeight,
-            child: Row(children: [
-              Flexible(
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  shrinkWrap: true,
-                  padding: const EdgeInsets.only(left: 12, right: 4),
+/// Exactly 48 dp square, so the visible button is the whole touch target.
+final ButtonStyle _fixedKey = IconButton.styleFrom(
+  fixedSize: const Size.square(kPlayNavBarThickness),
+  padding: EdgeInsets.zero,
+);
+
+enum _NavGlyphShape { back, home, recents }
+
+class _NavKey extends StatelessWidget {
+  const _NavKey(
+      {required this.shape, required this.tooltip, required this.onPressed});
+
+  final _NavGlyphShape shape;
+  final String tooltip;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = onPressed == null
+        ? PlayNavBar._palette.textSecondary.withOpacity(0.38)
+        : PlayNavBar._palette.textPrimary;
+    return SizedBox.square(
+      dimension: kPlayNavBarThickness,
+      child: IconButton(
+        style: _fixedKey,
+        tooltip: tooltip,
+        onPressed: onPressed,
+        icon: CustomPaint(
+          size: const Size.square(20),
+          painter: _NavGlyphPainter(shape, color),
+        ),
+      ),
+    );
+  }
+}
+
+/// Back, Home and Recents drawn as outlines (triangle, circle, rounded
+/// square), the way the system navigation bar shows them.
+class _NavGlyphPainter extends CustomPainter {
+  const _NavGlyphPainter(this.shape, this.color);
+
+  final _NavGlyphShape shape;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeJoin = StrokeJoin.round;
+    final inner = (Offset.zero & size).deflate(1.5);
+    switch (shape) {
+      case _NavGlyphShape.back:
+        canvas.drawPath(
+            Path()
+              ..moveTo(inner.right, inner.top)
+              ..lineTo(inner.left, inner.center.dy)
+              ..lineTo(inner.right, inner.bottom)
+              ..close(),
+            paint);
+      case _NavGlyphShape.home:
+        canvas.drawCircle(inner.center, inner.width / 2, paint);
+      case _NavGlyphShape.recents:
+        canvas.drawRRect(
+            RRect.fromRectAndRadius(
+                inner.deflate(1.5), const Radius.circular(3)),
+            paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_NavGlyphPainter old) =>
+      old.shape != shape || old.color != color;
+}
+
+/// The bar's menu: the emulator switcher, the keyboard, the grid and this
+/// emulator's actions. Each action closes the sheet and then runs, so the
+/// game is never left under a sheet that has done its job.
+Future<void> showPlayMenu(
+  BuildContext context, {
+  required List<PlayAccount> accounts,
+  required String currentId,
+  required ValueChanged<String> onSelect,
+  required VoidCallback onGrid,
+  VoidCallback? onShowAll,
+  VoidCallback? onCurrentActions,
+  VoidCallback? onType,
+  bool switching = false,
+  String Function(String) tr = translate,
+}) {
+  const palette = MirpgStudioPalette.dark;
+  final current = accounts.where((account) => account.id == currentId);
+  final currentLabel = current.isEmpty ? '' : current.first.label;
+  return showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: palette.background,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) {
+      void run(VoidCallback? action) {
+        Navigator.of(sheetContext).pop();
+        action?.call();
+      }
+
+      Widget row(IconData icon, String label, VoidCallback? action) => ListTile(
+            leading: Icon(icon),
+            title: Text(label),
+            enabled: action != null,
+            iconColor: palette.accent,
+            textColor: palette.textPrimary,
+            onTap: action == null ? null : () => run(action),
+          );
+      return SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                child: Wrap(
+                  spacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     for (final account in accounts)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: _chip(context, account),
+                      _PlayChip(
+                        account: account,
+                        current: account.id == currentId,
+                        enabled: !switching,
+                        onTap: () => run(() => onSelect(account.id)),
                       ),
+                    SizedBox.square(
+                      dimension: 48,
+                      child: IconButton(
+                        tooltip: tr('Show all emulators'),
+                        color: palette.accent,
+                        disabledColor: palette.textSecondary.withOpacity(0.38),
+                        onPressed:
+                            onShowAll == null ? null : () => run(onShowAll),
+                        icon: const Icon(Icons.add_rounded),
+                      ),
+                    ),
                   ],
                 ),
               ),
-              _showAllKey(),
-            ]),
+              row(Icons.keyboard_outlined, tr('Type text'), onType),
+              row(Icons.grid_view_rounded, tr('Emulators'), onGrid),
+              if (onCurrentActions != null)
+                row(
+                  Icons.tune_rounded,
+                  tr('More {$currentLabel} actions'),
+                  onCurrentActions,
+                ),
+            ],
           ),
-          SizedBox(
-            height: kPlayRailKeysHeight,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Row(children: [
-                _gridKey(),
-                _typeKey(),
-                const Spacer(),
-                ..._navigationKeys(),
-              ]),
-            ),
-          ),
-        ],
+        ),
       );
+    },
+  );
+}
 
-  Widget _verticalRail(BuildContext context) => LayoutBuilder(
-        builder: (context, constraints) {
-          final keys = [
-            _gridKey(),
-            _typeKey(),
-            ..._navigationKeys(),
-          ];
-          final chips = [
-            for (final account in accounts)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: _chip(context, account),
-              ),
-            Center(child: _showAllKey()),
-          ];
-          const keysHeight = 5 * kPlayRailKeysHeight;
-          // Chips scroll above fixed keys; on a very short viewport the
-          // whole column scrolls instead of overflowing.
-          if (constraints.maxHeight < keysHeight + kPlayRailAccountsHeight) {
-            return SingleChildScrollView(
-              child: Column(children: [...chips, ...keys]),
-            );
-          }
-          return Column(children: [
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                children: chips,
-              ),
-            ),
-            ...keys,
-          ]);
-        },
-      );
+/// One emulator as a chip in the menu; 48 dp tall to touch.
+class _PlayChip extends StatelessWidget {
+  const _PlayChip({
+    required this.account,
+    required this.current,
+    required this.enabled,
+    required this.onTap,
+  });
 
-  Color _toneColor(EmulatorUiWord word) => switch (emulatorStateTone(word)) {
+  final PlayAccount account;
+  final bool current;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  static const _palette = MirpgStudioPalette.dark;
+
+  Color get _dot => switch (emulatorStateTone(account.word)) {
         MirpgStatusTone.good => _palette.good,
         MirpgStatusTone.warning => _palette.warning,
         MirpgStatusTone.error => _palette.error,
         MirpgStatusTone.neutral => _palette.textSecondary,
       };
 
-  Widget _chip(BuildContext context, PlayAccount account) {
-    final current = account.id == currentId;
-    final enabled = !switching;
+  @override
+  Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    final dot = Container(
-      width: 8,
-      height: 8,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: _toneColor(account.word),
-      ),
-    );
-    final decoration = BoxDecoration(
-      color: current ? _palette.accent.withOpacity(0.24) : _palette.raised,
-      borderRadius: BorderRadius.circular(16),
-      border: Border.all(color: current ? _palette.accent : _palette.outline),
-    );
-    // Beside a landscape game the chip is 64 dp wide: the dot sits over a
-    // centred label of up to two lines, so names stay readable.
-    final chip = _horizontal
-        ? Container(
-            height: 32,
-            padding: const EdgeInsets.only(left: 10, right: 12),
-            decoration: decoration,
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              dot,
-              const SizedBox(width: 6),
-              Text(
-                account.label,
-                maxLines: 1,
-                softWrap: false,
-                overflow: TextOverflow.ellipsis,
-                style: text.labelMedium?.copyWith(
-                  color: _palette.textPrimary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ]),
-          )
-        : Container(
-            constraints: const BoxConstraints(minHeight: 40),
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-            decoration: decoration,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              dot,
-              const SizedBox(height: 2),
-              Text(
-                account.label,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: text.labelSmall?.copyWith(
-                  color: _palette.textPrimary,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12,
-                ),
-              ),
-            ]),
-          );
     return MergeSemantics(
       child: Semantics(
         selected: current,
@@ -286,91 +320,51 @@ class PlayRail extends StatelessWidget {
         child: Opacity(
           opacity: enabled || current ? 1 : 0.5,
           child: InkWell(
-            borderRadius: BorderRadius.circular(20),
-            // The current chip is the answer to "which account is this";
-            // tapping it does nothing.
-            onTap: enabled && !current ? () => onSelect(account.id) : null,
-            child: _horizontal
-                ? SizedBox(
-                    height: kPlayRailAccountsHeight,
-                    child: Center(child: chip),
-                  )
-                : Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: chip,
+            borderRadius: BorderRadius.circular(24),
+            // The current chip answers "which emulator is this"; tapping it
+            // does nothing.
+            onTap: enabled && !current ? onTap : null,
+            child: SizedBox(
+              height: 48,
+              child: Center(
+                widthFactor: 1,
+                child: Container(
+                  height: 32,
+                  padding: const EdgeInsets.only(left: 10, right: 12),
+                  decoration: BoxDecoration(
+                    color: current
+                        ? _palette.accent.withOpacity(0.24)
+                        : _palette.raised,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                        color: current ? _palette.accent : _palette.outline),
                   ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration:
+                          BoxDecoration(shape: BoxShape.circle, color: _dot),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      account.label,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.ellipsis,
+                      style: text.labelMedium?.copyWith(
+                        color: _palette.textPrimary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
           ),
         ),
       ),
     );
-  }
-
-  Widget _iconKey({
-    required IconData icon,
-    required String tooltip,
-    required VoidCallback? onPressed,
-    Color? color,
-  }) =>
-      SizedBox.square(
-        dimension: kPlayRailKeysHeight,
-        child: IconButton(
-          tooltip: tr(tooltip),
-          color: color ?? _palette.textPrimary,
-          disabledColor: _palette.textSecondary.withOpacity(0.38),
-          onPressed: onPressed,
-          icon: Icon(icon),
-        ),
-      );
-
-  Widget _showAllKey() => SizedBox.square(
-        dimension: kPlayRailAccountsHeight,
-        child: IconButton(
-          tooltip: tr('Show all emulators'),
-          padding: EdgeInsets.zero,
-          color: _palette.accent,
-          disabledColor: _palette.textSecondary.withOpacity(0.38),
-          onPressed: onShowAll,
-          icon: const Icon(Icons.add_rounded),
-        ),
-      );
-
-  /// ▦ returns to the grid; a long press opens this emulator's actions. The
-  /// tooltip only shows on hover so it does not compete with the long press.
-  Widget _gridKey() => Tooltip(
-        message: tr('Emulators'),
-        triggerMode: TooltipTriggerMode.manual,
-        child: Semantics(
-          button: true,
-          child: SizedBox.square(
-            dimension: kPlayRailKeysHeight,
-            child: InkResponse(
-              radius: kPlayRailKeysHeight / 2,
-              onTap: onGrid,
-              onLongPress: onGridLongPress,
-              child: Icon(Icons.grid_view_rounded, color: _palette.accent),
-            ),
-          ),
-        ),
-      );
-
-  Widget _typeKey() => _iconKey(
-        icon: Icons.keyboard_outlined,
-        tooltip: 'Type text',
-        onPressed: onType,
-      );
-
-  List<Widget> _navigationKeys() {
-    final navigate = onNavigate;
-    Widget key(IconData icon, String tooltip, String action) => _iconKey(
-          icon: icon,
-          tooltip: tooltip,
-          onPressed: navigate == null ? null : () => navigate(action),
-        );
-    return [
-      key(Icons.arrow_back, 'Back', 'back'),
-      key(Icons.home_outlined, 'Home', 'home'),
-      key(Icons.crop_square, 'Recents', 'recents'),
-    ];
   }
 }
 

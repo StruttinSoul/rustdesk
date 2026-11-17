@@ -131,9 +131,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   /// so this page owns its copy.
   ui.Image? _switchFrame;
 
-  /// The emulator played before the open one, for the rail's double tap.
-  String? _previousGuestId;
-
   /// A chip switch has been accepted but has not reached the PC yet (so
   /// `model.connecting` is still false); further switches are ignored.
   bool _switchPending = false;
@@ -1134,28 +1131,13 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     }
     _switchPending = true;
     try {
-      if (_fullscreen?.instance != null) _previousGuestId = _fullscreen!.id;
       await _open(target);
     } finally {
       _switchPending = false;
     }
   }
 
-  /// Double tap on the collapsed rail's button: back to the previously
-  /// played emulator, while it is still listed and not stopped.
-  Future<void> Function()? _previousTarget() {
-    final id = _previousGuestId;
-    if (id == null || id == _fullscreen?.id) return null;
-    final instance = _targetById(id)?.instance;
-    if (instance == null ||
-        !_runningAsKnown(instance) ||
-        model.isEmulatorShuttingDown(id)) {
-      return null;
-    }
-    return () => _switchTo(id);
-  }
-
-  /// The rail's "+": every emulator as a tile. Tapping one switches to it,
+  /// The menu's "+": every emulator as a tile. Tapping one switches to it,
   /// starting it if it is stopped. No extra preview streams are requested
   /// while a game is streaming; tiles show their state and any frame held.
   Future<void> _chooseEmulator() async {
@@ -1242,8 +1224,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     // or stopped meanwhile before the grid shows it.
     if (!model.loading) unawaited(model.refresh());
     setState(() {
-      // Start one, go back, start the next: the one left is "previous".
-      if (_fullscreen?.instance != null) _previousGuestId = _fullscreen!.id;
       _fullscreen = null;
       _switchFrame?.dispose();
       _switchFrame = null;
@@ -1449,7 +1429,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               offerShowOnPc ? () => _toggleAvdWindow(current) : null,
           accounts: _playAccounts(),
           onSelectTarget: _switchTo,
-          onPreviousTarget: _previousTarget(),
           onCurrentActions: () => unawaited(_showEmulatorActions(current)),
           alreadyRunning: _alreadyRunning);
     }

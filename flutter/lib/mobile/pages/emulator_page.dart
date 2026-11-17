@@ -63,48 +63,53 @@ class DoubleBackGuard {
   void reset() => _first = null;
 }
 
-/// Where the "Back again to leave the game" hint floats: above the rail at
-/// the bottom (docked, or revealed by the first back when collapsed), or
-/// beside the rail docked on the right.
-EdgeInsets backHintMargin(PlayRailPlacement placement) =>
-    placement == PlayRailPlacement.side
-        ? const EdgeInsets.fromLTRB(16, 0, kPlayRailSideWidth + 8, 16)
-        : const EdgeInsets.fromLTRB(16, 0, 16, kPlayRailBottomHeight + 8);
+/// Where the "Back again to leave the game" hint floats: above the bottom
+/// navigation bar of a portrait game, or clear of the strip on the right of a
+/// landscape one.
+EdgeInsets backHintMargin(Axis barAxis) => barAxis == Axis.vertical
+    ? const EdgeInsets.fromLTRB(16, 0, kPlayNavBarThickness + 8, 16)
+    : const EdgeInsets.fromLTRB(16, 0, 16, kPlayNavBarThickness + 8);
 
-/// Keeps the whole guest visible, with the controls (the play rail) docked
-/// in the letterbox beside it, or, when collapsed, behind a round button and
-/// shown over the bottom edge without changing the game's size.
+/// Keeps the whole guest visible. The controls are the navigation bar: 48 dp
+/// at the bottom of a portrait game ([barAxis] horizontal) or 48 dp on the
+/// right edge of a landscape one (vertical). The game takes everything the
+/// bar leaves, contained and centred, so the bar never covers or crops it.
+/// The text composer, while open, replaces the bar under the game.
+///
+/// The fallback page ([legacyLayout]) keeps its old behaviour: a controls row
+/// below the video, shown by a movable round button.
 class GuestControlStage extends StatefulWidget {
   const GuestControlStage({
     super.key,
     required this.video,
     required this.controls,
-    required this.controlsVisible,
-    required this.onToggleControls,
-    this.placement = PlayRailPlacement.collapsed,
+    this.barAxis = Axis.horizontal,
+    this.controlsVisible = false,
+    this.onToggleControls,
     this.composer,
-    this.onDoubleTapToggle,
     this.legacyLayout = false,
   });
 
   /// The fallback page (PCs without the dashboard): its controls row sits
   /// below the video and shrinks it, and only the round button toggles it.
-  /// [placement], [composer] and [onDoubleTapToggle] are not used.
+  /// [barAxis] and [composer] are not used.
   final bool legacyLayout;
 
   final Widget video;
+
+  /// The navigation bar (dashboard), or the controls row (fallback page).
   final Widget controls;
 
-  /// Only used when [placement] is collapsed; docked controls always show.
+  /// Horizontal: the bar under a portrait game. Vertical: the strip on the
+  /// right of a landscape game.
+  final Axis barAxis;
+
+  /// Fallback page only: whether the controls row shows.
   final bool controlsVisible;
-  final VoidCallback onToggleControls;
-  final PlayRailPlacement placement;
+  final VoidCallback? onToggleControls;
 
-  /// The text composer; while set it replaces the controls under the video.
+  /// The text composer; while set it replaces the bar under the video.
   final Widget? composer;
-
-  /// Double tap on the round button (collapsed only).
-  final VoidCallback? onDoubleTapToggle;
 
   @override
   State<GuestControlStage> createState() => _GuestControlStageState();
@@ -114,9 +119,8 @@ class _GuestControlStageState extends State<GuestControlStage> {
   // Relative placement survives orientation changes and the soft keyboard.
   Offset _buttonPosition = const Offset(1, 0.75);
 
-  // One Flex and one Stack in every placement, so the video keeps its
-  // element (and its pointer listener) when the rail docks, collapses or the
-  // composer opens.
+  // One Flex and one Stack in every layout, so the video keeps its element
+  // (and its pointer listener) when the composer opens or the game rotates.
   @override
   Widget build(BuildContext context) {
     if (widget.legacyLayout) {
@@ -131,37 +135,20 @@ class _GuestControlStageState extends State<GuestControlStage> {
       ]);
     }
     final composer = widget.composer;
-    final placement = widget.placement;
-    final collapsed = placement == PlayRailPlacement.collapsed;
-    final side = composer == null && placement == PlayRailPlacement.side;
+    final side = composer == null && widget.barAxis == Axis.vertical;
     return Flex(
       direction: side ? Axis.horizontal : Axis.vertical,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Expanded(
-          child: Stack(children: [
-            Positioned.fill(child: widget.video),
-            if (collapsed)
-              // Passes touches through to the video except on the button and
-              // the expanded rail.
-              Positioned.fill(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(child: _toggleLayer()),
-                    if (composer == null && widget.controlsVisible)
-                      widget.controls,
-                  ],
-                ),
-              ),
-          ]),
+          child: Stack(children: [Positioned.fill(child: widget.video)]),
         ),
         if (composer != null)
           composer
-        else if (placement == PlayRailPlacement.bottom)
-          SizedBox(height: kPlayRailBottomHeight, child: widget.controls)
         else if (side)
-          SizedBox(width: kPlayRailSideWidth, child: widget.controls),
+          SizedBox(width: kPlayNavBarThickness, child: widget.controls)
+        else
+          SizedBox(height: kPlayNavBarThickness, child: widget.controls),
       ],
     );
   }
@@ -179,7 +166,6 @@ class _GuestControlStageState extends State<GuestControlStage> {
                   left: 8 + horizontalSpace * _buttonPosition.dx,
                   top: 8 + verticalSpace * _buttonPosition.dy,
                   child: GestureDetector(
-                    onDoubleTap: widget.onDoubleTapToggle,
                     onPanUpdate: (details) => setState(() {
                       _buttonPosition = Offset(
                         horizontalSpace == 0
@@ -291,13 +277,12 @@ class EmulatorPage extends StatefulWidget {
       this.onShowOnPc,
       this.accounts = const [],
       this.onSelectTarget,
-      this.onPreviousTarget,
       this.onCurrentActions,
       this.alreadyRunning});
   final FFI ffi;
   final bool dashboardMode;
 
-  /// Dashboard: opens the emulator grid sheet (the rail's "+"). Without a
+  /// Dashboard: opens the emulator grid sheet (the menu's "+"). Without a
   /// dashboard the legacy controls return to the Windows desktop instead.
   final Future<void> Function()? onSwitch;
   final Future<void> Function()? onReturn;
@@ -312,17 +297,13 @@ class EmulatorPage extends StatefulWidget {
   /// Shows the emulator's window on the PC; null when not offered.
   final Future<void> Function()? onShowOnPc;
 
-  /// The play rail's chips, in grid order (dashboard only).
+  /// The menu's emulator chips, in grid order (dashboard only).
   final List<PlayAccount> accounts;
 
   /// Switches the game to another emulator (a chip tap).
   final Future<void> Function(String targetId)? onSelectTarget;
 
-  /// Switches back to the previously played emulator (double tap on the
-  /// collapsed rail's button); null when there is none to go back to.
-  final Future<void> Function()? onPreviousTarget;
-
-  /// Opens the current emulator's action sheet (long press on ▦).
+  /// Opens the current emulator's action sheet (a row in the bar's menu).
   final VoidCallback? onCurrentActions;
 
   /// Whether an emulator is running and ready as far as the dashboard knows
@@ -361,7 +342,6 @@ class _EmulatorPageState extends State<EmulatorPage>
   (int, int)? _observedGeometry;
 
   /// Where the play rail sits; kept between layouts for the hysteresis.
-  PlayRailPlacement _railPlacement = PlayRailPlacement.collapsed;
   final _banner = NameBannerController();
   final _doubleBack = DoubleBackGuard();
 
@@ -578,10 +558,6 @@ class _EmulatorPageState extends State<EmulatorPage>
         (_pointers.isNotEmpty || _heldKeys.isNotEmpty)) {
       _cancelGuestInput();
     }
-    if (model.targetId != _observedTargetId) {
-      // A switched-to game earns its own docked rail; it never inherits one.
-      _railPlacement = PlayRailPlacement.collapsed;
-    }
     if (!model.streaming || model.targetId != _observedTargetId) {
       _doubleBack.reset();
     }
@@ -613,7 +589,7 @@ class _EmulatorPageState extends State<EmulatorPage>
   }
 
   /// Back inside a running game (dashboard): closes the text composer, else
-  /// the first press only warns and shows the controls, the second leaves.
+  /// the first press only warns, the second leaves.
   void _gameBack() {
     if (_textComposerVisible) {
       setState(_discardTextComposer);
@@ -628,15 +604,12 @@ class _EmulatorPageState extends State<EmulatorPage>
       content: Text(translate('Back again to leave the game')),
       duration: const Duration(seconds: 2),
       behavior: SnackBarBehavior.floating,
-      margin: backHintMargin(_railPlacement),
+      margin: backHintMargin(_barAxis),
     ));
     _backHint = hint;
     hint.closed.then((_) {
       if (_backHint == hint) _backHint = null;
     });
-    if (_railPlacement == PlayRailPlacement.collapsed) {
-      setState(() => _guestControlsVisible = true);
-    }
   }
 
   Future<bool> _back() async {
@@ -1068,21 +1041,17 @@ class _EmulatorPageState extends State<EmulatorPage>
         color: Colors.black,
         child: SafeArea(
           child: LayoutBuilder(builder: (context, constraints) {
-            final placement = _placementFor(constraints.biggest);
+            final axis = _barAxis;
             final inset = model.height > model.width ? 8.0 : 64.0;
-            final railInset =
-                placement == PlayRailPlacement.side ? kPlayRailSideWidth : 0.0;
-            final previous = widget.onPreviousTarget;
+            final barInset =
+                axis == Axis.vertical ? kPlayNavBarThickness : 0.0;
             return Stack(
             children: [
               GuestControlStage(
-                placement: placement,
+                barAxis: axis,
                 video: _guestCanvas(),
                 controlsVisible: _guestControlsVisible,
                 onToggleControls: _toggleGuestControls,
-                onDoubleTapToggle: widget.dashboardMode && previous != null
-                    ? () => unawaited(_switchGuest(previous))
-                    : null,
                 legacyLayout: !widget.dashboardMode,
                 composer: widget.dashboardMode && _textComposerVisible
                     ? _guestTextComposer()
@@ -1090,7 +1059,7 @@ class _EmulatorPageState extends State<EmulatorPage>
                 // The fallback page keeps its own row, with the composer in
                 // its place, exactly as before the play rail.
                 controls: widget.dashboardMode
-                    ? _playRail(placement)
+                    ? _playBar(axis)
                     : ColoredBox(
                         color: Colors.black,
                         child: _textComposerVisible
@@ -1102,7 +1071,7 @@ class _EmulatorPageState extends State<EmulatorPage>
                 Positioned(
                   top: 8,
                   left: inset,
-                  right: inset + railInset,
+                  right: inset + barInset,
                   child: GuestNameBanner(controller: _banner),
                 ),
               if (!canControl || !model.guestFrameFresh)
@@ -1113,7 +1082,7 @@ class _EmulatorPageState extends State<EmulatorPage>
                   duration: const Duration(milliseconds: 300),
                   top: _banner.visible ? 8.0 + 48 : 8,
                   left: inset,
-                  right: inset + railInset,
+                  right: inset + barInset,
                   child: child!,
                 ),
                 child: IgnorePointer(
@@ -1140,61 +1109,54 @@ class _EmulatorPageState extends State<EmulatorPage>
     );
   }
 
-  /// Docked or collapsed rail for this viewport (dashboard only; the legacy
-  /// page keeps its controls behind the round button). Held while the
-  /// composer and its keyboard are up, when the rail is hidden anyway, so the
-  /// keyboard's resize never flips it.
-  PlayRailPlacement _placementFor(Size viewport) {
-    if (!widget.dashboardMode) return PlayRailPlacement.collapsed;
-    // Until the stream reports its size there is nothing to fit against.
-    if (_textComposerVisible || model.width <= 0 || model.height <= 0) {
-      return _railPlacement;
-    }
-    final next = playRailPlacement(
-      viewport: viewport,
-      guestWidth: model.width,
-      guestHeight: model.height,
-      previous: _railPlacement,
-    );
-    if (next != _railPlacement) {
-      _railPlacement = next;
-      // A rail that collapses starts hidden behind the round button.
-      if (next == PlayRailPlacement.collapsed) _guestControlsVisible = false;
-    }
-    return next;
-  }
+  /// The bar goes under a portrait game and on the right of a landscape one.
+  /// Until the stream reports its size it sits at the bottom.
+  Axis get _barAxis => widget.dashboardMode &&
+          model.streaming &&
+          model.width > model.height
+      ? Axis.vertical
+      : Axis.horizontal;
 
-  Widget _playRail(PlayRailPlacement placement) => PlayRail(
-        accounts: widget.accounts,
-        currentId: model.targetId,
-        axis: placement == PlayRailPlacement.side
-            ? Axis.vertical
-            : Axis.horizontal,
-        onSelect: (id) {
-          final select = widget.onSelectTarget;
-          if (select != null && id != model.targetId) {
-            unawaited(_switchGuest(() => select(id)));
-          }
-        },
-        onShowAll: widget.onSwitch == null || _returning
-            ? null
-            : () => unawaited(_switchView()),
-        onGrid: () {
-          if (!_returning) unawaited(_back());
-        },
-        onGridLongPress: widget.onCurrentActions,
-        onType: canGuestControl &&
-                model.streaming &&
-                model.guestTextSupported &&
-                !_returning
-            ? _openTextComposer
-            : null,
+  Widget _playBar(Axis axis) => PlayNavBar(
+        axis: axis,
         onNavigate: canGuestControl && model.streaming && !_returning
             ? (action) => unawaited(model.navigation(action))
             : null,
-        switching: model.connecting,
+        onMenu: _returning ? null : _openPlayMenu,
         tr: translate,
       );
+
+  /// The bar's menu: switcher, keyboard, grid and this emulator's actions.
+  /// Input held on the game is released first, as for any other sheet.
+  Future<void> _openPlayMenu() {
+    _cancelGuestInput();
+    return showPlayMenu(
+      context,
+      accounts: widget.accounts,
+      currentId: model.targetId,
+      switching: model.connecting,
+      onSelect: (id) {
+        final select = widget.onSelectTarget;
+        if (select != null && id != model.targetId) {
+          unawaited(_switchGuest(() => select(id)));
+        }
+      },
+      onShowAll: widget.onSwitch == null || _returning
+          ? null
+          : () => unawaited(_switchView()),
+      onGrid: () {
+        if (!_returning) unawaited(_back());
+      },
+      onCurrentActions: widget.onCurrentActions,
+      onType: canGuestControl &&
+              model.streaming &&
+              model.guestTextSupported &&
+              !_returning
+          ? _openTextComposer
+          : null,
+      tr: translate,
+    );
+  }
 
   /// Leaves this emulator for another one: input held on this guest is
   /// released and the composer closed before the switch starts.
@@ -1362,19 +1324,6 @@ class _EmulatorPageState extends State<EmulatorPage>
         ),
       );
 
-  /// The collapsed rail shows over the game until the next touch on the
-  /// game. Only the overlay hides: the touch itself still goes to the guest.
-  void _hideOverlayRail() {
-    // The fallback page's row sits below the game and stays until toggled.
-    if (!widget.dashboardMode ||
-        _railPlacement != PlayRailPlacement.collapsed ||
-        !_guestControlsVisible ||
-        _textComposerVisible) {
-      return;
-    }
-    setState(() => _guestControlsVisible = false);
-  }
-
   void _restoreGuestCanvasFocus() {
     // A delivered touch proves view focus even if Android missed its focus event.
     if (_textComposerVisible ||
@@ -1396,7 +1345,6 @@ class _EmulatorPageState extends State<EmulatorPage>
   void _touch(int action, PointerEvent event, BoxConstraints box) {
     if (action == 0) {
       _restoreGuestCanvasFocus();
-      _hideOverlayRail();
     }
     if (!canGuestControl ||
         !model.streaming ||

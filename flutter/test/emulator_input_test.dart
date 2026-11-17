@@ -176,7 +176,7 @@ void main() {
 
   for (final screenHeight in [832.0, 700.0]) {
     testWidgets(
-        'dashboard rail open over the game keeps touch coordinates at '
+        'dashboard bar under the game keeps touch coordinates at '
         '$screenHeight dp', (tester) async {
       tester.view.physicalSize = Size(384, screenHeight);
       tester.view.devicePixelRatio = 1;
@@ -190,8 +190,6 @@ void main() {
             width: 384,
             height: screenHeight,
             child: GuestControlStage(
-              controlsVisible: true,
-              onToggleControls: () {},
               video: LayoutBuilder(
                 builder: (_, constraints) => Listener(
                   key: const Key('touch-surface'),
@@ -207,15 +205,15 @@ void main() {
                   child: const ColoredBox(color: Colors.black),
                 ),
               ),
-              controls: const SizedBox(key: Key('rail'), height: 88),
+              controls: const SizedBox(key: Key('rail'), height: 48),
             ),
           ),
         ),
       ));
 
       final viewport = tester.getRect(find.byKey(const Key('touch-surface')));
-      expect(viewport.size, Size(384, screenHeight),
-          reason: 'The collapsed rail opens over the game without resizing it');
+      expect(viewport.size, Size(384, screenHeight - 48),
+          reason: 'The game takes everything the 48 dp bar leaves');
       expect(
           tester.getRect(find.byKey(const Key('rail'))).bottom, screenHeight);
       final frame = containedGuestFrame(
@@ -233,10 +231,11 @@ void main() {
           Offset(frame.left + frame.width / 4, frame.top + frame.height / 4));
       expect(touches.single, (x: 180, y: 320));
 
-      // A 9:16 guest leaves a black bar at the top at both heights.
+      // A 9:16 guest leaves a black bar at the top (tall phone) or at the
+      // left (short phone).
       touches.clear();
-      expect(frame.top, greaterThan(1));
-      await tester.tapAt(viewport.topLeft + const Offset(192, 1));
+      await tester.tapAt(viewport.topLeft +
+          (screenHeight == 832 ? const Offset(192, 1) : const Offset(1, 322)));
       expect(touches.single, isNull,
           reason: 'Black bars must not inject guest input');
     });
