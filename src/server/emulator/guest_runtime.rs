@@ -15,6 +15,83 @@ use std::{
 
 pub const SCRCPY_CONTROL_RESET_VIDEO: u8 = 17;
 
+/// A Windows job whose processes are killed when its handle closes. Held
+/// for the life of this process, it ends a session's long-lived `adb`
+/// clients (and so their guest shells) even when this process dies
+/// abruptly, which Windows does not do for child processes by itself.
+pub(super) struct KillOnCloseJob(windows::Win32::Foundation::HANDLE);
+
+// The handle is an owned kernel object handle, usable from any thread.
+unsafe impl Send for KillOnCloseJob {}
+unsafe impl Sync for KillOnCloseJob {}
+
+impl KillOnCloseJob {
+    pub(super) fn new() -> ResultType<Self> {
+        use windows::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+        // SAFETY: plain Win32 calls; the handle is owned by `Self` from here.
+        let job = Self(unsafe { CreateJobObjectW(None, windows::core::PCWSTR::null()) }?);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        // Only the processes assigned here: anything they start (such as an
+        // adb server) is not tied to this process.
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+        // SAFETY: `limits` is a valid JOBOBJECT_EXTENDED_LIMIT_INFORMATION of
+        // the size passed.
+        unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        }?;
+        Ok(job)
+    }
+
+    pub(super) fn assign(&self, child: &Child) -> ResultType<()> {
+        use std::os::windows::io::AsRawHandle;
+        let process = windows::Win32::Foundation::HANDLE(child.as_raw_handle());
+        // SAFETY: both handles are valid for the duration of the call.
+        unsafe { windows::Win32::System::JobObjects::AssignProcessToJobObject(self.0, process) }?;
+        Ok(())
+    }
+}
+
+impl Drop for KillOnCloseJob {
+    fn drop(&mut self) {
+        // SAFETY: the handle is owned and closed once.
+        if let Err(error) = unsafe { windows::Win32::Foundation::CloseHandle(self.0) } {
+            log::trace!("Session job close: {error}");
+        }
+    }
+}
+
+/// Ties a session's long-lived `adb` child to this process's lifetime. On
+/// failure the child still runs (and is still ended by its owner on drop).
+pub(super) fn bind_to_process_lifetime(child: &Child) {
+    static JOB: std::sync::OnceLock<Option<KillOnCloseJob>> = std::sync::OnceLock::new();
+    let job = JOB.get_or_init(|| match KillOnCloseJob::new() {
+        Ok(job) => Some(job),
+        Err(error) => {
+            log::warn!("Cannot create the session process job: {error}");
+            None
+        }
+    });
+    if let Some(job) = job {
+        if let Err(error) = job.assign(child) {
+            hbb_common::throttled_log!(
+                Duration::from_secs(60),
+                warn,
+                "Cannot tie an adb process to this process's lifetime: {error}"
+            );
+        }
+    }
+}
+
 const GUEST_MAX_SIZE_OPTION: &str = "aperture-guest-max-size";
 const GUEST_MAX_FPS_OPTION: &str = "aperture-guest-max-fps";
 const GUEST_BIT_RATE_OPTION: &str = "aperture-guest-bit-rate";
@@ -245,6 +322,9 @@ impl GuestHelper {
                 .stderr(Stdio::null())
                 .spawn()?,
         );
+        if let Some(child) = session.child.as_ref() {
+            bind_to_process_lifetime(child);
+        }
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let started = Instant::now();
         loop {
@@ -455,6 +535,29 @@ impl Drop for GuestHelper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_the_session_job_kills_its_processes() {
+        let job = KillOnCloseJob::new().unwrap();
+        let mut child = Command::new("ping")
+            .creation_flags(0x08000000)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        job.assign(&child).unwrap();
+        thread::sleep(Duration::from_millis(200));
+        assert!(child.try_wait().unwrap().is_none(), "ping ended early");
+        drop(job);
+        let closed = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(
+                closed.elapsed() < Duration::from_secs(2),
+                "the process outlived its job"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
     use std::io::Write;
 
     #[test]

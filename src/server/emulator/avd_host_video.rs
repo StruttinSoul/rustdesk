@@ -11,7 +11,7 @@ use super::super::{
     avd_video::{
         even_size, orient_rgba, stream_box, upright_rgba, EncodedHostFrame, HostEncoder, BOTTOM_UP,
     },
-    guest_runtime::{adb_command, GuestHelper, GuestStreamProfile},
+    guest_runtime::{adb_command, bind_to_process_lifetime, GuestHelper, GuestStreamProfile},
     remote::GuestEvent,
 };
 use super::{
@@ -147,7 +147,7 @@ fn supervise<R: BufRead>(
     }
 }
 
-fn spawn_rotation_shell(adb: &Path, serial: &str) -> ResultType<(Child, ChildStdout)> {
+pub(super) fn spawn_rotation_shell(adb: &Path, serial: &str) -> ResultType<(Child, ChildStdout)> {
     let mut child = Command::new(adb)
         .creation_flags(0x08000000)
         .args(["-s", serial, "shell", ROTATION_LOOP])
@@ -155,6 +155,7 @@ fn spawn_rotation_shell(adb: &Path, serial: &str) -> ResultType<(Child, ChildStd
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
+    bind_to_process_lifetime(&child);
     match child.stdout.take() {
         Some(stdout) => Ok((child, stdout)),
         None => {
