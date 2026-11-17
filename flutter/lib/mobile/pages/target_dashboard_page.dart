@@ -24,6 +24,8 @@ import '../widgets/mirpg_remote_theme.dart';
 import '../../common/widgets/aperture_brand.dart';
 import '../widgets/avd_manage_sheets.dart';
 import '../widgets/clipboard_transfer_sheet.dart';
+import '../widgets/emulator_action_sheet.dart';
+export '../widgets/emulator_action_sheet.dart' show AvdCardActions;
 import '../widgets/monitor_control_view.dart';
 import '../widgets/monitor_key_sender.dart';
 import '../widgets/monitor_session_continuity.dart';
@@ -2355,79 +2357,6 @@ class TargetSwitcherCards extends StatelessWidget {
           );
         },
       );
-}
-
-/// Managed Android emulator actions shown in a card's overflow menu.
-class AvdCardActions {
-  const AvdCardActions({
-    this.cloningLabel,
-    this.running = false,
-    this.windowVisible = false,
-    this.blocker,
-    this.onToggleWindow,
-    this.onStop,
-    this.onClone,
-    this.onRename,
-    this.onDelete,
-  });
-
-  /// Set while the emulator is being copied; the card then has no menu.
-  final String? cloningLabel;
-  final bool running;
-  final bool windowVisible;
-
-  /// Why clone, rename and delete are unavailable right now, if they are.
-  final String? blocker;
-  final VoidCallback? onToggleWindow;
-  final VoidCallback? onStop;
-  final VoidCallback? onClone;
-  final VoidCallback? onRename;
-  final VoidCallback? onDelete;
-
-  bool get hasMenu => cloningLabel == null;
-
-  List<PopupMenuEntry<String>> menuEntries(BuildContext context, bool shuttingDown) {
-    PopupMenuItem<String> item(String value, String label, VoidCallback? action,
-            {String? subtitle}) =>
-        PopupMenuItem<String>(
-          value: value,
-          enabled: !shuttingDown && action != null && subtitle == null,
-          child: subtitle == null
-              ? Text(label)
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(label),
-                    Text(subtitle,
-                        style: Theme.of(context).textTheme.bodySmall),
-                  ],
-                ),
-        );
-    return [
-      if (running && onToggleWindow != null)
-        item('avd_window', windowVisible ? 'Hide on PC' : 'Show on PC', onToggleWindow),
-      if (running) item('avd_stop', 'Stop', onStop),
-      item('avd_clone', 'Clone', onClone, subtitle: blocker),
-      item('avd_rename', 'Rename', onRename, subtitle: blocker),
-      item('avd_delete', 'Delete', onDelete, subtitle: blocker),
-    ];
-  }
-
-  void select(String value) {
-    switch (value) {
-      case 'avd_window':
-        onToggleWindow?.call();
-      case 'avd_stop':
-        onStop?.call();
-      case 'avd_clone':
-        onClone?.call();
-      case 'avd_rename':
-        onRename?.call();
-      case 'avd_delete':
-        onDelete?.call();
-    }
-  }
 }
 
 /// A dense, accessible screen-picker row for Studio V4's All screens page.
