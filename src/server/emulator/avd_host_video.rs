@@ -15,11 +15,10 @@ use super::super::{
     remote::GuestEvent,
 };
 use super::{
-    decrement_pending, display_touch_space, input_loop, spawn_recovery_watchdog, status_response,
-    with_phase, with_preview, GuestFrameBackpressure, GuestGeometry, GuestIdleRefresh,
-    GuestInputCommand, VideoReset,
+    decrement_pending, display_touch_space, input_loop, spawn_recovery_watchdog, FrameSender,
+    GuestGeometry, GuestIdleRefresh, GuestInputCommand, VideoReset,
 };
-use base::message_proto::{EmulatorRequest, EmulatorSessionState, EmulatorVideoFrame};
+use base::message_proto::EmulatorRequest;
 use hbb_common::{bail, log, ResultType};
 use std::{
     io::{BufRead, BufReader},
@@ -382,89 +381,21 @@ struct HostVideo<'a> {
     input_stopped: &'a AtomicBool,
 }
 
-/// Delivers encoded frames like the helper path: `stream_ready` once per
-/// geometry, then the shared backpressure and timing window.
-struct FrameSender<'a> {
-    session: &'a HostSession<'a>,
-    geometry: &'a Mutex<GuestGeometry>,
-    idle: &'a Mutex<GuestIdleRefresh>,
-    backpressure: GuestFrameBackpressure,
-    timing: crate::frame_timing::TimingWindow,
-    last_frame: Option<Instant>,
-    /// A frame has been delivered: the host path is live.
-    streaming: bool,
-}
-
-impl FrameSender<'_> {
-    fn send(&mut self, frames: Vec<EncodedHostFrame>) -> ResultType<()> {
-        let session = self.session;
-        for frame in frames {
-            if frame.data.is_empty() {
-                continue;
-            }
-            let sent_at = Instant::now();
-            self.idle.lock().unwrap().note_frame(sent_at);
-            if !session.preview {
-                if let Some(previous) = self.last_frame {
-                    self.timing
-                        .sample("read_gap", crate::frame_timing::ms(sent_at - previous));
-                }
-                self.last_frame = Some(sent_at);
-                self.timing.sample("kbytes", frame.data.len() as f64 / 1024.0);
-                if let Some(latency) = crate::frame_timing::HOST_TAPS.take_latency(sent_at) {
-                    self.timing
-                        .sample("tap_to_frame", crate::frame_timing::ms(latency));
-                }
-            }
-            let ready_dimensions = {
-                let mut current = self.geometry.lock().unwrap();
-                let became_ready = !current.ready;
-                current.ready = true;
-                became_ready.then_some((current.width, current.height))
-            };
-            if let Some((width, height)) = ready_dimensions {
-                session
-                    .events
-                    .blocking_send(GuestEvent::Response(with_preview(
-                        with_phase(
-                            status_response(
-                                session.request.request_id,
-                                session.id,
-                                session.target_id,
-                                EmulatorSessionState::EmulatorStreaming,
-                                width,
-                                height,
-                                String::new(),
-                            ),
-                            "stream_ready",
-                        ),
-                        session.preview,
-                    )))?;
-                #[cfg(test)]
-                HOST_STREAMS_READY.fetch_add(1, Ordering::AcqRel);
-            }
-            self.streaming = true;
-            self.backpressure.deliver(
-                EmulatorVideoFrame {
-                    session_id: session.id,
-                    data: frame.data.into(),
-                    key: frame.key,
-                    pts: frame.pts,
-                    ..Default::default()
-                },
-                session.events,
-                session.capture_input,
-            )?;
-            if !session.preview {
-                self.timing
-                    .sample("deliver", crate::frame_timing::ms(sent_at.elapsed()));
-                if let Some(line) = self.timing.take_due(Instant::now()) {
-                    log::info!("{line}");
-                }
-            }
+/// Delivers the encoder's output; `streaming` turns true with the first frame.
+fn deliver(
+    sender: &mut FrameSender,
+    frames: Vec<EncodedHostFrame>,
+    streaming: &mut bool,
+) -> ResultType<()> {
+    for frame in frames.into_iter().filter(|frame| !frame.data.is_empty()) {
+        let _became_ready = sender.send(frame.data, frame.key, frame.pts)?;
+        #[cfg(test)]
+        if _became_ready {
+            HOST_STREAMS_READY.fetch_add(1, Ordering::AcqRel);
         }
-        Ok(())
+        *streaming = true;
     }
+    Ok(())
 }
 
 /// Feed -> host encoder -> session. `NoFirstFrame` when nothing was delivered
@@ -481,23 +412,26 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         Err(error) => return Ok(HostOutcome::NoFirstFrame(error.to_string())),
     };
     let subscribed = Instant::now();
-    let mut sender = FrameSender {
-        session,
-        geometry: video.geometry,
-        idle: video.idle,
-        backpressure: GuestFrameBackpressure::default(),
-        timing: crate::frame_timing::TimingWindow::new(
-            "Guest video (host GPU)",
-            Duration::from_secs(5),
-            Instant::now(),
-        ),
-        last_frame: None,
-        streaming: false,
-    };
+    let mut sender = FrameSender::new(
+        session.request,
+        session.id,
+        session.target_id,
+        session.events,
+        session.capture_input,
+        session.preview,
+        video.geometry,
+        video.idle,
+        "Guest video (host GPU)",
+    );
+    // A frame has been delivered: the host path is live.
+    let mut streaming = false;
     let mut encoder: Option<HostEncoder> = None;
     // The upright stream size and the rotation it was turned by.
     let mut size: Option<(u32, u32, u32)> = None;
     let mut pending: Option<FeedImage> = None;
+    // The last encoded image, re-encoded if Android's rotation moves on
+    // while the screen is still.
+    let mut last_image: Option<FeedImage> = None;
     let mut last_encode: Option<Instant> = None;
     let mut reconnected = false;
     let min_gap = video.settings.min_gap();
@@ -509,7 +443,7 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         if video.input_stopped.load(Ordering::Acquire) {
             bail!("Guest input stopped")
         }
-        if !sender.streaming && subscribed.elapsed() >= FIRST_FRAME_TIMEOUT {
+        if !streaming && subscribed.elapsed() >= FIRST_FRAME_TIMEOUT {
             return Ok(HostOutcome::NoFirstFrame(format!(
                 "no frame within {} s",
                 FIRST_FRAME_TIMEOUT.as_secs()
@@ -518,14 +452,20 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         if video.reset.swap(false, Ordering::AcqRel) {
             if let Some(active) = encoder.as_mut() {
                 match active.force_key() {
-                    Ok(frames) => sender.send(frames)?,
-                    Err(error) if !sender.streaming => {
+                    Ok(frames) => deliver(&mut sender, frames, &mut streaming)?,
+                    Err(error) if !streaming => {
                         return Ok(HostOutcome::NoFirstFrame(error.to_string()))
                     }
                     Err(error) => return Err(error),
                 }
             }
         }
+        requeue_on_rotation(
+            &mut pending,
+            &mut last_image,
+            size.map(|(_, _, rotation)| rotation),
+            current_rotation(video.rotation),
+        );
         let due = last_encode
             .map(|last| min_gap.saturating_sub(last.elapsed()))
             .unwrap_or(Duration::ZERO);
@@ -557,18 +497,7 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
                         changed
                     };
                     if !session.preview && changed {
-                        session.events.blocking_send(GuestEvent::Response(with_phase(
-                            status_response(
-                                session.request.request_id,
-                                session.id,
-                                session.target_id,
-                                EmulatorSessionState::EmulatorStarting,
-                                0,
-                                0,
-                                String::new(),
-                            ),
-                            "waiting_screen",
-                        )))?;
+                        sender.send_waiting_screen()?;
                     }
                 }
                 let encode_started = Instant::now();
@@ -599,9 +528,10 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
                         .timing
                         .sample("encode", crate::frame_timing::ms(encode_started.elapsed()));
                 }
+                last_image = Some(image);
                 match encoded {
-                    Ok(frames) => sender.send(frames)?,
-                    Err(error) if !sender.streaming => {
+                    Ok(frames) => deliver(&mut sender, frames, &mut streaming)?,
+                    Err(error) if !streaming => {
                         return Ok(HostOutcome::NoFirstFrame(error.to_string()))
                     }
                     Err(error) => return Err(error),
@@ -621,7 +551,7 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
                 hbb_common::anyhow::anyhow!("the screen feed stopped")
             }
         };
-        if !sender.streaming {
+        if !streaming {
             return Ok(HostOutcome::NoFirstFrame(failure.to_string()));
         }
         if reconnected {
@@ -634,13 +564,60 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         drop(feed);
         (feed, images) = start_feed()?;
         pending = None;
+        last_image = None;
         encoder = None;
+    }
+}
+
+/// Android's rotation can change after the last image was encoded (the
+/// watcher lags the rotation animation). With no newer image waiting, the
+/// last one is queued again so it goes through the geometry change.
+fn requeue_on_rotation(
+    pending: &mut Option<FeedImage>,
+    last_image: &mut Option<FeedImage>,
+    encoded_rotation: Option<u32>,
+    rotation: u32,
+) {
+    if pending.is_none() && encoded_rotation.is_some_and(|encoded| encoded != rotation) {
+        *pending = last_image.take();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn feed_image(seq: u32) -> FeedImage {
+        FeedImage {
+            width: 2,
+            height: 2,
+            rotation: 0,
+            seq,
+            pixels: vec![0; 16],
+        }
+    }
+
+    #[test]
+    fn a_still_screen_is_reencoded_when_the_rotation_changes() {
+        // Encoded at rotation 0, Android now reports 1, nothing newer: requeue.
+        let (mut pending, mut last) = (None, Some(feed_image(7)));
+        requeue_on_rotation(&mut pending, &mut last, Some(0), 1);
+        assert_eq!(pending.map(|image| image.seq), Some(7));
+        assert!(last.is_none());
+        // Same rotation: nothing to do.
+        let (mut pending, mut last) = (None, Some(feed_image(7)));
+        requeue_on_rotation(&mut pending, &mut last, Some(1), 1);
+        assert!(pending.is_none() && last.is_some());
+        // A newer image is already waiting: it carries the new rotation.
+        let (mut pending, mut last) = (Some(feed_image(8)), Some(feed_image(7)));
+        requeue_on_rotation(&mut pending, &mut last, Some(0), 1);
+        assert_eq!(pending.map(|image| image.seq), Some(8));
+        assert!(last.is_some());
+        // Nothing encoded yet.
+        let (mut pending, mut last) = (None, None);
+        requeue_on_rotation(&mut pending, &mut last, None, 1);
+        assert!(pending.is_none());
+    }
 
     #[test]
     fn rotation_lines_parse_only_known_rotations() {

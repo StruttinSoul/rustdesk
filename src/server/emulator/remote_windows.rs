@@ -383,6 +383,134 @@ impl GuestFrameBackpressure {
     }
 }
 
+/// Delivers a session's encoded frames, for the helper and host paths alike:
+/// idle-refresh and timing bookkeeping, `stream_ready` once per geometry,
+/// then the shared backpressure.
+struct FrameSender<'a> {
+    request: &'a EmulatorRequest,
+    id: u64,
+    target_id: &'a str,
+    events: &'a hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+    capture_input: &'a SyncSender<GuestInputCommand>,
+    preview: bool,
+    geometry: &'a Mutex<GuestGeometry>,
+    idle: &'a Mutex<GuestIdleRefresh>,
+    backpressure: GuestFrameBackpressure,
+    timing: crate::frame_timing::TimingWindow,
+    last_frame: Option<Instant>,
+}
+
+impl<'a> FrameSender<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        request: &'a EmulatorRequest,
+        id: u64,
+        target_id: &'a str,
+        events: &'a hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+        capture_input: &'a SyncSender<GuestInputCommand>,
+        preview: bool,
+        geometry: &'a Mutex<GuestGeometry>,
+        idle: &'a Mutex<GuestIdleRefresh>,
+        timing_name: &'static str,
+    ) -> Self {
+        Self {
+            request,
+            id,
+            target_id,
+            events,
+            capture_input,
+            preview,
+            geometry,
+            idle,
+            backpressure: GuestFrameBackpressure::default(),
+            timing: crate::frame_timing::TimingWindow::new(
+                timing_name,
+                Duration::from_secs(5),
+                Instant::now(),
+            ),
+            last_frame: None,
+        }
+    }
+
+    /// The loading phase while a new geometry has no frame yet.
+    fn send_waiting_screen(&self) -> ResultType<()> {
+        self.events.blocking_send(GuestEvent::Response(with_phase(
+            status_response(
+                self.request.request_id,
+                self.id,
+                self.target_id,
+                EmulatorSessionState::EmulatorStarting,
+                0,
+                0,
+                String::new(),
+            ),
+            "waiting_screen",
+        )))?;
+        Ok(())
+    }
+
+    /// Delivers one encoded frame. True when it made the geometry ready
+    /// (and `stream_ready` was sent).
+    fn send(&mut self, data: Vec<u8>, key: bool, pts: i64) -> ResultType<bool> {
+        let read_at = Instant::now();
+        self.idle.lock().unwrap().note_frame(read_at);
+        if !self.preview {
+            if let Some(previous) = self.last_frame {
+                self.timing
+                    .sample("read_gap", crate::frame_timing::ms(read_at - previous));
+            }
+            self.last_frame = Some(read_at);
+            self.timing.sample("kbytes", data.len() as f64 / 1024.0);
+            if let Some(latency) = crate::frame_timing::HOST_TAPS.take_latency(read_at) {
+                self.timing
+                    .sample("tap_to_frame", crate::frame_timing::ms(latency));
+            }
+        }
+        let ready_dimensions = {
+            let mut current = self.geometry.lock().unwrap();
+            let became_ready = !current.ready;
+            current.ready = true;
+            became_ready.then_some((current.width, current.height))
+        };
+        if let Some((width, height)) = ready_dimensions {
+            self.events.blocking_send(GuestEvent::Response(with_preview(
+                with_phase(
+                    status_response(
+                        self.request.request_id,
+                        self.id,
+                        self.target_id,
+                        EmulatorSessionState::EmulatorStreaming,
+                        width,
+                        height,
+                        String::new(),
+                    ),
+                    "stream_ready",
+                ),
+                self.preview,
+            )))?;
+        }
+        self.backpressure.deliver(
+            EmulatorVideoFrame {
+                session_id: self.id,
+                data: data.into(),
+                key,
+                pts,
+                ..Default::default()
+            },
+            self.events,
+            self.capture_input,
+        )?;
+        if !self.preview {
+            self.timing
+                .sample("deliver", crate::frame_timing::ms(read_at.elapsed()));
+            if let Some(line) = self.timing.take_due(Instant::now()) {
+                log::info!("{line}");
+            }
+        }
+        Ok(ready_dimensions.is_some())
+    }
+}
+
 impl GuestGeometry {
     fn ready(width: u16, height: u16) -> Self {
         Self {
@@ -743,13 +871,17 @@ fn run_session(
         },
     )?;
     let mut frames = H264Frames::default();
-    let mut backpressure = GuestFrameBackpressure::default();
-    let mut timing = crate::frame_timing::TimingWindow::new(
+    let mut sender = FrameSender::new(
+        request,
+        id,
+        target_id,
+        events,
+        capture_input,
+        preview,
+        &geometry,
+        &capture_idle,
         "Guest video (host)",
-        Duration::from_secs(5),
-        Instant::now(),
     );
-    let mut last_frame: Option<Instant> = None;
     let result = (|| -> ResultType<()> {
         loop {
             if cancel.load(Ordering::Acquire) {
@@ -759,73 +891,11 @@ fn run_session(
             if let VideoPacket::Session { width, height } = &packet {
                 let changed = geometry.lock().unwrap().begin_stream(*width, *height);
                 if !preview && changed {
-                    events.blocking_send(GuestEvent::Response(with_phase(
-                        status_response(
-                            request.request_id,
-                            id,
-                            target_id,
-                            EmulatorSessionState::EmulatorStarting,
-                            0,
-                            0,
-                            String::new(),
-                        ),
-                        "waiting_screen",
-                    )))?;
+                    sender.send_waiting_screen()?;
                 }
             }
             if let Some(frame) = frames.accept(packet)? {
-                let read_at = Instant::now();
-                capture_idle.lock().unwrap().note_frame(read_at);
-                if !preview {
-                    if let Some(previous) = last_frame {
-                        timing.sample("read_gap", crate::frame_timing::ms(read_at - previous));
-                    }
-                    last_frame = Some(read_at);
-                    timing.sample("kbytes", frame.data.len() as f64 / 1024.0);
-                    if let Some(latency) = crate::frame_timing::HOST_TAPS.take_latency(read_at) {
-                        timing.sample("tap_to_frame", crate::frame_timing::ms(latency));
-                    }
-                }
-                let ready_dimensions = {
-                    let mut current = geometry.lock().unwrap();
-                    let became_ready = !current.ready;
-                    current.ready = true;
-                    became_ready.then_some((current.width, current.height))
-                };
-                if let Some((width, height)) = ready_dimensions {
-                    events.blocking_send(GuestEvent::Response(with_preview(
-                        with_phase(
-                            status_response(
-                                request.request_id,
-                                id,
-                                target_id,
-                                EmulatorSessionState::EmulatorStreaming,
-                                width,
-                                height,
-                                String::new(),
-                            ),
-                            "stream_ready",
-                        ),
-                        preview,
-                    )))?;
-                }
-                backpressure.deliver(
-                    EmulatorVideoFrame {
-                        session_id: id,
-                        data: frame.data.into(),
-                        key: frame.key,
-                        pts: frame.pts_ms,
-                        ..Default::default()
-                    },
-                    events,
-                    capture_input,
-                )?;
-                if !preview {
-                    timing.sample("deliver", crate::frame_timing::ms(read_at.elapsed()));
-                    if let Some(line) = timing.take_due(Instant::now()) {
-                        log::info!("{line}");
-                    }
-                }
+                sender.send(frame.data, frame.key, frame.pts_ms)?;
             }
         }
     })();
@@ -1951,14 +2021,47 @@ mod tests {
         panic!("{TRIAL_AVD} is not running");
     }
 
-    fn trial_screen_texts(serial: &str) -> Vec<String> {
-        let xml = trial_shell(
+    fn trial_ui_xml(serial: &str) -> String {
+        trial_shell(
             serial,
             &[
                 "shell",
                 "uiautomator dump /data/local/tmp/t5-ui.xml >/dev/null; cat /data/local/tmp/t5-ui.xml",
             ],
-        );
+        )
+    }
+
+    /// The centre of the first UI node with `text` (XML-escaped), in display
+    /// pixels of the current rotation.
+    fn trial_centre_of(xml: &str, text: &str) -> Option<(u32, u32)> {
+        let node = &xml[xml.find(&format!(" text=\"{text}\""))?..];
+        let bounds = &node[node.find(" bounds=\"[")? + 10..];
+        let bounds = &bounds[..bounds.find('"')?];
+        let numbers: Vec<u32> = bounds
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.parse().ok())
+            .collect();
+        match numbers[..] {
+            [left, top, right, bottom] => Some(((left + right) / 2, (top + bottom) / 2)),
+            _ => None,
+        }
+    }
+
+    /// The display's (long, short) side.
+    fn trial_landscape_display(serial: &str) -> (u32, u32) {
+        let size = trial_shell(serial, &["shell", "wm", "size"]);
+        let (width, height) = size
+            .lines()
+            .filter_map(|line| line.rsplit(':').next()?.trim().split_once('x'))
+            .filter_map(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)))
+            .last()
+            .expect("wm size");
+        (width.max(height), width.min(height))
+    }
+
+    fn trial_screen_texts(serial: &str) -> Vec<String> {
+        let xml = trial_ui_xml(serial);
         xml.split(" text=\"")
             .skip(1)
             .filter_map(|part| part.split_once('"').map(|(text, _)| text.to_owned()))
@@ -2060,6 +2163,10 @@ mod tests {
     }
 
     fn tap(session: &GuestSession, (width, height): (u32, u32)) {
+        tap_at(session, (width, height), (width / 2, height / 2));
+    }
+
+    fn tap_at(session: &GuestSession, (width, height): (u32, u32), (x, y): (u32, u32)) {
         for action in [0, 1] {
             let mut request = EmulatorRequest {
                 session_id: session.id,
@@ -2068,8 +2175,8 @@ mod tests {
             request.set_touch(base::message_proto::EmulatorTouch {
                 action,
                 pointer_id: 0,
-                x: width / 2,
-                y: height / 2,
+                x,
+                y,
                 width,
                 height,
                 ..Default::default()
@@ -2220,11 +2327,30 @@ mod tests {
                 tap(&session, rotated);
                 pump(&runtime, &mut events, Duration::from_millis(1500));
                 let after = trial_screen_texts(&serial);
-                eprintln!(
-                    "RESULT landscape tap landed={}: {main:?} -> {after:?}",
-                    main != after
+                let centre = main != after;
+                eprintln!("RESULT landscape centre tap landed={centre}: {main:?} -> {after:?}");
+
+                // Off-centre (lower-left quadrant): "Network & internet" by its
+                // bounds in the rotated display. A swapped mapping would put
+                // this tap far outside the 1080-pixel-high landscape screen.
+                trial_open_settings(&serial);
+                let display = trial_landscape_display(&serial);
+                let target = trial_centre_of(&trial_ui_xml(&serial), "Network &amp; internet")
+                    .expect("Network & internet in landscape Settings");
+                let point = (
+                    target.0 * rotated.0 / display.0,
+                    target.1 * rotated.1 / display.1,
                 );
-                main != after
+                while events.try_recv().is_ok() {}
+                tap_at(&session, rotated, point);
+                pump(&runtime, &mut events, Duration::from_millis(1500));
+                let after = trial_screen_texts(&serial);
+                let off_centre = after.iter().any(|text| text == "Internet")
+                    && !after.iter().any(|text| text == "Connected devices");
+                eprintln!(
+                    "RESULT landscape off-centre tap at display {target:?} = stream {point:?} landed={off_centre}: {after:?}"
+                );
+                centre && off_centre
             })
         };
         trial_shell(&serial, &["shell", "input", "keyevent", "3"]);
