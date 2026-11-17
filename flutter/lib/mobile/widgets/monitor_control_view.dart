@@ -3,8 +3,12 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../common.dart' show translate;
 import 'mirpg_remote_theme.dart';
 import 'monitor_live_keyboard.dart';
+
+/// Chrome over the remote picture is always dark, whatever the app theme.
+const _p = MirpgStudioPalette.dark;
 
 enum MonitorViewPreference { fit, readable }
 
@@ -331,7 +335,8 @@ class MonitorControlView extends StatefulWidget {
       this.focusRevision = 0,
       this.frameStatus,
       this.onCtrlAltDel,
-      this.onRestartTaskbar});
+      this.onRestartTaskbar,
+      this.tr = translate});
   final Size desktopSize;
   final ui.Image? image;
   final bool canControl;
@@ -375,6 +380,9 @@ class MonitorControlView extends StatefulWidget {
 
   /// Restarts Windows Explorer on the PC; null hides the control.
   final VoidCallback? onRestartTaskbar;
+
+  /// Translates the chrome's labels; tests pass a fake.
+  final String Function(String) tr;
 
   @override
   State<MonitorControlView> createState() => _MonitorControlViewState();
@@ -730,9 +738,8 @@ class _MonitorKeyboardPanelState extends State<MonitorKeyboardPanel>
       child: OutlinedButton(
           style: OutlinedButton.styleFrom(
               minimumSize: const Size(48, 48),
-              backgroundColor:
-                  held ? MirpgRemoteTheme.accent.withOpacity(0.18) : null,
-              foregroundColor: held ? MirpgRemoteTheme.accent : null),
+              backgroundColor: held ? _p.accent.withOpacity(0.18) : null,
+              foregroundColor: held ? _p.accent : null),
           onPressed:
               widget.onKeyState == null ? null : () => _toggleModifier(key),
           child: Text(label)),
@@ -1659,6 +1666,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     _emitPreferences();
   }
 
+  static final Color _disabled = _p.textSecondary.withOpacity(0.38);
+
   Widget _controlTile(
           String tooltip, IconData icon, String label, VoidCallback? action,
           {bool selected = false}) =>
@@ -1676,9 +1685,8 @@ class _MonitorControlViewState extends State<MonitorControlView> {
               height: 68,
               padding: const EdgeInsets.symmetric(horizontal: 4),
               decoration: BoxDecoration(
-                color: selected
-                    ? MirpgRemoteTheme.accent.withOpacity(0.16)
-                    : Colors.transparent,
+                color:
+                    selected ? _p.accent.withOpacity(0.16) : Colors.transparent,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Column(
@@ -1687,10 +1695,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   Icon(icon,
                       size: 22,
                       color: action == null
-                          ? Colors.white38
+                          ? _disabled
                           : selected
-                              ? MirpgRemoteTheme.accent
-                              : MirpgRemoteTheme.textPrimary),
+                              ? _p.accent
+                              : _p.textPrimary),
                   const SizedBox(height: 4),
                   Text(label,
                       maxLines: 2,
@@ -1698,9 +1706,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                           height: 1.1,
-                          color: action == null
-                              ? Colors.white38
-                              : MirpgRemoteTheme.textSecondary,
+                          color: action == null ? _disabled : _p.textSecondary,
                           fontSize: 11)),
                 ],
               ),
@@ -1709,72 +1715,141 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         ),
       );
 
+  /// Closes the Controls panel, then runs a session action.
+  VoidCallback? _sessionTile(VoidCallback? action) => action == null
+      ? null
+      : () {
+          setState(() => _panel = _MonitorPanel.none);
+          action();
+        };
+
   Widget _controlsPanel() => Material(
         key: const ValueKey('monitor-controls-panel'),
-        color: MirpgRemoteTheme.surface,
+        color: _p.surface,
         elevation: 8,
         borderRadius: BorderRadius.circular(16),
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(8),
-          child: Wrap(spacing: 4, runSpacing: 4, children: [
-            _controlTile('Right click', Icons.ads_click, 'Right-click next tap',
-                _canSendInput ? () => _arm(_ArmedButton.right) : null,
-                selected: _armed == _ArmedButton.right),
-            _controlTile('Middle click', Icons.adjust, 'Middle-click next tap',
-                _canSendInput ? () => _arm(_ArmedButton.middle) : null,
-                selected: _armed == _ArmedButton.middle),
-            _controlTile('Zoom out', Icons.zoom_out, 'Zoom out',
-                () => _zoomBy(1 / 1.25)),
-            _controlTile('Zoom in', Icons.zoom_in, 'Zoom in · $_viewLabel',
-                () => _zoomBy(1.25)),
-            _controlTile('Orientation: $_orientationLabel',
-                Icons.screen_rotation, _orientationLabel, _cycleOrientation),
-            _controlTile(
-                _thumbwheelVisible ? 'Hide thumbwheel' : 'Show thumbwheel',
-                Icons.swap_vert,
-                'Scroll wheel', () {
-              setState(() => _thumbwheelVisible = !_thumbwheelVisible);
-              _emitPreferences();
-            }, selected: _thumbwheelVisible),
-            _controlTile(
-                widget.localViewOnly ? 'Disable view only' : 'View only',
-                widget.localViewOnly
-                    ? Icons.visibility_off_outlined
-                    : Icons.visibility_outlined,
-                'View only',
-                widget.onLocalViewOnlyChanged == null
-                    ? null
-                    : () =>
-                        widget.onLocalViewOnlyChanged!(!widget.localViewOnly),
-                selected: widget.localViewOnly),
-            _controlTile(
-                _toolbarDock == MonitorToolbarDock.right
-                    ? 'Dock controls left'
-                    : 'Dock controls right',
-                _toolbarDock == MonitorToolbarDock.right
-                    ? Icons.align_horizontal_left
-                    : Icons.align_horizontal_right,
-                _toolbarDock == MonitorToolbarDock.right
-                    ? 'Dock left'
-                    : 'Dock right', () {
-              setState(() {
-                _toolbarDock = _toolbarDock == MonitorToolbarDock.right
-                    ? MonitorToolbarDock.left
-                    : MonitorToolbarDock.right;
-              });
-              _emitPreferences();
-            }),
-            _controlTile('Ctrl+Alt+Del', Icons.security, 'Ctrl+Alt+Del',
-                _canSendInput ? widget.onCtrlAltDel : null),
-            if (widget.onRestartTaskbar != null)
-              _controlTile('Restart taskbar', Icons.call_to_action_outlined,
-                  'Taskbar', _canSendInput ? widget.onRestartTaskbar : null),
-            _controlTile(
-                'Gestures', Icons.help_outline, 'Gestures', _showGestureHelp),
-            _controlTile(
-                'Reset controls', Icons.restart_alt, 'Reset', _resetControls),
-          ]),
-        ),
+            padding: const EdgeInsets.all(8),
+            child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    key: const ValueKey('monitor-panel-header'),
+                    padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+                    child: Text(
+                      '${widget.desktopSize.width.round()} × ${widget.desktopSize.height.round()} · $_viewLabel',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelMedium
+                          ?.copyWith(color: _p.textSecondary),
+                    ),
+                  ),
+                  Wrap(spacing: 4, runSpacing: 4, children: [
+                    _controlTile(
+                        'Right click',
+                        Icons.ads_click,
+                        'Right-click next tap',
+                        _canSendInput ? () => _arm(_ArmedButton.right) : null,
+                        selected: _armed == _ArmedButton.right),
+                    _controlTile(
+                        'Middle click',
+                        Icons.adjust,
+                        'Middle-click next tap',
+                        _canSendInput ? () => _arm(_ArmedButton.middle) : null,
+                        selected: _armed == _ArmedButton.middle),
+                    _controlTile('Zoom out', Icons.zoom_out, 'Zoom out',
+                        () => _zoomBy(1 / 1.25)),
+                    _controlTile('Zoom in', Icons.zoom_in,
+                        'Zoom in · $_viewLabel', () => _zoomBy(1.25)),
+                    _controlTile(
+                        'Orientation: $_orientationLabel',
+                        Icons.screen_rotation,
+                        _orientationLabel,
+                        _cycleOrientation),
+                    _controlTile(
+                        _thumbwheelVisible
+                            ? 'Hide thumbwheel'
+                            : 'Show thumbwheel',
+                        Icons.swap_vert,
+                        'Scroll wheel', () {
+                      setState(() => _thumbwheelVisible = !_thumbwheelVisible);
+                      _emitPreferences();
+                    }, selected: _thumbwheelVisible),
+                    _controlTile(
+                        widget.localViewOnly
+                            ? 'Disable view only'
+                            : 'View only',
+                        widget.localViewOnly
+                            ? Icons.visibility_off_outlined
+                            : Icons.visibility_outlined,
+                        'View only',
+                        widget.onLocalViewOnlyChanged == null
+                            ? null
+                            : () => widget
+                                .onLocalViewOnlyChanged!(!widget.localViewOnly),
+                        selected: widget.localViewOnly),
+                    _controlTile(
+                        _toolbarDock == MonitorToolbarDock.right
+                            ? 'Dock controls left'
+                            : 'Dock controls right',
+                        _toolbarDock == MonitorToolbarDock.right
+                            ? Icons.align_horizontal_left
+                            : Icons.align_horizontal_right,
+                        _toolbarDock == MonitorToolbarDock.right
+                            ? 'Dock left'
+                            : 'Dock right', () {
+                      setState(() {
+                        _toolbarDock = _toolbarDock == MonitorToolbarDock.right
+                            ? MonitorToolbarDock.left
+                            : MonitorToolbarDock.right;
+                      });
+                      _emitPreferences();
+                    }),
+                    _controlTile('Ctrl+Alt+Del', Icons.security, 'Ctrl+Alt+Del',
+                        _canSendInput ? widget.onCtrlAltDel : null),
+                    if (widget.onRestartTaskbar != null)
+                      _controlTile(
+                          'Restart taskbar',
+                          Icons.call_to_action_outlined,
+                          'Taskbar',
+                          _canSendInput ? widget.onRestartTaskbar : null),
+                    _controlTile('Gestures', Icons.help_outline, 'Gestures',
+                        _showGestureHelp),
+                    _controlTile('Reset controls', Icons.restart_alt, 'Reset',
+                        _resetControls),
+                    if (widget.onClipboard != null)
+                      _controlTile(
+                          widget.tr('Clipboard'),
+                          Icons.content_copy_outlined,
+                          widget.tr('Clipboard'),
+                          _sessionTile(widget.onClipboard)),
+                    if (widget.onWindows != null)
+                      _controlTile(
+                          widget.tr('Windows'),
+                          Icons.web_asset_outlined,
+                          widget.tr('Windows'),
+                          _sessionTile(widget.onWindows)),
+                    if (widget.onSessionStatus != null)
+                      _controlTile(
+                          widget.tr('Quality and connection'),
+                          Icons.network_check,
+                          widget.tr('Quality'),
+                          _sessionTile(widget.onSessionStatus)),
+                    _controlTile(
+                        widget.tr('Hide toolbar'),
+                        Icons.keyboard_arrow_down_rounded,
+                        widget.tr('Hide toolbar'), () {
+                      setState(() {
+                        _toolbarVisible = false;
+                        _panel = _MonitorPanel.none;
+                      });
+                      _emitPreferences();
+                    }),
+                  ]),
+                ])),
       );
 
   void _toggleControls() =>
@@ -1786,128 +1861,10 @@ class _MonitorControlViewState extends State<MonitorControlView> {
           {bool selected = false}) =>
       IconButton(
           tooltip: tooltip,
-          color: selected ? MirpgRemoteTheme.accent : Colors.white,
-          disabledColor: Colors.white38,
+          color: selected ? _p.accent : _p.textPrimary,
+          disabledColor: _disabled,
           icon: Icon(icon),
           onPressed: action);
-
-  void _handleSessionAction(_MonitorSessionAction action) {
-    switch (action) {
-      case _MonitorSessionAction.clipboard:
-        widget.onClipboard?.call();
-      case _MonitorSessionAction.windows:
-        widget.onWindows?.call();
-      case _MonitorSessionAction.quality:
-        widget.onSessionStatus?.call();
-      case _MonitorSessionAction.hideControls:
-        setState(() {
-          _toolbarVisible = false;
-          _panel = _MonitorPanel.none;
-        });
-        _emitPreferences();
-    }
-  }
-
-  PopupMenuItem<_MonitorSessionAction> _menuItem(
-          _MonitorSessionAction value, IconData icon, String title) =>
-      PopupMenuItem(
-        value: value,
-        child: ListTile(
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          leading: Icon(icon),
-          title: Text(title),
-        ),
-      );
-
-  Widget _sessionMenu() => PopupMenuButton<_MonitorSessionAction>(
-        tooltip: 'Session controls',
-        icon: const Icon(Icons.more_vert_rounded),
-        onSelected: _handleSessionAction,
-        itemBuilder: (context) => [
-          if (widget.onClipboard != null)
-            _menuItem(_MonitorSessionAction.clipboard,
-                Icons.content_copy_outlined, 'Clipboard'),
-          if (widget.onWindows != null)
-            _menuItem(_MonitorSessionAction.windows, Icons.web_asset_outlined,
-                'Windows'),
-          if (widget.onSessionStatus != null)
-            _menuItem(_MonitorSessionAction.quality, Icons.network_check,
-                'Quality & connection'),
-          if (widget.onClipboard != null ||
-              widget.onWindows != null ||
-              widget.onSessionStatus != null)
-            const PopupMenuDivider(),
-          _menuItem(_MonitorSessionAction.hideControls,
-              Icons.keyboard_arrow_down_rounded, 'Hide controls'),
-        ],
-      );
-
-  Widget _sessionTopBar() => Material(
-        key: const ValueKey('monitor-top-bar'),
-        color: MirpgRemoteTheme.background,
-        child: SafeArea(
-          bottom: false,
-          child: SizedBox(
-            height: 56,
-            child: LayoutBuilder(builder: (context, constraints) {
-              final compact = constraints.maxWidth < 560;
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Row(children: [
-                  _toolbarButton('Dashboard', Icons.arrow_back_rounded,
-                      widget.onDashboard),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Desktop',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                color: MirpgRemoteTheme.textPrimary,
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${widget.desktopSize.width.round()} × ${widget.desktopSize.height.round()} · $_viewLabel',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              color: MirpgRemoteTheme.textSecondary,
-                              fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (widget.localViewOnly)
-                    Container(
-                      margin: const EdgeInsets.only(right: 4),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: MirpgRemoteTheme.warning.withOpacity(0.14),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: const Text('View only',
-                          style: TextStyle(
-                              color: MirpgRemoteTheme.warning, fontSize: 12)),
-                    ),
-                  if (!compact && widget.onSessionStatus != null)
-                    TextButton.icon(
-                      onPressed: widget.onSessionStatus,
-                      icon: const Icon(Icons.network_check, size: 18),
-                      label: const Text('Quality'),
-                    ),
-                  _sessionMenu(),
-                ]),
-              );
-            }),
-          ),
-        ),
-      );
 
   Widget _footerControl(
     String tooltip,
@@ -1933,7 +1890,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                 margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
                 decoration: BoxDecoration(
                   color: selected
-                      ? MirpgRemoteTheme.accent.withOpacity(0.16)
+                      ? _p.accent.withOpacity(0.16)
                       : Colors.transparent,
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -1943,20 +1900,20 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                     Icon(icon,
                         size: 21,
                         color: action == null
-                            ? Colors.white38
+                            ? _disabled
                             : selected
-                                ? MirpgRemoteTheme.accent
-                                : MirpgRemoteTheme.textSecondary),
+                                ? _p.accent
+                                : _p.textSecondary),
                     const SizedBox(height: 3),
                     Text(label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                             color: action == null
-                                ? Colors.white38
+                                ? _disabled
                                 : selected
-                                    ? MirpgRemoteTheme.accent
-                                    : MirpgRemoteTheme.textSecondary,
+                                    ? _p.accent
+                                    : _p.textSecondary,
                             fontSize: 11,
                             fontWeight:
                                 selected ? FontWeight.w600 : FontWeight.w500)),
@@ -1971,12 +1928,15 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   VoidCallback? get _keyboardAction => _canSendInput ? _toggleKeyboard : null;
 
   Widget _sessionToolbar() => Material(
-        color: MirpgRemoteTheme.background,
+        key: const ValueKey('monitor-toolbar'),
+        color: _p.background,
         child: SafeArea(
           top: false,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: Row(children: [
+              _footerControl(widget.tr('Exit'), Icons.grid_view_rounded,
+                  widget.tr('Exit'), widget.onDashboard),
               _footerControl(
                   'Fit view',
                   Icons.fit_screen_outlined,
@@ -1994,7 +1954,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   'Controls', Icons.tune_rounded, 'Controls', _toggleControls,
                   selected: _panel == _MonitorPanel.controls),
               _footerControl('Switch view', Icons.view_carousel_outlined,
-                  'Targets', widget.onSwitchView),
+                  widget.tr('Switch'), widget.onSwitchView),
             ]),
           ),
         ),
@@ -2032,7 +1992,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
         onVerticalDragEnd: (_) => _thumbwheelDelta = 0,
         onVerticalDragCancel: () => _thumbwheelDelta = 0,
         child: Material(
-          color: MirpgRemoteTheme.surface.withOpacity(0.94),
+          color: _p.surface.withOpacity(0.94),
           elevation: 8,
           borderRadius: BorderRadius.circular(18),
           child: SizedBox(
@@ -2040,12 +2000,12 @@ class _MonitorControlViewState extends State<MonitorControlView> {
             height: 144,
             child:
                 Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-              const Icon(Icons.keyboard_arrow_up, color: Colors.white70),
+              Icon(Icons.keyboard_arrow_up, color: _p.textSecondary),
               const SizedBox(height: 12),
               Icon(Icons.unfold_more,
-                  color: _canSendInput ? Colors.white : Colors.white38),
+                  color: _canSendInput ? _p.textPrimary : _disabled),
               const SizedBox(height: 12),
-              const Icon(Icons.keyboard_arrow_down, color: Colors.white70),
+              Icon(Icons.keyboard_arrow_down, color: _p.textSecondary),
             ]),
           ),
         ),
@@ -2063,13 +2023,12 @@ class _MonitorControlViewState extends State<MonitorControlView> {
     ];
     if (labels.isEmpty) return null;
     return Material(
-      color: MirpgRemoteTheme.surface.withOpacity(0.94),
+      color: _p.surface.withOpacity(0.94),
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Text(labels.join(' · '),
-              style: const TextStyle(color: MirpgRemoteTheme.textPrimary)),
+          Text(labels.join(' · '), style: TextStyle(color: _p.textPrimary)),
           if (_armed != _ArmedButton.none) ...[
             const SizedBox(width: 8),
             TextButton(
@@ -2082,7 +2041,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
   }
 
   Widget _sessionRail(List<Widget> controls) => Material(
-        color: MirpgRemoteTheme.background,
+        color: _p.background,
         child: SizedBox(
           width: 56,
           child: Column(
@@ -2115,7 +2074,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
             (box.maxWidth - 112) / widget.desktopSize.width,
             height / widget.desktopSize.height);
         final barScale = math.min(box.maxWidth / widget.desktopSize.width,
-            (height - 124) / widget.desktopSize.height);
+            (height - 68) / widget.desktopSize.height);
         if (_toolbarVisible &&
             height >= 240 &&
             box.maxWidth >= 400 &&
@@ -2126,7 +2085,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                   _sessionRail([
-                    _toolbarButton('Dashboard', Icons.arrow_back_rounded,
+                    _toolbarButton(widget.tr('Exit'), Icons.grid_view_rounded,
                         widget.onDashboard),
                     _toolbarButton(
                         'Fit view',
@@ -2145,7 +2104,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                   ]),
                   Expanded(child: _remoteViewport()),
                   _sessionRail([
-                    _sessionMenu(),
                     _toolbarButton(
                         'Keyboard', Icons.keyboard_outlined, _keyboardAction,
                         selected: _liveKeyboard),
@@ -2158,7 +2116,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
           ]);
         }
         return Column(children: [
-          if (_toolbarVisible) _sessionTopBar(),
           Expanded(child: _remoteViewport()),
           if (keyboard)
             _liveKeyboardBar()
@@ -2190,8 +2147,7 @@ class _MonitorControlViewState extends State<MonitorControlView> {
           _limitOffset();
           _panToPointer();
         }
-        final frameStatus =
-            widget.frameStatus ?? (widget.localViewOnly ? 'View only' : null);
+        final frameStatus = widget.frameStatus;
         final badge = _modeBadge();
         final thumbwheelTop = math.max(12.0, (_viewport.height - 144) / 2);
         final marker = _touchMarker;
@@ -2232,31 +2188,41 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                                       height: 36,
                                       decoration: BoxDecoration(
                                           shape: BoxShape.circle,
-                                          color: Colors.white.withOpacity(0.12),
+                                          color:
+                                              _p.textPrimary.withOpacity(0.12),
                                           border: Border.all(
-                                              color: Colors.white70,
+                                              color: _p.textSecondary,
                                               width: 2))))),
                       ]))))),
           if (badge != null) Positioned(top: 12, left: 12, child: badge),
-          if (frameStatus != null)
+          if (widget.localViewOnly || frameStatus != null)
             Positioned(
-                top: 12,
+                top: MediaQuery.paddingOf(context).top + 8,
                 left: 0,
                 right: 0,
                 child: IgnorePointer(
-                    child: Center(
-                        child: DecoratedBox(
-                            decoration: BoxDecoration(
-                                color:
-                                    MirpgRemoteTheme.surface.withOpacity(0.9),
-                                borderRadius: BorderRadius.circular(999)),
-                            child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 7),
-                                child: Text(frameStatus,
-                                    style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w600))))))),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  if (widget.localViewOnly)
+                    MirpgStatusChip(
+                        key: const ValueKey('monitor-view-only-chip'),
+                        label: widget.tr('View only'),
+                        tone: MirpgStatusTone.warning,
+                        onDarkSurface: true),
+                  if (widget.localViewOnly && frameStatus != null)
+                    const SizedBox(height: 8),
+                  if (frameStatus != null)
+                    DecoratedBox(
+                        decoration: BoxDecoration(
+                            color: _p.surface.withOpacity(0.9),
+                            borderRadius: BorderRadius.circular(999)),
+                        child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 7),
+                            child: Text(frameStatus,
+                                style: TextStyle(
+                                    color: _p.textPrimary,
+                                    fontWeight: FontWeight.w600)))),
+                ]))),
           if (_showThumbwheel)
             Positioned(
                 left: _toolbarDock == MonitorToolbarDock.left ? 8 : null,
@@ -2279,12 +2245,12 @@ class _MonitorControlViewState extends State<MonitorControlView> {
                 right: _toolbarDock == MonitorToolbarDock.right ? 4 : null,
                 bottom: 4,
                 child: Material(
-                    color: MirpgRemoteTheme.surface.withOpacity(0.94),
+                    color: _p.surface.withOpacity(0.94),
                     elevation: 8,
                     borderRadius: BorderRadius.circular(14),
                     child: IconButton(
                         tooltip: 'Show toolbar',
-                        color: Colors.white,
+                        color: _p.textPrimary,
                         icon: const Icon(Icons.keyboard_arrow_up),
                         onPressed: () {
                           setState(() => _toolbarVisible = true);
@@ -2295,13 +2261,6 @@ class _MonitorControlViewState extends State<MonitorControlView> {
 }
 
 enum _MonitorPanel { none, controls }
-
-enum _MonitorSessionAction {
-  clipboard,
-  windows,
-  quality,
-  hideControls,
-}
 
 enum _TouchGesture {
   none,
