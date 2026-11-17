@@ -121,6 +121,8 @@ class FfiModel with ChangeNotifier {
   final void Function()? _onConnectionInvalidated;
   final void Function()? _onClipboardContextChanged;
   bool authenticatedPeer = false;
+  /// Text of the last connection error msgbox; the Computers card shows it.
+  String lastConnectionError = '';
   int peerInfoGeneration = 0;
   int _reconnectGeneration = 0;
   CachedPeerData cachedPeerData = CachedPeerData();
@@ -943,6 +945,11 @@ class FfiModel with ChangeNotifier {
     final title = evt['title'];
     final text = evt['text'];
     final link = evt['link'];
+
+    if (title == 'Connection Error' ||
+        (type is String && type.contains('error'))) {
+      lastConnectionError = text?.toString() ?? '';
+    }
 
     final connectionInterrupted = title == 'Connection Error' ||
         type == 'restarting' ||

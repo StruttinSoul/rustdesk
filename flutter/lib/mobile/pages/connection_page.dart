@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:auto_size_text_field/auto_size_text_field.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_hbb/common/formatter/id_formatter.dart';
 import 'package:flutter_hbb/common/widgets/connection_page_title.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -16,7 +17,9 @@ import '../../common/widgets/autocomplete.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
+import '../widgets/computers_hero.dart';
 import '../widgets/mirpg_remote_theme.dart';
+import '../widgets/trust_phone_sheet.dart' show pairedFlagKey;
 import 'home_page.dart';
 
 /// Connection page for connecting to a remote peer.
@@ -49,6 +52,18 @@ class _ConnectionPageState extends State<ConnectionPage> {
 
   StreamSubscription? _uniLinksSubscription;
 
+  /// The last-used PC; empty on a fresh install or after history is cleared.
+  String _lastId = '';
+
+  /// Online state of the last-used PC from the latest query; null if unknown.
+  bool? _heroOnline;
+
+  /// "Add another computer" starts folded away.
+  bool _addExpanded = false;
+
+  static const _onlineEvent = 'callback_query_onlines';
+  static const _onlineHandlerKey = 'ComputersHero';
+
   // https://github.com/flutter/flutter/issues/157244
   Iterable<Peer> _autocompleteOpts = [];
 
@@ -65,62 +80,136 @@ class _ConnectionPageState extends State<ConnectionPage> {
     super.initState();
     _allPeersLoader.init(setState);
     _idFocusNode.addListener(onFocusChanged);
-    if (_idController.text.isEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        final lastRemoteId = await bind.mainGetLastRemoteId();
-        if (lastRemoteId != _idController.id) {
-          setState(() {
-            _idController.id = lastRemoteId;
-          });
-        }
-      });
-    }
+    ConnectAttemptTracker.shared.addListener(_onAttemptChanged);
+    platformFFI.registerEventHandler(_onlineEvent, _onlineHandlerKey,
+        (evt) async => _onOnlineEvent(evt));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadLastId());
     Get.put<TextEditingController>(_idEditingController);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    Provider.of<FfiModel>(context);
-    return CustomScrollView(
-      slivers: [
-        SliverList(
-            delegate: SliverChildListDelegate([
-          if (!bind.isCustomClient() && !isIOS)
-            Obx(() => _buildUpdateUI(stateGlobal.updateUrl.value)),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-                MirpgRemoteTheme.pageMargin, 8, MirpgRemoteTheme.pageMargin, 0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const MirpgSectionHeader(
-                  title: 'Connect to a computer',
-                  subtitle:
-                      'Enter an ID or search a computer you have used before.',
-                ),
-                const SizedBox(height: 10),
-                _buildRemoteIDTextField(),
-                const SizedBox(height: 20),
-                const MirpgSectionHeader(
-                  title: 'Your computers',
-                  subtitle: 'Saved and recent connections',
-                ),
-                const SizedBox(height: 10),
-              ],
-            ),
-          ),
-        ])),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(MirpgRemoteTheme.pageMargin, 0,
-              MirpgRemoteTheme.pageMargin, MirpgRemoteTheme.pageMargin),
-          sliver: SliverFillRemaining(
-            hasScrollBody: true,
+  /// Reads the last-used PC, then its name and whether it is online.
+  Future<void> _loadLastId() async {
+    final id = await bind.mainGetLastRemoteId();
+    if (!mounted) return;
+    if (id != _lastId) {
+      setState(() {
+        _lastId = id;
+        _heroOnline = null;
+      });
+    }
+    if (id.isEmpty) return;
+    await _allPeersLoader.getAllPeers();
+    if (!mounted || id != _lastId) return;
+    _allPeersLoader.queryOnlines([_heroPeer()]);
+  }
+
+  Peer _heroPeer() {
+    for (final peer in _allPeersLoader.peers) {
+      if (peer.id == _lastId) return peer;
+    }
+    return Peer.fromJson({'id': _lastId});
+  }
+
+  void _onOnlineEvent(Map<String, dynamic> evt) {
+    if (!mounted || _lastId.isEmpty) return;
+    bool listed(String key) {
+      final ids = evt[key];
+      return ids is String && ids.split(',').contains(_lastId);
+    }
+
+    final online = listed('onlines')
+        ? true
+        : listed('offlines')
+            ? false
+            : null;
+    if (online != null && online != _heroOnline) {
+      setState(() => _heroOnline = online);
+    }
+  }
+
+  /// A connect attempt started, reached the PC or ended. `RemotePage` reports
+  /// from its own initState and dispose, which run while the tree is built.
+  void _onAttemptChanged() {
+    if (!mounted) return;
+    void apply() {
+      if (!mounted) return;
+      setState(() {});
+      _loadLastId();
+    }
+
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => apply());
+    } else {
+      apply();
+    }
+  }
+
+  ComputerHeroData _heroData() {
+    final peer = _heroPeer();
+    final name = peer.alias.isNotEmpty
+        ? peer.alias
+        : peer.hostname.isNotEmpty
+            ? peer.hostname
+            : formatID(_lastId);
+    return ComputerHeroData(
+      id: _lastId,
+      name: name,
+      online: _heroOnline ?? (peer.online ? true : null),
+      trusted: bind.getLocalFlutterOption(k: pairedFlagKey(_lastId)) == 'Y',
+    );
+  }
+
+  void _openSavedComputers() {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => Scaffold(
+        appBar: AppBar(title: Text(translate('Saved computers'))),
+        body: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(MirpgRemoteTheme.pageMargin, 0,
+                MirpgRemoteTheme.pageMargin, MirpgRemoteTheme.pageMargin),
             child: MirpgSurface(
               padding: const EdgeInsets.fromLTRB(10, 12, 10, 8),
               child: PeerTabPage(),
             ),
           ),
-        )
+        ),
+      ),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Provider.of<FfiModel>(context);
+    final hasHero = _lastId.isNotEmpty;
+    return ListView(
+      children: [
+        if (!bind.isCustomClient() && !isIOS)
+          Obx(() => _buildUpdateUI(stateGlobal.updateUrl.value)),
+        Padding(
+          padding: const EdgeInsets.all(MirpgRemoteTheme.pageMargin),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (hasHero) ...[
+                ComputerHeroCard(
+                  data: _heroData(),
+                  attempt: ConnectAttemptTracker.shared.value,
+                  onConnect: () => connect(context, _lastId),
+                ),
+                const SizedBox(height: MirpgRemoteTheme.pageMargin),
+              ],
+              AddComputerSection(
+                hasHero: hasHero,
+                expanded: _addExpanded,
+                onExpandedChanged: (v) => setState(() => _addExpanded = v),
+                idField: _buildRemoteIDTextField(),
+                onSavedComputers: _openSavedComputers,
+              ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -386,6 +475,8 @@ class _ConnectionPageState extends State<ConnectionPage> {
   @override
   void dispose() {
     _uniLinksSubscription?.cancel();
+    ConnectAttemptTracker.shared.removeListener(_onAttemptChanged);
+    platformFFI.unregisterEventHandler(_onlineEvent, _onlineHandlerKey);
     _idController.dispose();
     _idFocusNode.removeListener(onFocusChanged);
     _allPeersLoader.clear();

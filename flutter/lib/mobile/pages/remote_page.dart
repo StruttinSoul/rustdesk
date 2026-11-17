@@ -22,6 +22,7 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../widgets/computers_hero.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
 import 'emulator_page.dart';
@@ -98,6 +99,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     super.initState();
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
     gFFI.ffiModel.addListener(_openDashboardWhenReady);
+    gFFI.ffiModel.lastConnectionError = '';
+    ConnectAttemptTracker.shared.started(widget.id);
     gFFI.start(
       widget.id,
       password: widget.password,
@@ -146,6 +149,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   @override
   Future<void> dispose() async {
+    ConnectAttemptTracker.shared.ended(widget.id,
+        authenticated: gFFI.ffiModel.authenticatedPeer || _dashboardOpened,
+        reason: gFFI.ffiModel.lastConnectionError);
     gFFI.ffiModel.removeListener(_openDashboardWhenReady);
     WidgetsBinding.instance.removeObserver(this);
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
@@ -201,6 +207,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   }
 
   void _openDashboardWhenReady() {
+    if (gFFI.ffiModel.authenticatedPeer) {
+      ConnectAttemptTracker.shared.authenticated(widget.id);
+    }
     if (!isAndroid ||
         !mounted ||
         _dashboardOpened ||
