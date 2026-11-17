@@ -73,8 +73,6 @@ libsamplerate-sys = { version = "0.1.12", optional = true }
 uuid = { version = "1.3", features = ["v4"] }
 num_cpus = "1.15"
 bytes = { version = "1.4", features = ["serde"] }
-h2 = "0.4"
-http = "1"
 default-net = "0.14"
 wol-rs = "1.0"
 flutter_rust_bridge = { version = "=1.80", features = ["uuid"], optional = true}
@@ -162,6 +160,9 @@ remote_printer = { path = "libs/remote_printer" }
 impersonate_system = { git = "https://github.com/rustdesk-org/impersonate-system" }
 shared_memory = "0.12"
 tauri-winrt-notification = "0.1"
+# The Android Emulator's gRPC screen feed (src/server/emulator/avd_feed.rs).
+h2 = "0.4"
+http = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

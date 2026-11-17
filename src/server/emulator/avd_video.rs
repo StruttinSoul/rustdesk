@@ -151,7 +151,8 @@ fn quality_for(bit_rate: u32, width: usize, height: usize) -> f32 {
 }
 
 pub struct HostEncoder {
-    encoder: HwRamEncoder,
+    /// `None` only after a failed re-create in `force_key`.
+    encoder: Option<HwRamEncoder>,
     config: HwRamEncoderConfig,
     width: u32,
     height: u32,
@@ -202,7 +203,7 @@ impl HostEncoder {
         };
         let encoder = HwRamEncoder::new(EncoderCfg::HWRAM(config.clone()), false)?;
         Ok(HostEncoder {
-            encoder,
+            encoder: Some(encoder),
             config,
             width,
             height,
@@ -236,9 +237,12 @@ impl HostEncoder {
                 w * h * 4
             );
         }
+        let Some(encoder) = self.encoder.as_mut() else {
+            bail!("The host encoder could not be re-created");
+        };
         let buffer = PixelBuffer::new(rgba, Pixfmt::RGBA, w, h);
-        convert_to_yuv(&buffer, self.encoder.yuvfmt(), &mut self.yuv, &mut self.mid)?;
-        let frames = self.encoder.encode(&self.yuv, pts_ms)?;
+        convert_to_yuv(&buffer, encoder.yuvfmt(), &mut self.yuv, &mut self.mid)?;
+        let frames = encoder.encode(&self.yuv, pts_ms)?;
         self.frames += 1;
         Ok(frames
             .into_iter()
@@ -251,13 +255,20 @@ impl HostEncoder {
     }
 
     /// Re-creates the encoder (keeping the budget slot) and re-encodes the
-    /// last image, so the first returned frame is a keyframe.
+    /// last image, so the first returned frame is a keyframe. The old
+    /// hardware session is released before the new one is opened; the last
+    /// image is kept even when the re-create fails.
     pub fn force_key(&mut self) -> ResultType<Vec<EncodedHostFrame>> {
         let Some((rgba, pts)) = self.last.take() else {
             return Ok(Vec::new());
         };
-        self.encoder = HwRamEncoder::new(EncoderCfg::HWRAM(self.config.clone()), false)?;
-        let out = self.encode_ref(&rgba, pts);
+        self.encoder = None;
+        let out = HwRamEncoder::new(EncoderCfg::HWRAM(self.config.clone()), false).and_then(
+            |encoder| {
+                self.encoder = Some(encoder);
+                self.encode_ref(&rgba, pts)
+            },
+        );
         self.last = Some((rgba, pts));
         out
     }
@@ -404,5 +415,20 @@ mod tests {
         assert_eq!(IN_USE.load(std::sync::atomic::Ordering::SeqCst), before);
         assert!(frames.first().expect("a frame").key);
         assert!(nal_types(&frames[0].data).contains(&7));
+    }
+
+    #[test]
+    #[ignore = "needs an NVIDIA GPU"]
+    fn failed_force_key_keeps_the_last_image() {
+        let _g = lock();
+        let mut enc = nvenc(576, 1280);
+        enc.encode(vec![90u8; 576 * 1280 * 4], 0).expect("encode");
+        let codec = std::mem::replace(&mut enc.config.name, "no_such_codec".to_owned());
+        assert!(enc.force_key().is_err());
+        assert!(enc.encoder.is_none(), "the old session is released first");
+        assert!(enc.last.is_some(), "the last image survives a failed re-create");
+        enc.config.name = codec;
+        let frames = enc.force_key().expect("force_key after a failure");
+        assert!(frames.first().expect("a frame").key);
     }
 }

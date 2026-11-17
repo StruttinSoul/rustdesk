@@ -2406,6 +2406,90 @@ mod tests {
         assert_eq!(leftover.trim(), "0", "the guest loop outlived the watcher");
     }
 
+    #[test]
+    #[ignore = "Rotates the running Aperture_Trial_Play35 emulator and streams it through the host GPU"]
+    fn real_cold_landscape_start_is_upright() {
+        let serial = trial_serial();
+        capture_log();
+        let runtime = test_runtime();
+        let _restore = RotationGuard {
+            serial: serial.clone(),
+            accelerometer: trial_setting(&serial, "accelerometer_rotation"),
+            user_rotation: trial_setting(&serial, "user_rotation"),
+        };
+        trial_open_settings(&serial);
+        trial_shell(&serial, &["shell", "settings", "put", "system", "accelerometer_rotation", "0"]);
+        trial_shell(&serial, &["shell", "settings", "put", "system", "user_rotation", "1"]);
+        let rotated = Instant::now();
+        while !trial_shell(&serial, &["shell", "dumpsys display | grep -m1 -o 'mCurrentOrientation=[0-3]'"])
+            .contains("mCurrentOrientation=1")
+        {
+            assert!(rotated.elapsed() < Duration::from_secs(5), "the guest did not rotate");
+            thread::sleep(Duration::from_millis(100));
+        }
+        thread::sleep(Duration::from_secs(1));
+        let log_mark = CAPTURED_LOG.0.lock().unwrap().len();
+        let host_streams = avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire);
+        let (sender, mut events) =
+            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
+        let started = Instant::now();
+        let session = GuestSession::start(trial_select(), sender).unwrap();
+        // Every stream_ready of the first 6 s, and when the first frame came.
+        let mut readies = Vec::new();
+        let mut first_frame = None;
+        while started.elapsed() < Duration::from_secs(6) {
+            match next_event(&runtime, &mut events, Duration::from_millis(100)) {
+                Some(GuestEvent::Response(response)) => {
+                    if let Some(base::message_proto::emulator_response::Union::Status(status)) =
+                        response.union
+                    {
+                        let state = status.state.enum_value_or_default();
+                        assert_ne!(state, EmulatorSessionState::EmulatorFailed, "{}", status.error);
+                        if status.phase == "stream_ready" {
+                            readies.push((started.elapsed(), status.width, status.height));
+                        }
+                    }
+                }
+                Some(GuestEvent::Frame(frame)) if first_frame.is_none() => {
+                    first_frame = Some((started.elapsed(), frame.key));
+                }
+                _ => {}
+            }
+        }
+        let host_readies =
+            avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire) - host_streams;
+        eprintln!("RESULT cold landscape: stream_ready {readies:?}; host readies {host_readies}; first frame {first_frame:?}");
+
+        // The first tap of the session: "Network & internet" by its bounds in
+        // the rotated display (lower-left quadrant in landscape).
+        let landed = readies.first().map(|&(_, width, height)| {
+            let display = trial_landscape_display(&serial);
+            let target = trial_centre_of(&trial_ui_xml(&serial), "Network &amp; internet")
+                .expect("Network & internet in landscape Settings");
+            let point = (target.0 * width / display.0, target.1 * height / display.1);
+            while events.try_recv().is_ok() {}
+            tap_at(&session, (width, height), point);
+            pump(&runtime, &mut events, Duration::from_millis(1500));
+            let after = trial_screen_texts(&serial);
+            let landed = after.iter().any(|text| text == "Internet")
+                && !after.iter().any(|text| text == "Connected devices");
+            eprintln!("RESULT cold landscape first tap at stream {point:?} landed={landed}: {after:?}");
+            landed
+        });
+        trial_shell(&serial, &["shell", "input", "keyevent", "3"]);
+        close(&runtime, session, events);
+        let unknown_warned = CAPTURED_LOG.0.lock().unwrap()[log_mark..]
+            .iter()
+            .any(|line| line.contains("rotation unknown"));
+        eprintln!("RESULT rotation-unknown warn={unknown_warned}");
+
+        assert_eq!(host_readies, 1, "the session must reach stream_ready once, on the host path");
+        assert_eq!(readies.len(), 1, "exactly one stream_ready: {readies:?}");
+        assert_eq!((readies[0].1, readies[0].2), (1280, 576), "the first stream must be upright");
+        assert!(!unknown_warned, "rotation unknown was logged");
+        assert_eq!(landed, Some(true), "the first landscape tap did not land");
+    }
+
     struct CapturedLog(Mutex<Vec<String>>);
 
     impl hbb_common::log::Log for CapturedLog {

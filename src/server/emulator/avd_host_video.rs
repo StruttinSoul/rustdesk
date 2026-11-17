@@ -24,7 +24,7 @@ use std::{
     io::{BufRead, BufReader},
     os::windows::process::CommandExt,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender},
@@ -44,6 +44,10 @@ const POLL: Duration = Duration::from_millis(20);
 /// soon after the adb client is gone.
 const ROTATION_LOOP: &str = "while :; do r=$(dumpsys display 2>/dev/null | grep -m1 -o 'mCurrentOrientation=[0-3]'); echo \"r=$r\" || exit; sleep 0.25; done";
 const ROTATION_UNKNOWN: u8 = u8::MAX;
+/// How long the first encode waits for the watcher's first report.
+const FIRST_ROTATION_WAIT: Duration = Duration::from_secs(1);
+/// A watcher whose shell ended is restarted at most this often.
+const ROTATION_RESTART: Duration = Duration::from_secs(3);
 
 /// The rotation in one line of `ROTATION_LOOP`.
 fn parse_rotation(line: &str) -> Option<u8> {
@@ -51,50 +55,176 @@ fn parse_rotation(line: &str) -> Option<u8> {
     value.parse::<u8>().ok().filter(|rotation| *rotation < 4)
 }
 
-/// Watches the guest's display rotation through one persistent `adb shell`.
-/// The emulator feed keeps the portrait panel, so the host turns frames
-/// upright itself. Killed (and joined) on drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RotationReading {
+    /// The watcher printed at least one line (parsable or not).
+    reported: bool,
+    /// The last rotation it parsed.
+    rotation: Option<u32>,
+}
+
+/// What the watcher has seen. An unparsable line, or the shell ending,
+/// keeps the last known rotation.
+struct RotationState {
+    rotation: AtomicU8,
+    reported: AtomicBool,
+}
+
+impl RotationState {
+    fn new() -> Self {
+        Self {
+            rotation: AtomicU8::new(ROTATION_UNKNOWN),
+            reported: AtomicBool::new(false),
+        }
+    }
+
+    fn apply(&self, line: &str) {
+        if let Some(rotation) = parse_rotation(line) {
+            self.rotation.store(rotation, Ordering::Release);
+        }
+        self.reported.store(true, Ordering::Release);
+    }
+
+    fn rotation(&self) -> Option<u32> {
+        let rotation = self.rotation.load(Ordering::Acquire);
+        (rotation != ROTATION_UNKNOWN).then_some(u32::from(rotation))
+    }
+
+    fn reading(&self) -> RotationReading {
+        // `reported` first: a rotation stored before it is then seen too.
+        let reported = self.reported.load(Ordering::Acquire);
+        RotationReading {
+            reported,
+            rotation: self.rotation(),
+        }
+    }
+}
+
+/// Reads watcher lines until `stop`. When a shell ends, `restart` starts a
+/// new one, at most once per `retry` (counted from the last start).
+fn supervise<R: BufRead>(
+    state: &RotationState,
+    stop: &AtomicBool,
+    first: R,
+    mut restart: impl FnMut() -> ResultType<R>,
+    retry: Duration,
+) {
+    let mut reader = Some(first);
+    let mut last_start = Instant::now();
+    loop {
+        if let Some(reader) = reader.take() {
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                state.apply(&line);
+            }
+        }
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            let left = retry.saturating_sub(last_start.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            thread::sleep(left.min(Duration::from_millis(50)));
+        }
+        last_start = Instant::now();
+        match restart() {
+            Ok(restarted) => {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(60),
+                    info,
+                    "AVD rotation watcher ended; restarted it"
+                );
+                reader = Some(restarted);
+            }
+            Err(error) => hbb_common::throttled_log!(
+                Duration::from_secs(60),
+                warn,
+                "AVD rotation watcher ended and cannot restart: {error}"
+            ),
+        }
+    }
+}
+
+fn spawn_rotation_shell(adb: &Path, serial: &str) -> ResultType<(Child, ChildStdout)> {
+    let mut child = Command::new(adb)
+        .creation_flags(0x08000000)
+        .args(["-s", serial, "shell", ROTATION_LOOP])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    match child.stdout.take() {
+        Some(stdout) => Ok((child, stdout)),
+        None => {
+            end_child(&mut child);
+            bail!("the rotation watcher has no output")
+        }
+    }
+}
+
+fn end_child(child: &mut Child) {
+    if let Err(error) = child.kill() {
+        log::trace!("Rotation watcher kill: {error}");
+    }
+    let _ = child.wait();
+}
+
+/// Watches the guest's display rotation through one persistent `adb shell`
+/// (restarted, throttled, if it ends). The emulator feed keeps the portrait
+/// panel, so the host turns frames upright itself. Killed (and joined) on
+/// drop.
 pub(super) struct RotationWatcher {
-    child: Child,
+    child: Arc<Mutex<Option<Child>>>,
+    stop: Arc<AtomicBool>,
     reader: Option<thread::JoinHandle<()>>,
-    rotation: Arc<AtomicU8>,
+    state: Arc<RotationState>,
+    started: Instant,
 }
 
 impl RotationWatcher {
     pub(super) fn start(adb: &Path, serial: &str) -> ResultType<Self> {
-        let mut child = Command::new(adb)
-            .creation_flags(0x08000000)
-            .args(["-s", serial, "shell", ROTATION_LOOP])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("the rotation watcher has no output")
+        let started = Instant::now();
+        let (child, stdout) = spawn_rotation_shell(adb, serial)?;
+        let child = Arc::new(Mutex::new(Some(child)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(RotationState::new());
+        let reader = {
+            let (child, stop, state) = (child.clone(), stop.clone(), state.clone());
+            let (adb, serial) = (adb.to_owned(), serial.to_owned());
+            thread::Builder::new()
+                .name("emulator-rotation".to_owned())
+                .spawn(move || {
+                    let restart = || -> ResultType<BufReader<ChildStdout>> {
+                        let mut slot = child.lock().unwrap();
+                        if let Some(mut ended) = slot.take() {
+                            end_child(&mut ended);
+                        }
+                        // Checked under the lock: drop sets `stop` first and
+                        // then kills whatever child is in the slot.
+                        if stop.load(Ordering::Acquire) {
+                            bail!("stopped");
+                        }
+                        let (restarted, stdout) = spawn_rotation_shell(&adb, &serial)?;
+                        *slot = Some(restarted);
+                        Ok(BufReader::new(stdout))
+                    };
+                    supervise(&state, &stop, BufReader::new(stdout), restart, ROTATION_RESTART);
+                })
         };
-        let rotation = Arc::new(AtomicU8::new(ROTATION_UNKNOWN));
-        let shared = rotation.clone();
-        let reader = thread::Builder::new()
-            .name("emulator-rotation".to_owned())
-            .spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
-                    let rotation = parse_rotation(&line).unwrap_or(ROTATION_UNKNOWN);
-                    shared.store(rotation, Ordering::Release);
-                }
-                shared.store(ROTATION_UNKNOWN, Ordering::Release);
-            });
         match reader {
             Ok(reader) => Ok(Self {
                 child,
+                stop,
                 reader: Some(reader),
-                rotation,
+                state,
+                started,
             }),
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                if let Some(mut child) = child.lock().unwrap().take() {
+                    end_child(&mut child);
+                }
                 Err(error.into())
             }
         }
@@ -102,35 +232,93 @@ impl RotationWatcher {
 
     /// Android's current display rotation (0-3), if known.
     pub(super) fn rotation(&self) -> Option<u32> {
-        let rotation = self.rotation.load(Ordering::Acquire);
-        (rotation != ROTATION_UNKNOWN).then_some(u32::from(rotation))
+        self.state.rotation()
     }
 }
 
 impl Drop for RotationWatcher {
     fn drop(&mut self) {
-        if let Err(error) = self.child.kill() {
-            log::trace!("Rotation watcher kill: {error}");
+        self.stop.store(true, Ordering::Release);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            end_child(&mut child);
         }
-        let _ = self.child.wait();
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
     }
 }
 
-/// The rotation to turn frames upright with: 0 when unknown (logged).
-fn current_rotation(watcher: Option<&RotationWatcher>) -> u32 {
-    match watcher.and_then(RotationWatcher::rotation) {
-        Some(rotation) => rotation,
-        None => {
-            hbb_common::throttled_log!(
-                Duration::from_secs(60),
-                warn,
-                "AVD display rotation unknown; streaming the emulator screen unrotated"
-            );
-            0
+/// The rotation to turn the next image upright with, or `None` to hold it
+/// while the watcher has not reported yet (up to `FIRST_ROTATION_WAIT` after
+/// it started). Unknown after that counts as 0 (logged).
+fn encode_rotation(watcher: Option<(RotationReading, Duration)>) -> Option<u32> {
+    let Some((reading, waited)) = watcher else {
+        return Some(0);
+    };
+    if let Some(rotation) = reading.rotation {
+        return Some(rotation);
+    }
+    if !reading.reported && waited < FIRST_ROTATION_WAIT {
+        log::trace!("AVD display rotation not reported yet; holding the first frame");
+        return None;
+    }
+    hbb_common::throttled_log!(
+        Duration::from_secs(60),
+        warn,
+        "AVD display rotation unknown; streaming the emulator screen unrotated"
+    );
+    Some(0)
+}
+
+fn current_rotation(watcher: Option<&RotationWatcher>) -> Option<u32> {
+    encode_rotation(watcher.map(|watcher| (watcher.state.reading(), watcher.started.elapsed())))
+}
+
+/// Bounds how long the host path may go without delivering a frame after
+/// subscribing, and again after the one reconnect.
+struct Liveness {
+    subscribed: Instant,
+    /// A frame has been delivered: the host path is live.
+    streaming: bool,
+    /// A frame has been delivered since the last (re)subscribe.
+    delivered: bool,
+}
+
+impl Liveness {
+    fn new(subscribed: Instant) -> Self {
+        Self {
+            subscribed,
+            streaming: false,
+            delivered: false,
         }
+    }
+
+    fn delivered(&mut self) {
+        self.streaming = true;
+        self.delivered = true;
+    }
+
+    fn resubscribed(&mut self, now: Instant) {
+        self.subscribed = now;
+        self.delivered = false;
+    }
+
+    /// `NoFirstFrame` when nothing came before the first frame; an error
+    /// when a re-subscribed feed stays silent.
+    fn check(&self, now: Instant) -> ResultType<Option<HostOutcome>> {
+        if self.delivered || now.saturating_duration_since(self.subscribed) < FIRST_FRAME_TIMEOUT {
+            return Ok(None);
+        }
+        if !self.streaming {
+            return Ok(Some(HostOutcome::NoFirstFrame(format!(
+                "no frame within {} s",
+                FIRST_FRAME_TIMEOUT.as_secs()
+            ))));
+        }
+        bail!(
+            "the AVD screen feed sent no frame within {} s of reconnecting",
+            FIRST_FRAME_TIMEOUT.as_secs()
+        )
     }
 }
 
@@ -381,11 +569,11 @@ struct HostVideo<'a> {
     input_stopped: &'a AtomicBool,
 }
 
-/// Delivers the encoder's output; `streaming` turns true with the first frame.
+/// Delivers the encoder's output.
 fn deliver(
     sender: &mut FrameSender,
     frames: Vec<EncodedHostFrame>,
-    streaming: &mut bool,
+    live: &mut Liveness,
 ) -> ResultType<()> {
     for frame in frames.into_iter().filter(|frame| !frame.data.is_empty()) {
         let _became_ready = sender.send(frame.data, frame.key, frame.pts)?;
@@ -393,13 +581,14 @@ fn deliver(
         if _became_ready {
             HOST_STREAMS_READY.fetch_add(1, Ordering::AcqRel);
         }
-        *streaming = true;
+        live.delivered();
     }
     Ok(())
 }
 
 /// Feed -> host encoder -> session. `NoFirstFrame` when nothing was delivered
-/// within `FIRST_FRAME_TIMEOUT` (or the feed or encoder failed before that).
+/// within `FIRST_FRAME_TIMEOUT` (or the feed or encoder failed before that);
+/// an error when the feed stays silent that long after the reconnect.
 fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
     let session = video.session;
     let avd = feed_avd_name(session.avd);
@@ -411,7 +600,7 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         Ok(started) => started,
         Err(error) => return Ok(HostOutcome::NoFirstFrame(error.to_string())),
     };
-    let subscribed = Instant::now();
+    let mut live = Liveness::new(Instant::now());
     let mut sender = FrameSender::new(
         session.request,
         session.id,
@@ -423,8 +612,6 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         video.idle,
         "Guest video (host GPU)",
     );
-    // A frame has been delivered: the host path is live.
-    let mut streaming = false;
     let mut encoder: Option<HostEncoder> = None;
     // The upright stream size and the rotation it was turned by.
     let mut size: Option<(u32, u32, u32)> = None;
@@ -443,39 +630,39 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         if video.input_stopped.load(Ordering::Acquire) {
             bail!("Guest input stopped")
         }
-        if !streaming && subscribed.elapsed() >= FIRST_FRAME_TIMEOUT {
-            return Ok(HostOutcome::NoFirstFrame(format!(
-                "no frame within {} s",
-                FIRST_FRAME_TIMEOUT.as_secs()
-            )));
+        if let Some(outcome) = live.check(Instant::now())? {
+            return Ok(outcome);
         }
         if video.reset.swap(false, Ordering::AcqRel) {
             if let Some(active) = encoder.as_mut() {
                 match active.force_key() {
-                    Ok(frames) => deliver(&mut sender, frames, &mut streaming)?,
-                    Err(error) if !streaming => {
+                    Ok(frames) => deliver(&mut sender, frames, &mut live)?,
+                    Err(error) if !live.streaming => {
                         return Ok(HostOutcome::NoFirstFrame(error.to_string()))
                     }
                     Err(error) => return Err(error),
                 }
             }
         }
-        requeue_on_rotation(
-            &mut pending,
-            &mut last_image,
-            size.map(|(_, _, rotation)| rotation),
-            current_rotation(video.rotation),
-        );
+        // `None` holds the first image until the watcher's first report.
+        let rotation = current_rotation(video.rotation);
+        if let Some(rotation) = rotation {
+            requeue_on_rotation(
+                &mut pending,
+                &mut last_image,
+                size.map(|(_, _, rotation)| rotation),
+                rotation,
+            );
+        }
         let due = last_encode
             .map(|last| min_gap.saturating_sub(last.elapsed()))
             .unwrap_or(Duration::ZERO);
-        if due.is_zero() {
+        if let (true, Some(rotation)) = (due.is_zero(), rotation) {
             if let Some(image) = pending.take() {
                 let (feed_width, feed_height) = even_size(image.width, image.height);
                 if feed_width == 0 || feed_height == 0 {
                     continue;
                 }
-                let rotation = current_rotation(video.rotation);
                 let (width, height) = if rotation % 2 == 1 {
                     (feed_height, feed_width)
                 } else {
@@ -530,8 +717,8 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
                 }
                 last_image = Some(image);
                 match encoded {
-                    Ok(frames) => deliver(&mut sender, frames, &mut streaming)?,
-                    Err(error) if !streaming => {
+                    Ok(frames) => deliver(&mut sender, frames, &mut live)?,
+                    Err(error) if !live.streaming => {
                         return Ok(HostOutcome::NoFirstFrame(error.to_string()))
                     }
                     Err(error) => return Err(error),
@@ -539,7 +726,11 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
                 continue;
             }
         }
-        let wait = if pending.is_some() { due.min(POLL) } else { POLL };
+        let wait = if pending.is_some() && rotation.is_some() {
+            due.min(POLL)
+        } else {
+            POLL
+        };
         let failure = match images.recv_timeout(wait.max(Duration::from_millis(1))) {
             Ok(Ok(image)) => {
                 pending = Some(image);
@@ -551,7 +742,7 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
                 hbb_common::anyhow::anyhow!("the screen feed stopped")
             }
         };
-        if !streaming {
+        if !live.streaming {
             return Ok(HostOutcome::NoFirstFrame(failure.to_string()));
         }
         if reconnected {
@@ -563,6 +754,7 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         log::info!("AVD screen feed dropped ({failure}); reconnecting");
         drop(feed);
         (feed, images) = start_feed()?;
+        live.resubscribed(Instant::now());
         pending = None;
         last_image = None;
         encoder = None;
@@ -625,6 +817,90 @@ mod tests {
         assert_eq!(parse_rotation("r=mCurrentOrientation=3"), Some(3));
         assert_eq!(parse_rotation("r="), None);
         assert_eq!(parse_rotation("garbage"), None);
+        // An unparsable line keeps the last rotation, but still counts as
+        // the watcher's first report.
+        let state = RotationState::new();
+        assert_eq!(state.reading(), RotationReading { reported: false, rotation: None });
+        state.apply("r=");
+        assert_eq!(state.reading(), RotationReading { reported: true, rotation: None });
+        state.apply("r=mCurrentOrientation=1");
+        state.apply("garbage");
+        state.apply("r=");
+        assert_eq!(state.reading(), RotationReading { reported: true, rotation: Some(1) });
+    }
+
+    #[test]
+    fn a_dead_watcher_keeps_the_last_rotation_and_restarts_throttled() {
+        let state = RotationState::new();
+        let stop = AtomicBool::new(false);
+        let retry = Duration::from_millis(30);
+        let mut restarts = Vec::new();
+        let started = Instant::now();
+        supervise(
+            &state,
+            &stop,
+            std::io::Cursor::new(b"r=mCurrentOrientation=1\n".as_slice()),
+            || {
+                // The shell ended (EOF): the last rotation is kept.
+                let last = if restarts.is_empty() { 1 } else { 3 };
+                assert_eq!(state.rotation(), Some(last));
+                restarts.push(started.elapsed());
+                match restarts.len() {
+                    1 => Ok(std::io::Cursor::new(b"r=mCurrentOrientation=3\n".as_slice())),
+                    2 => bail!("adb is gone"),
+                    _ => {
+                        stop.store(true, Ordering::Release);
+                        bail!("adb is gone")
+                    }
+                }
+            },
+            retry,
+        );
+        assert_eq!(state.rotation(), Some(3));
+        assert_eq!(restarts.len(), 3);
+        // At most one restart per `retry`, even when restarts fail at once.
+        assert!(restarts[0] >= retry, "{restarts:?}");
+        assert!(restarts[1] - restarts[0] >= retry, "{restarts:?}");
+        assert!(restarts[2] - restarts[1] >= retry, "{restarts:?}");
+    }
+
+    #[test]
+    fn the_first_encode_waits_for_the_first_rotation_report() {
+        let unknown = RotationReading { reported: false, rotation: None };
+        let short = Duration::from_millis(100);
+        // Held while the watcher has not reported yet.
+        assert_eq!(encode_rotation(Some((unknown, short))), None);
+        // Released at 0 once the wait is over.
+        assert_eq!(encode_rotation(Some((unknown, FIRST_ROTATION_WAIT))), Some(0));
+        // A reading releases it at once.
+        let landscape = RotationReading { reported: true, rotation: Some(1) };
+        assert_eq!(encode_rotation(Some((landscape, short))), Some(1));
+        // A build that never prints the orientation does not hold it.
+        let silent = RotationReading { reported: true, rotation: None };
+        assert_eq!(encode_rotation(Some((silent, short))), Some(0));
+        // No watcher: unrotated, as before.
+        assert_eq!(encode_rotation(None), Some(0));
+    }
+
+    #[test]
+    fn a_resubscribed_feed_must_deliver_within_the_first_frame_timeout() {
+        let start = Instant::now();
+        let mut live = Liveness::new(start);
+        assert!(live.check(start).unwrap().is_none());
+        // Nothing before the first frame: fall back.
+        assert!(matches!(
+            live.check(start + FIRST_FRAME_TIMEOUT).unwrap(),
+            Some(HostOutcome::NoFirstFrame(_))
+        ));
+        live.delivered();
+        assert!(live.check(start + FIRST_FRAME_TIMEOUT * 3).unwrap().is_none());
+        // Reconnected: the timeout applies again, and fails the session.
+        let again = start + FIRST_FRAME_TIMEOUT * 3;
+        live.resubscribed(again);
+        assert!(live.check(again + FIRST_FRAME_TIMEOUT / 2).unwrap().is_none());
+        assert!(live.check(again + FIRST_FRAME_TIMEOUT).is_err());
+        live.delivered();
+        assert!(live.check(again + FIRST_FRAME_TIMEOUT * 2).unwrap().is_none());
     }
 
     #[test]
