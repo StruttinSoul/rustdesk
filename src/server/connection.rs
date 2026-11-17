@@ -2047,22 +2047,37 @@ impl Connection {
                     Err(e) => (true, e.to_string()),
                 };
             let elapsed = started.elapsed();
+            // A paused API server logs once per pause (api_backoff), not per record.
+            let paused = crate::hbbs_http::api_backoff::is_paused_error(&err);
             if !retryable || attempt >= ATTEMPTS || elapsed >= RETRY_DEADLINE {
-                log::error!(
-                    "Audit post dropped (attempt {}/{}, {:?} elapsed): {}",
-                    attempt,
-                    ATTEMPTS,
-                    elapsed,
-                    err
-                );
+                if paused {
+                    hbb_common::throttled_log!(
+                        Duration::from_secs(300),
+                        warn,
+                        "Audit posts dropped while the API server is unreachable: {}",
+                        err
+                    );
+                } else {
+                    log::error!(
+                        "Audit post dropped (attempt {}/{}, {:?} elapsed): {}",
+                        attempt,
+                        ATTEMPTS,
+                        elapsed,
+                        err
+                    );
+                }
                 bail!("{}", err);
             }
-            log::warn!(
-                "Audit post failed (attempt {}/{}): {}",
-                attempt,
-                ATTEMPTS,
-                err
-            );
+            if paused {
+                log::debug!("Audit post paused (attempt {}/{}): {}", attempt, ATTEMPTS, err);
+            } else {
+                log::warn!(
+                    "Audit post failed (attempt {}/{}): {}",
+                    attempt,
+                    ATTEMPTS,
+                    err
+                );
+            }
             // In range by construction: the guard above returns at ATTEMPTS.
             time::sleep(Duration::from_secs(RETRY_BACKOFF_SECS[attempt - 1])).await;
             // Re-checked after the delay so no attempt starts past the deadline;

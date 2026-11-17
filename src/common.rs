@@ -1536,13 +1536,16 @@ where
 /// - 4xx responses are returned as-is (server is reachable, business logic error).
 /// - If fallback also fails, returns the original HTTP result (text or error).
 pub async fn post_request(url: String, body: String, header: &str) -> ResultType<String> {
-    with_tcp_proxy_fallback(
+    crate::hbbs_http::api_backoff::check(&url)?;
+    let result = with_tcp_proxy_fallback(
         &url,
         "POST",
         post_request_http(&url, &body, header),
         post_request_via_tcp_proxy(&url, &body, header),
     )
-    .await
+    .await;
+    crate::hbbs_http::api_backoff::record(&url, result.is_ok());
+    result
 }
 
 /// POST request via TCP proxy, preserving the HTTP status code.
@@ -1566,6 +1569,17 @@ async fn post_request_via_tcp_proxy_status(
 /// a server-side failure from success. Same fallback rules: on connection
 /// failure or 5xx, retry once through the raw TCP proxy when eligible.
 pub async fn post_request_with_status(
+    url: String,
+    body: String,
+    header: &str,
+) -> ResultType<(u16, String)> {
+    crate::hbbs_http::api_backoff::check(&url)?;
+    let result = post_request_with_status_(url.clone(), body, header).await;
+    crate::hbbs_http::api_backoff::record(&url, result.is_ok());
+    result
+}
+
+async fn post_request_with_status_(
     url: String,
     body: String,
     header: &str,
