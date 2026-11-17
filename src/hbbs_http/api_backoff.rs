@@ -1,6 +1,11 @@
-//! Pauses the host's background posts (heartbeat, sysinfo, audit) to an API
-//! server that cannot be reached, instead of retrying and logging every few
-//! seconds. Only transport failures count: any HTTP answer, even an error
+//! Pauses the host's posts to a server that cannot be reached, instead of
+//! retrying and logging every few seconds. In the host (server) process this
+//! covers every `post_request`/`post_request_with_status`: sysinfo and
+//! sysinfo_ver, audit records (connection, file, alarm), switch-grant
+//! registration and the Telegram 2FA code (keyed by its own server). The
+//! heartbeat is never paused: it is sent through `post_request_probe` and acts
+//! as the recovery probe, so admin disconnects and strategy sync resume within
+//! one heartbeat. Only transport failures count: any HTTP answer, even an error
 //! status, means the server is reachable and resets the pause.
 
 use hbb_common::{bail, log, ResultType};
@@ -13,7 +18,7 @@ use std::{
 /// Consecutive failures before requests are paused.
 const PAUSE_AFTER: u32 = 2;
 const FIRST_PAUSE: Duration = Duration::from_secs(10);
-const MAX_PAUSE: Duration = Duration::from_secs(300);
+const MAX_PAUSE: Duration = Duration::from_secs(60);
 /// Start of the error returned for a paused request.
 pub(crate) const PAUSED: &str = "API server unreachable; request paused";
 
@@ -43,6 +48,11 @@ impl Targets {
                 .then(|| format!("API server {key} is reachable again"));
         }
         let target = self.0.entry(key.to_owned()).or_default();
+        // Requests already in flight when a pause starts, and heartbeat probes
+        // during it, belong to the failure that started it.
+        if target.retry_at.is_some_and(|retry_at| now < retry_at) {
+            return None;
+        }
         target.failures = target.failures.saturating_add(1);
         if target.failures < PAUSE_AFTER {
             return None;
@@ -90,7 +100,8 @@ pub(crate) fn check(url: &str) -> ResultType<()> {
     Ok(())
 }
 
-/// Records whether a post to `url` reached its server.
+/// Records whether a post to `url` reached its server; posts sent without
+/// `check` (the heartbeat probe) are recorded too.
 pub(crate) fn record(url: &str, reachable: bool) {
     if !crate::is_server() {
         return;
@@ -154,6 +165,40 @@ mod tests {
             expected = (expected * 2).min(MAX_PAUSE);
         }
         assert_eq!(targets.paused(KEY, now - MAX_PAUSE), Some(MAX_PAUSE));
+    }
+
+    #[test]
+    fn the_pause_is_capped_at_one_minute() {
+        assert_eq!(MAX_PAUSE, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn failures_during_a_pause_count_once() {
+        let mut targets = Targets::default();
+        let now = Instant::now();
+        targets.record(KEY, false, now);
+        assert!(targets.record(KEY, false, now).is_some());
+        // Concurrent requests and heartbeat probes failing inside the pause.
+        for _ in 0..5 {
+            assert_eq!(targets.record(KEY, false, now + Duration::from_secs(3)), None);
+        }
+        assert_eq!(targets.paused(KEY, now), Some(FIRST_PAUSE));
+        let line = targets
+            .record(KEY, false, now + FIRST_PAUSE)
+            .expect("the first failure after the pause extends it");
+        assert!(line.contains(&format!("{} s", FIRST_PAUSE.as_secs() * 2)), "{line}");
+    }
+
+    #[test]
+    fn a_probe_answered_during_a_pause_ends_it() {
+        let mut targets = Targets::default();
+        let now = Instant::now();
+        targets.record(KEY, false, now);
+        targets.record(KEY, false, now);
+        let probe = now + Duration::from_secs(3);
+        assert!(targets.paused(KEY, probe).is_some());
+        assert!(targets.record(KEY, true, probe).is_some());
+        assert_eq!(targets.paused(KEY, probe), None);
     }
 
     #[test]

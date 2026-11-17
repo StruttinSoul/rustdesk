@@ -1537,6 +1537,12 @@ where
 /// - If fallback also fails, returns the original HTTP result (text or error).
 pub async fn post_request(url: String, body: String, header: &str) -> ResultType<String> {
     crate::hbbs_http::api_backoff::check(&url)?;
+    post_request_probe(url, body, header).await
+}
+
+/// `post_request` that is sent even while the server's posts are paused; its
+/// result still counts. The heartbeat uses it as the recovery probe.
+pub async fn post_request_probe(url: String, body: String, header: &str) -> ResultType<String> {
     let result = with_tcp_proxy_fallback(
         &url,
         "POST",
