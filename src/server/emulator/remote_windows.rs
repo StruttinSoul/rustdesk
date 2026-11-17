@@ -2311,7 +2311,7 @@ mod tests {
             "no hardware H.264 encoder in the hwcodec config"
         );
         let runtime = test_runtime();
-        trial_shell(&serial, &["shell", "input", "keyevent", "KEYCODE_HOME"]);
+        trial_open_settings(&serial);
         let host_streams = avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire);
         let (sender, mut events) =
             hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
@@ -2333,19 +2333,8 @@ mod tests {
         );
         eprintln!("RESULT stream_ready after {ready_after:?} at {size:?}");
 
-        // A moving screen: one bounded on-device swipe loop.
-        let swiper = {
-            let serial = serial.clone();
-            thread::spawn(move || {
-                trial_shell(
-                    &serial,
-                    &[
-                        "shell",
-                        "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do input swipe 800 1500 100 1500 250; input swipe 100 1500 800 1500 250; done",
-                    ],
-                );
-            })
-        };
+        // A moving screen: the Settings list scrolled for a bounded time.
+        let swiper = scroll_settings_list(&serial, 8);
         let first = loop {
             match next_event(&runtime, &mut events, Duration::from_secs(2)) {
                 Some(GuestEvent::Frame(frame)) => break frame,
@@ -2531,6 +2520,21 @@ mod tests {
 
     /// Soak length and sample interval: APERTURE_SOAK_MINUTES (30) and
     /// APERTURE_SOAK_SAMPLE_SECS (300).
+    /// A time-bounded on-device loop that scrolls the open Settings list up and
+    /// down continuously, so the screen keeps changing for `secs` seconds.
+    fn scroll_settings_list(serial: &str, secs: u64) -> thread::JoinHandle<()> {
+        let serial = serial.to_owned();
+        thread::spawn(move || {
+            trial_shell(
+                &serial,
+                &[
+                    "shell",
+                    &format!("end=$(( $(date +%s) + {secs} )); while [ $(date +%s) -lt $end ]; do input swipe 540 1700 540 900 400; input swipe 540 900 540 1700 400; done"),
+                ],
+            );
+        })
+    }
+
     fn soak_timing() -> (Duration, Duration) {
         let read = |key: &str, default: u64| {
             std::env::var(key)
@@ -2571,19 +2575,7 @@ mod tests {
         wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), None)
             .expect("no stream_ready within 10 s");
         // One time-bounded on-device loop keeps the Settings list moving.
-        let swiper = {
-            let serial = serial.clone();
-            let secs = length.as_secs() + 30;
-            thread::spawn(move || {
-                trial_shell(
-                    &serial,
-                    &[
-                        "shell",
-                        &format!("end=$(( $(date +%s) + {secs} )); while [ $(date +%s) -lt $end ]; do input swipe 540 1700 540 900 400; input swipe 540 900 540 1700 400; done"),
-                    ],
-                );
-            })
-        };
+        let swiper = scroll_settings_list(&serial, length.as_secs() + 30);
         let started = Instant::now();
         let mut frame_times: std::collections::VecDeque<Instant> = Default::default();
         let mut next_sample = started + Duration::from_secs(30);
