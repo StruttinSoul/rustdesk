@@ -12,7 +12,7 @@ const double _spacing = 12;
 /// Height of a Screens card below its preview: the name, the size and the
 /// 48 dp actions. It grows with the text scale.
 double _footerExtent(TextScaler textScaler) =>
-    math.max(64.0, textScaler.scale(64));
+    math.max(56.0, textScaler.scale(56));
 
 /// Which PC monitors get a preview stream on Screens: the one nearest the top
 /// of the viewport and those below it first, then the ones above it, nearest
@@ -290,7 +290,7 @@ class TargetPreviewCard extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(name,
-            maxLines: 1, overflow: TextOverflow.ellipsis, style: text.titleMedium),
+            maxLines: 1, overflow: TextOverflow.ellipsis, style: text.titleSmall),
         if (detail.isNotEmpty)
           Text(detail,
               maxLines: 1,
@@ -301,7 +301,7 @@ class TargetPreviewCard extends StatelessWidget {
     final open =
         FilledButton(onPressed: onOpen, child: Text(tr('Open')));
     return Padding(
-      padding: const EdgeInsets.only(left: 4, top: 8),
+      padding: const EdgeInsets.only(left: 4, top: 6),
       child: LayoutBuilder(builder: (context, constraints) {
         if (constraints.maxWidth < 200) {
           return Column(

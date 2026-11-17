@@ -139,6 +139,13 @@ void main() {
     expect(find.text('Windows'), findsNothing);
   });
 
+  testWidgets('monitor card footer uses the compact name style',
+      (tester) async {
+    await pumpAt(tester, const Size(360, 800),
+        SizedBox(width: 328, height: 260, child: card(detail: '2560 × 1440')));
+    expect(tester.widget<Text>(find.text('Monitor 1')).style?.fontSize, 14);
+  });
+
   testWidgets('monitor card words go through translate', (tester) async {
     await pumpAt(tester, const Size(412, 915),
         card(live: true, tr: (k) => '[$k]'));

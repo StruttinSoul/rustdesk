@@ -41,15 +41,30 @@ class PcTabBody extends StatelessWidget {
     final palette = MirpgStudioPalette.of(context);
     final textTheme = Theme.of(context).textTheme;
 
+    // A ListTile with a subtitle sizes itself to its text and ignores
+    // minTileHeight, so the 56 dp floor is a wrapper around it.
+    Widget floor(String key, Widget tile) => ConstrainedBox(
+          key: ValueKey('pc-row-$key'),
+          constraints: const BoxConstraints(minHeight: 56),
+          child: Align(alignment: Alignment.center, child: tile),
+        );
+
     Widget row(IconData icon, String title, String? subtitle, VoidCallback onTap,
             {Widget? trailing}) =>
-        ListTile(
-          minTileHeight: 56,
-          leading: Icon(icon),
-          title: Text(tr(title)),
-          subtitle: subtitle == null ? null : Text(tr(subtitle)),
-          trailing: trailing ?? const Icon(Icons.chevron_right),
-          onTap: onTap,
+        floor(
+          title,
+          ListTile(
+            minTileHeight: 56,
+            minVerticalPadding: 10,
+            leading: Icon(icon, size: 22),
+            title: Text(tr(title)),
+            subtitle: subtitle == null
+                ? null
+                : Text(tr(subtitle),
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+            trailing: trailing ?? const Icon(Icons.chevron_right),
+            onTap: onTap,
+          ),
         );
 
     Widget group(String title, List<Widget> rows) => Column(
@@ -98,14 +113,19 @@ class PcTabBody extends StatelessWidget {
         row(Icons.privacy_tip_outlined, 'Privacy and host controls',
             null, onPrivacy!),
       if (pairingState == 'paired' && onForgetPairing != null)
-        ListTile(
-          minTileHeight: 56,
-          leading: const Icon(Icons.phonelink_lock_outlined),
-          title: Text(tr('This phone is trusted')),
-          subtitle: Text(tr('Connects without a password')),
-          trailing: TextButton(
-            onPressed: onForgetPairing,
-            child: Text(tr('Forget')),
+        floor(
+          'trusted',
+          ListTile(
+            minTileHeight: 56,
+            minVerticalPadding: 10,
+            leading: const Icon(Icons.phonelink_lock_outlined, size: 22),
+            title: Text(tr('This phone is trusted')),
+            subtitle: Text(tr('Connects without a password'),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+            trailing: TextButton(
+              onPressed: onForgetPairing,
+              child: Text(tr('Forget')),
+            ),
           ),
         ),
       if (pairingState == 'can-pair' && onTrustPhone != null)
@@ -126,14 +146,14 @@ class PcTabBody extends StatelessWidget {
           row(Icons.settings_outlined, 'Appearance and settings',
               'System, light or dark mode and more', onSettings),
         ]),
-        const Divider(height: 32),
+        const Divider(height: 24),
         MirpgSurface(
           padding: EdgeInsets.zero,
           child: Material(
             type: MaterialType.transparency,
             child: ListTile(
               minTileHeight: 56,
-              leading: Icon(Icons.logout, color: palette.error),
+              leading: Icon(Icons.logout, color: palette.error, size: 22),
               title: Text(
                 tr('End session'),
                 style: textTheme.bodyLarge?.copyWith(color: palette.error),

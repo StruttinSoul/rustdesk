@@ -86,6 +86,23 @@ void main() {
         MirpgStudioPalette.dark.error);
   });
 
+  testWidgets('rows are compact: one-line subtitles and a 56 dp minimum',
+      (tester) async {
+    await pump(tester, PcCounts(), height: 1600);
+    final subtitle = tester.widget<Text>(find.text('PC status, processes and host controls'));
+    expect(subtitle.maxLines, 1);
+    expect(subtitle.overflow, TextOverflow.ellipsis);
+    final tile = find.byKey(const ValueKey('pc-row-Files'));
+    final listTile = find.descendant(of: tile, matching: find.byType(ListTile));
+    expect(tester.getSize(tile).height, greaterThanOrEqualTo(56));
+    expect(tester.getSize(tile).height, lessThan(72));
+    expect(DefaultTextStyle.of(tester.element(find.text('Files'))).style.fontSize,
+        inInclusiveRange(15, 16));
+    final icon = tester.widget<Icon>(find.descendant(
+        of: listTile, matching: find.byIcon(Icons.folder_outlined)));
+    expect(icon.size, 22);
+  });
+
   testWidgets('End session stays when the PC offers no tools', (tester) async {
     final c = PcCounts();
     await pump(tester, c,

@@ -148,31 +148,31 @@ abstract final class MirpgRemoteTheme {
       ),
       titleLarge: sourceText.titleLarge?.copyWith(
         color: textPrimary,
-        fontSize: 24,
+        fontSize: 20,
         fontWeight: FontWeight.w600,
         height: 1.2,
       ),
       titleMedium: sourceText.titleMedium?.copyWith(
         color: textPrimary,
-        fontSize: 18,
+        fontSize: 16,
         fontWeight: FontWeight.w600,
       ),
       titleSmall: sourceText.titleSmall?.copyWith(
         color: textPrimary,
-        fontSize: 16,
+        fontSize: 14,
         fontWeight: FontWeight.w600,
       ),
       bodyLarge: sourceText.bodyLarge?.copyWith(
         color: textPrimary,
-        fontSize: 16,
+        fontSize: 15,
       ),
       bodyMedium: sourceText.bodyMedium?.copyWith(
         color: textPrimary,
-        fontSize: 16,
+        fontSize: 14,
       ),
       bodySmall: sourceText.bodySmall?.copyWith(
         color: textSecondary,
-        fontSize: 14,
+        fontSize: 12,
       ),
       labelLarge: sourceText.labelLarge?.copyWith(
         color: textPrimary,
@@ -181,7 +181,7 @@ abstract final class MirpgRemoteTheme {
       ),
       labelMedium: sourceText.labelMedium?.copyWith(
         color: textSecondary,
-        fontSize: 14,
+        fontSize: 12,
       ),
       labelSmall: sourceText.labelSmall?.copyWith(
         color: textSecondary,
@@ -224,7 +224,7 @@ abstract final class MirpgRemoteTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: false,
-        toolbarHeight: 64,
+        toolbarHeight: 56,
         titleSpacing: pageMargin,
         iconTheme: IconThemeData(color: textPrimary, size: 24),
         actionsIconTheme: IconThemeData(color: textPrimary, size: 24),
@@ -242,7 +242,7 @@ abstract final class MirpgRemoteTheme {
         ),
       ),
       navigationBarTheme: NavigationBarThemeData(
-        height: 72,
+        height: 64,
         backgroundColor: surface,
         indicatorColor: accent.withOpacity(0.14),
         elevation: 0,
@@ -261,7 +261,7 @@ abstract final class MirpgRemoteTheme {
               color: states.contains(WidgetState.selected)
                   ? textPrimary
                   : textSecondary,
-              fontSize: 14,
+              fontSize: 12,
               fontWeight: states.contains(WidgetState.selected)
                   ? FontWeight.w600
                   : FontWeight.w500,
@@ -360,8 +360,18 @@ abstract final class MirpgRemoteTheme {
         iconColor: textSecondary,
         selectedColor: accent,
         selectedTileColor: accent.withOpacity(0.14),
-        minVerticalPadding: 10,
+        minVerticalPadding: 6,
+        titleTextStyle: textTheme.bodyLarge,
+        subtitleTextStyle: textTheme.bodySmall,
         contentPadding: EdgeInsets.symmetric(horizontal: pageMargin),
+      ),
+      // Compact extended FAB ("+ New"): 40 dp tall so it covers less.
+      floatingActionButtonTheme: FloatingActionButtonThemeData(
+        extendedSizeConstraints: const BoxConstraints.tightFor(height: 40),
+        extendedPadding: const EdgeInsetsDirectional.only(start: 14, end: 16),
+        extendedIconLabelSpacing: 6,
+        extendedTextStyle: textTheme.labelLarge,
+        iconSize: 20,
       ),
       dividerTheme: DividerThemeData(
         color: divider,
@@ -488,7 +498,7 @@ class MirpgStatusChip extends StatelessWidget {
     this.icon,
     this.tone = MirpgStatusTone.neutral,
     this.onDarkSurface = false,
-    this.horizontalPadding = 10,
+    this.horizontalPadding = 8,
   });
 
   final String label;
@@ -511,8 +521,8 @@ class MirpgStatusChip extends StatelessWidget {
         ? MirpgStudioPalette.dark
         : MirpgStudioPalette.of(context));
     return Container(
-      constraints: const BoxConstraints(minHeight: 32),
-      padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 6),
+      constraints: const BoxConstraints(minHeight: 28),
+      padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 4),
       decoration: BoxDecoration(
         color: onDarkSurface
             ? const Color(0xE6101923)
@@ -524,8 +534,8 @@ class MirpgStatusChip extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (icon != null) ...[
-            Icon(icon, size: 16, color: foreground),
-            const SizedBox(width: 6),
+            Icon(icon, size: 14, color: foreground),
+            const SizedBox(width: 4),
           ],
           Flexible(
             child: Text(

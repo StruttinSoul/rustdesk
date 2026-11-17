@@ -41,7 +41,9 @@ import '../widgets/session_quality_panel.dart';
 import '../widgets/trust_phone_sheet.dart';
 import '../widgets/window_picker_sheet.dart';
 
-enum _ConnectedPcSection {
+/// The dashboard's pages. `devices` is the Play tab (emulators); the bottom
+/// bar reads Screens, Play, PC.
+enum ConnectedPcSection {
   devices,
   screens,
   pc,
@@ -49,6 +51,37 @@ enum _ConnectedPcSection {
   files,
   powershell,
 }
+
+/// The dashboard opens on Screens.
+const ConnectedPcSection kConnectedPcInitialSection = ConnectedPcSection.screens;
+
+/// Position of [section] in the bottom bar: Screens, Play, PC. System, Files
+/// and PowerShell are sub-pages of PC.
+int connectedPcNavigationIndex(ConnectedPcSection section) => switch (section) {
+      ConnectedPcSection.screens => 0,
+      ConnectedPcSection.devices => 1,
+      _ => 2,
+    };
+
+/// The section a bottom-bar [index] selects, or null when out of range.
+ConnectedPcSection? connectedPcSectionForIndex(int index) => switch (index) {
+      0 => ConnectedPcSection.screens,
+      1 => ConnectedPcSection.devices,
+      2 => ConnectedPcSection.pc,
+      _ => null,
+    };
+
+/// Where Android Back goes from [section]: sub-pages to PC, Play and PC to
+/// Screens, and null on Screens itself (the root).
+ConnectedPcSection? connectedPcBackTarget(ConnectedPcSection section) =>
+    switch (section) {
+      ConnectedPcSection.screens => null,
+      ConnectedPcSection.system ||
+      ConnectedPcSection.files ||
+      ConnectedPcSection.powershell =>
+        ConnectedPcSection.pc,
+      _ => ConnectedPcSection.screens,
+    };
 
 class TargetDashboardPage extends StatefulWidget {
   const TargetDashboardPage({
@@ -146,7 +179,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
 
   /// Size of the view switcher's grid from its last layout.
   Size _chooserSize = Size.zero;
-  _ConnectedPcSection _section = _ConnectedPcSection.devices;
+  ConnectedPcSection _section = kConnectedPcInitialSection;
   bool _filesOpened = false;
   bool _systemOpened = false;
   bool _powershellOpened = false;
@@ -631,8 +664,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final previewsEnabled = !_background &&
         (active != null ||
             _chooser ||
-            _section == _ConnectedPcSection.devices ||
-            _section == _ConnectedPcSection.screens);
+            _section == ConnectedPcSection.devices ||
+            _section == ConnectedPcSection.screens);
     if (!_background && active?.display != null) displays.add(active!.display!);
     if (!_background && previewsEnabled && (active == null || _chooser)) {
       if (_chooser) {
@@ -653,7 +686,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             guestIds.add(target.id);
           }
         }
-      } else if (_section == _ConnectedPcSection.devices) {
+      } else if (_section == ConnectedPcSection.devices) {
         // Play: all four slots go to running emulators nearest the top of
         // the viewport; no monitor preview on this tab.
         guestIds.addAll(playTabPreviewIds(
@@ -666,7 +699,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           shuttingDown: model.isEmulatorShuttingDown,
           activeId: active?.id,
         ));
-      } else if (_section == _ConnectedPcSection.screens) {
+      } else if (_section == ConnectedPcSection.screens) {
         // Screens shows monitors only; emulators never take a slot here.
         displays.addAll(screensPreviewDisplays(
           monitorCount: widget.ffi.ffiModel.pi.displays.length,
@@ -1363,41 +1396,39 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         pi.platform == kPeerPlatformWindows && pi.features.terminal;
     final hostManagementAvailable =
         pi.platform == kPeerPlatformWindows && pi.features.hostManagement;
-    final sections = <_ConnectedPcSection>[
-      _ConnectedPcSection.devices,
-      _ConnectedPcSection.screens,
-      _ConnectedPcSection.pc,
-      if (hostManagementAvailable) _ConnectedPcSection.system,
-      if (filesAvailable) _ConnectedPcSection.files,
-      if (powershellAvailable) _ConnectedPcSection.powershell,
+    final sections = <ConnectedPcSection>[
+      ConnectedPcSection.screens,
+      ConnectedPcSection.devices,
+      ConnectedPcSection.pc,
+      if (hostManagementAvailable) ConnectedPcSection.system,
+      if (filesAvailable) ConnectedPcSection.files,
+      if (powershellAvailable) ConnectedPcSection.powershell,
     ];
-    final activeSection =
-        sections.contains(_section) ? _section : _ConnectedPcSection.devices;
+    final activeSection = sections.contains(_section)
+        ? _section
+        : kConnectedPcInitialSection;
     final sectionIndex = sections.indexOf(activeSection);
-    final navigationIndex = switch (activeSection) {
-      _ConnectedPcSection.devices => 0,
-      _ConnectedPcSection.screens => 1,
-      _ => 2,
-    };
+    final navigationIndex = connectedPcNavigationIndex(activeSection);
     final hostName = _hostName;
-    final play = activeSection == _ConnectedPcSection.devices;
-    final subPage = activeSection == _ConnectedPcSection.system ||
-        activeSection == _ConnectedPcSection.files ||
-        activeSection == _ConnectedPcSection.powershell;
+    final root = activeSection == kConnectedPcInitialSection;
+    final play = activeSection == ConnectedPcSection.devices;
+    final subPage = activeSection == ConnectedPcSection.system ||
+        activeSection == ConnectedPcSection.files ||
+        activeSection == ConnectedPcSection.powershell;
     final theme = Theme.of(context);
     final connToken = bind.sessionGetConnToken(sessionId: widget.ffi.sessionId);
     final pages = <Widget>[
-      _homeBody(hostName),
       _screensBody(hostName),
+      _homeBody(hostName),
       PcTabBody(
         onSystem: hostManagementAvailable
-            ? () => _openToolsSection(_ConnectedPcSection.system)
+            ? () => _openToolsSection(ConnectedPcSection.system)
             : null,
         onFiles: filesAvailable
-            ? () => _openToolsSection(_ConnectedPcSection.files)
+            ? () => _openToolsSection(ConnectedPcSection.files)
             : null,
         onPowerShell: powershellAvailable
-            ? () => _openToolsSection(_ConnectedPcSection.powershell)
+            ? () => _openToolsSection(ConnectedPcSection.powershell)
             : null,
         onQuality: () => unawaited(_showQualityConnection()),
         onPrivacy: () => unawaited(showPrivacyControlsSheet(
@@ -1414,7 +1445,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         _systemOpened
             ? HostManagementPage(
                 model: model,
-                active: activeSection == _ConnectedPcSection.system,
+                active: activeSection == ConnectedPcSection.system,
                 canControl: widget.ffi.ffiModel.keyboard &&
                     !widget.ffi.ffiModel.viewOnly,
               )
@@ -1444,14 +1475,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
         handleConnectedPcWorkspaceBack(
-          atOverview: activeSection == _ConnectedPcSection.devices,
+          atOverview: connectedPcBackTarget(activeSection) == null,
           onReturnToOverview: () => setState(() {
-            _section = switch (activeSection) {
-              _ConnectedPcSection.system ||
-              _ConnectedPcSection.files ||
-              _ConnectedPcSection.powershell => _ConnectedPcSection.pc,
-              _ => _ConnectedPcSection.devices,
-            };
+            _section = connectedPcBackTarget(activeSection) ??
+                kConnectedPcInitialSection;
             _subscription = '';
             _subscribe();
           }),
@@ -1461,22 +1488,18 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       child: Scaffold(
         appBar: AppBar(
           automaticallyImplyLeading: false,
-          leadingWidth: 64,
-          leading: activeSection == _ConnectedPcSection.devices
+          leadingWidth: 56,
+          leading: activeSection == kConnectedPcInitialSection
               ? Padding(
-                  padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8),
-                  child: const ApertureBrandMark(),
+                  padding: const EdgeInsets.only(left: 16, top: 10, bottom: 10),
+                  child: const ApertureBrandMark(size: 36),
                 )
               : IconButton(
                   tooltip: 'Back',
                   icon: const Icon(Icons.arrow_back_rounded),
                   onPressed: () => setState(() {
-                    _section = switch (activeSection) {
-                      _ConnectedPcSection.system ||
-                      _ConnectedPcSection.files ||
-                      _ConnectedPcSection.powershell => _ConnectedPcSection.pc,
-                      _ => _ConnectedPcSection.devices,
-                    };
+                    _section = connectedPcBackTarget(activeSection) ??
+                        kConnectedPcInitialSection;
                     _subscription = '';
                     _subscribe();
                   }),
@@ -1488,21 +1511,21 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             children: [
               Text(
                 switch (activeSection) {
-                  _ConnectedPcSection.devices ||
-                  _ConnectedPcSection.screens ||
-                  _ConnectedPcSection.pc => hostName,
-                  _ConnectedPcSection.system => 'System',
-                  _ConnectedPcSection.files => 'Files',
-                  _ConnectedPcSection.powershell => 'PowerShell',
+                  ConnectedPcSection.devices ||
+                  ConnectedPcSection.screens ||
+                  ConnectedPcSection.pc => hostName,
+                  ConnectedPcSection.system => 'System',
+                  ConnectedPcSection.files => 'Files',
+                  ConnectedPcSection.powershell => 'PowerShell',
                 },
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              if (!play)
+              if (!root)
                 Text(
                   switch (activeSection) {
-                    _ConnectedPcSection.screens => translate('Screens'),
-                    _ConnectedPcSection.pc => translate('PC'),
+                    ConnectedPcSection.devices => translate('Play'),
+                    ConnectedPcSection.pc => translate('PC'),
                     _ => hostName,
                   },
                   maxLines: 1,
@@ -1514,22 +1537,25 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           actions: [
             // The status pill is on every tab and sub-page (compact on
             // narrow phones).
-            SessionStatusButton(
-              compact: MediaQuery.sizeOf(context).width < 480,
-              direct: widget.ffi.ffiModel.direct,
-              data: widget.ffi.qualityMonitorModel.data,
-              now: DateTime.now(),
-              onPressed: () => unawaited(_showQualityConnection()),
-            ),
             // Play refreshes by pulling the grid down; Screens has nothing to
             // refresh (monitors come with the connection).
-            if (activeSection == _ConnectedPcSection.system)
+            if (activeSection == ConnectedPcSection.system)
               IconButton(
                   tooltip: 'Refresh system status',
                   icon: const Icon(Icons.refresh),
                   onPressed: model.hostLoading
                       ? null
                       : () => unawaited(model.refreshHost())),
+            Padding(
+              padding: const EdgeInsets.only(right: MirpgRemoteTheme.pageMargin),
+              child: SessionStatusButton(
+                compact: MediaQuery.sizeOf(context).width < 480,
+                direct: widget.ffi.ffiModel.direct,
+                data: widget.ffi.qualityMonitorModel.data,
+                now: DateTime.now(),
+                onPressed: () => unawaited(_showQualityConnection()),
+              ),
+            ),
           ],
         ),
         body: IndexedStack(
@@ -1541,6 +1567,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                 widget.ffi.ffiModel.keyboard &&
                 !widget.ffi.ffiModel.viewOnly
             ? FloatingActionButton.extended(
+                // Compact (40 dp, from the Studio theme); the grid scrolls
+                // past it with bottom clearance.
                 onPressed: () => unawaited(_newAvd()),
                 icon: const Icon(Icons.add),
                 label: Text(translate('New')),
@@ -1556,20 +1584,16 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               hostManagementAvailable: hostManagementAvailable,
               powershellAvailable: powershellAvailable,
               onDestinationSelected: (index) {
-                final selected = switch (index) {
-                  0 => _ConnectedPcSection.devices,
-                  1 => _ConnectedPcSection.screens,
-                  2 => _ConnectedPcSection.pc,
-                  _ => activeSection,
-                };
+                final selected =
+                    connectedPcSectionForIndex(index) ?? activeSection;
                 if (selected == activeSection) return;
                 setState(() {
                   _section = selected;
-                  if (selected == _ConnectedPcSection.system) {
+                  if (selected == ConnectedPcSection.system) {
                     _systemOpened = true;
                   }
-                  if (selected == _ConnectedPcSection.files) _filesOpened = true;
-                  if (selected == _ConnectedPcSection.powershell) {
+                  if (selected == ConnectedPcSection.files) _filesOpened = true;
+                  if (selected == ConnectedPcSection.powershell) {
                     _powershellOpened = true;
                   }
                 });
@@ -1598,12 +1622,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       ));
   }
 
-  void _openToolsSection(_ConnectedPcSection section) {
+  void _openToolsSection(ConnectedPcSection section) {
     setState(() {
       _section = section;
-      if (section == _ConnectedPcSection.system) _systemOpened = true;
-      if (section == _ConnectedPcSection.files) _filesOpened = true;
-      if (section == _ConnectedPcSection.powershell) _powershellOpened = true;
+      if (section == ConnectedPcSection.system) _systemOpened = true;
+      if (section == ConnectedPcSection.files) _filesOpened = true;
+      if (section == ConnectedPcSection.powershell) _powershellOpened = true;
     });
     _subscription = '';
     _subscribe();
@@ -1630,9 +1654,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     }
   }
 
-  /// Play: every emulator as a tile, then one row for the PC's monitors.
+  /// Play: every emulator as a tile.
   Widget _homeBody(String hostName) {
-    final monitorCount = widget.ffi.ffiModel.pi.displays.length;
     final canCreate = model.canManageAvds && _canControl;
     return LayoutBuilder(builder: (context, constraints) {
       final rowExtent = playTabRowExtent(
@@ -1650,7 +1673,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             hostName: hostName,
             firstLoad: !_listSeen && tiles.isEmpty,
             listError: model.listError,
-            monitorCount: monitorCount,
             scrollController: _playScroll,
             onRefresh: _pullToRefresh,
             onRetryList: () {
@@ -1659,8 +1681,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             },
             onOpen: _openGuest,
             onMore: _showGuestActions,
-            onOpenScreens: () =>
-                _openToolsSection(_ConnectedPcSection.screens),
             onNew: canCreate ? () => unawaited(_newAvd()) : null,
           );
         },
@@ -2262,14 +2282,14 @@ class ConnectedPcTabBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final destinations = <NavigationDestination>[
       NavigationDestination(
-        icon: const Icon(Icons.sports_esports_outlined),
-        selectedIcon: const Icon(Icons.sports_esports_rounded),
-        label: tr('Play'),
-      ),
-      NavigationDestination(
         icon: const Icon(Icons.layers_outlined),
         selectedIcon: const Icon(Icons.layers_rounded),
         label: tr('Screens'),
+      ),
+      NavigationDestination(
+        icon: const Icon(Icons.sports_esports_outlined),
+        selectedIcon: const Icon(Icons.sports_esports_rounded),
+        label: tr('Play'),
       ),
       NavigationDestination(
         icon: const Icon(Icons.computer_outlined),

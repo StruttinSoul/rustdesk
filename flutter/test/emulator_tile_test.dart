@@ -57,6 +57,52 @@ void main() {
     expect(find.text('Live'), findsNothing);
   });
 
+  testWidgets('Start is a compact button that keeps a 48 dp hit area',
+      (tester) async {
+    await pumpIn(tester,
+        tile(const EmulatorTileData(id: 'a', title: 'Main', state: stopped)));
+    final button = find.byWidgetPredicate((w) => w is FilledButton);
+    final visual =
+        find.descendant(of: button, matching: find.byType(InkWell)).first;
+    expect(tester.getSize(visual).height, 36);
+    expect(tester.getSize(button).height, 48);
+    // The padded hit area: a tap 6 dp above the visual top still starts it.
+    var opens = 0;
+    await pumpIn(
+        tester,
+        tile(const EmulatorTileData(id: 'a', title: 'Main', state: stopped),
+            onOpen: () => opens++));
+    final rect = tester.getRect(find
+        .descendant(of: button, matching: find.byType(InkWell))
+        .first);
+    await tester.tapAt(Offset(rect.center.dx, rect.top - 5));
+    expect(opens, 1);
+    expect(
+        DefaultTextStyle.of(tester.element(find.text('Start'))).style.fontSize,
+        14);
+    final icon = tester.widget<Icon>(
+        find.descendant(of: button, matching: find.byType(Icon)));
+    expect(icon.size, 18);
+  });
+
+  testWidgets('tile name is titleSmall and the state chip is compact',
+      (tester) async {
+    await pumpIn(
+        tester,
+        tile(const EmulatorTileData(id: 'a', title: 'Main', state: stopped),
+            onMore: () {}));
+    expect(tester.widget<Text>(find.text('Main')).style?.fontSize, 14);
+    expect(tester.widget<Text>(find.text('Stopped')).style?.fontSize, 12);
+    expect(tester.getSize(find.byType(MirpgStatusChip)).height,
+        lessThanOrEqualTo(28));
+    final more = find.widgetWithIcon(IconButton, Icons.more_vert);
+    expect(tester.getSize(more).height, greaterThanOrEqualTo(48));
+    expect(tester.getSize(more).width, greaterThanOrEqualTo(48));
+    final icon = tester.widget<Icon>(
+        find.descendant(of: more, matching: find.byType(Icon)));
+    expect(icon.size, 20);
+  });
+
   testWidgets('stopped tile shows why its copy failed', (tester) async {
     const failure = 'Copy to Phone_3 failed: not enough space';
     await pumpIn(

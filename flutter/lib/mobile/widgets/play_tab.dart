@@ -17,7 +17,7 @@ const Duration kPlayStartRequestHold = Duration(seconds: 120);
 /// Height of one Play grid tile for a [tileWidth]: a 3:4 preview plus the
 /// name bar, which grows with the text scale.
 double playTabTileExtent(double tileWidth, TextScaler textScaler) =>
-    tileWidth * 4 / 3 + textScaler.scale(64);
+    tileWidth * 4 / 3 + textScaler.scale(60);
 
 /// Distance between the tops of two grid rows for a Play tab [width].
 double playTabRowExtent(double width, TextScaler textScaler) {
@@ -29,7 +29,7 @@ double playTabRowExtent(double width, TextScaler textScaler) {
 /// Index of the first tile in the row nearest the top of the viewport.
 int playTabFirstVisibleIndex(double scrollOffset, double rowExtent) {
   if (rowExtent <= 0) return 0;
-  return 2 * (math.max(0.0, scrollOffset - 36) / rowExtent).floor();
+  return 2 * (math.max(0.0, scrollOffset - 32) / rowExtent).floor();
 }
 
 /// Which guests get one of the four preview streams on Play.
@@ -109,8 +109,8 @@ bool emulatorRunningAsKnown(
       seenLiveSinceList(seenLive, instance.id, listRequestedAt);
 }
 
-/// The Play tab: every emulator as a tile in the PC's list order, then one
-/// row for the PC's monitors.
+/// The Play tab: every emulator as a tile in the PC's list order. The PC's
+/// monitors live on the Screens tab.
 class PlayTabBody extends StatelessWidget {
   const PlayTabBody({
     super.key,
@@ -118,12 +118,10 @@ class PlayTabBody extends StatelessWidget {
     required this.hostName,
     required this.firstLoad,
     required this.listError,
-    required this.monitorCount,
     required this.onRefresh,
     required this.onRetryList,
     required this.onOpen,
     required this.onMore,
-    this.onOpenScreens,
     this.onNew,
     this.scrollController,
     this.tr = translate,
@@ -133,12 +131,10 @@ class PlayTabBody extends StatelessWidget {
   final String hostName;
   final bool firstLoad;
   final String listError;
-  final int monitorCount;
   final Future<void> Function() onRefresh;
   final VoidCallback onRetryList;
   final void Function(String id) onOpen;
   final void Function(String id) onMore;
-  final VoidCallback? onOpenScreens;
   final VoidCallback? onNew;
   final ScrollController? scrollController;
   final String Function(String) tr;
@@ -263,33 +259,6 @@ class PlayTabBody extends StatelessWidget {
     );
   }
 
-  Widget _screensRow(BuildContext context) {
-    final palette = MirpgStudioPalette.of(context);
-    final numbers = [for (var i = 1; i <= monitorCount; i++) '$i'].join(' · ');
-    return MirpgSurface(
-      padding: EdgeInsets.zero,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(MirpgRemoteTheme.surfaceRadius),
-        onTap: onOpenScreens,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 56),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(children: [
-              Icon(Icons.desktop_windows_outlined, color: palette.accent),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Text(tr('Monitor {$numbers}'),
-                    style: Theme.of(context).textTheme.bodyLarge),
-              ),
-              Icon(Icons.chevron_right, color: palette.textSecondary),
-            ]),
-          ),
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
@@ -316,7 +285,7 @@ class PlayTabBody extends StatelessWidget {
             box(Text(
               '${tr('Emulators')} · ${tr('{$running/${listed.length}} running')}',
               style: text.titleSmall,
-            )),
+            ), padding: const EdgeInsets.fromLTRB(_margin, 4, _margin, 8)),
           if (listError.isNotEmpty) box(_errorCard(context)),
           if (firstLoad)
             _grid(context, 4, (context, _) => _skeleton(context))
@@ -335,12 +304,6 @@ class PlayTabBody extends StatelessWidget {
                 onMore: data.placeholder ? null : () => onMore(data.id),
               );
             }),
-          if (monitorCount > 0) ...[
-            box(Text(tr('PC screens'), style: text.titleSmall),
-                padding: const EdgeInsets.fromLTRB(_margin, 24, _margin, 8)),
-            box(_screensRow(context),
-                padding: const EdgeInsets.symmetric(horizontal: _margin)),
-          ],
           const SliverToBoxAdapter(
               child: SizedBox(height: _bottomClearance)),
         ],

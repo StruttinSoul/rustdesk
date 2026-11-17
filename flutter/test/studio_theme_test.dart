@@ -17,7 +17,7 @@ void main() {
       final twice = common.MirpgRemoteTheme.build(once);
       expect(twice.colorScheme, once.colorScheme);
       expect(twice.scaffoldBackgroundColor, once.scaffoldBackgroundColor);
-      expect(twice.textTheme.titleMedium?.fontSize, 18);
+      expect(twice.textTheme.titleMedium?.fontSize, 16);
       expect(twice.dialogTheme.backgroundColor, once.dialogTheme.backgroundColor);
     }
   });

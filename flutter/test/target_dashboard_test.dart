@@ -98,7 +98,14 @@ void main() {
     expect(find.text('PC'), findsOneWidget);
     expect(selected, 0);
 
-    await tester.tap(find.text('Screens'));
+    // Left to right: Screens, Play, PC.
+    final screensX = tester.getCenter(find.text('Screens')).dx;
+    final playX = tester.getCenter(find.text('Play')).dx;
+    final pcX = tester.getCenter(find.text('PC')).dx;
+    expect(screensX, lessThan(playX));
+    expect(playX, lessThan(pcX));
+
+    await tester.tap(find.text('Play'));
     await tester.pump();
     expect(selected, 1);
 
@@ -106,6 +113,43 @@ void main() {
     await tester.pump();
     expect(selected, 2);
 
+    await tester.tap(find.text('Screens'));
+    await tester.pump();
+    expect(selected, 0);
+  });
+
+  test('the dashboard opens on Screens and maps tabs Screens, Play, PC', () {
+    expect(kConnectedPcInitialSection, ConnectedPcSection.screens);
+    expect(connectedPcNavigationIndex(ConnectedPcSection.screens), 0);
+    expect(connectedPcNavigationIndex(ConnectedPcSection.devices), 1);
+    expect(connectedPcNavigationIndex(ConnectedPcSection.pc), 2);
+    for (final sub in [
+      ConnectedPcSection.system,
+      ConnectedPcSection.files,
+      ConnectedPcSection.powershell,
+    ]) {
+      expect(connectedPcNavigationIndex(sub), 2);
+    }
+    expect(connectedPcSectionForIndex(0), ConnectedPcSection.screens);
+    expect(connectedPcSectionForIndex(1), ConnectedPcSection.devices);
+    expect(connectedPcSectionForIndex(2), ConnectedPcSection.pc);
+    expect(connectedPcSectionForIndex(3), isNull);
+  });
+
+  test('Back goes Play and PC to Screens, sub-pages to PC, Screens is root',
+      () {
+    expect(connectedPcBackTarget(ConnectedPcSection.screens), isNull);
+    expect(connectedPcBackTarget(ConnectedPcSection.devices),
+        ConnectedPcSection.screens);
+    expect(connectedPcBackTarget(ConnectedPcSection.pc),
+        ConnectedPcSection.screens);
+    for (final sub in [
+      ConnectedPcSection.system,
+      ConnectedPcSection.files,
+      ConnectedPcSection.powershell,
+    ]) {
+      expect(connectedPcBackTarget(sub), ConnectedPcSection.pc);
+    }
   });
 
   testWidgets('connected PC navigation keeps useful tabs',

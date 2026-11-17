@@ -177,12 +177,11 @@ void main() {
     late int refreshes;
     late int retries;
     late int news;
-    late int screens;
     late List<String> opens;
     late List<String> mores;
 
     setUp(() {
-      refreshes = retries = news = screens = 0;
+      refreshes = retries = news = 0;
       opens = [];
       mores = [];
     });
@@ -192,7 +191,6 @@ void main() {
       List<EmulatorTileData> tiles = const [],
       bool firstLoad = false,
       String listError = '',
-      int monitorCount = 0,
       bool withNew = true,
       double scale = 1.0,
     }) async {
@@ -211,12 +209,10 @@ void main() {
             hostName: 'atlas',
             firstLoad: firstLoad,
             listError: listError,
-            monitorCount: monitorCount,
             onRefresh: () async => refreshes++,
             onRetryList: () => retries++,
             onOpen: opens.add,
             onMore: mores.add,
-            onOpenScreens: () => screens++,
             onNew: withNew ? () => news++ : null,
             tr: fakeTr,
           ),
@@ -319,14 +315,26 @@ void main() {
       expect(find.text('Start'), findsNothing);
     });
 
-    testWidgets('PC screens row opens the Screens tab', (tester) async {
-      await pump(tester, tiles: [t('A', live)], monitorCount: 3);
-      expect(find.text('PC screens'), findsOneWidget);
-      await tester.tap(find.text('Monitor 1 · 2 · 3'));
-      expect(screens, 1);
-
-      await pump(tester, tiles: [t('A', live)], monitorCount: 0);
+    testWidgets('Play shows only emulators, no PC screens section',
+        (tester) async {
+      await pump(tester, tiles: [t('A', live)]);
       expect(find.text('PC screens'), findsNothing);
+      expect(find.textContaining('Monitor'), findsNothing);
+      expect(find.byType(EmulatorTile), findsOneWidget);
+    });
+
+    testWidgets('the section header and tile names use the compact styles',
+        (tester) async {
+      await pump(tester, tiles: [t('A', live)]);
+      expect(
+          tester
+              .widget<Text>(find.text('Emulators · 1/1 running'))
+              .style
+              ?.fontSize,
+          14);
+      expect(
+          tester.widget<Text>(find.text('A')).style?.fontSize, 14);
+      expect(tester.widget<Text>(find.text('A')).maxLines, 2);
     });
 
     testWidgets('pull to refresh calls onRefresh', (tester) async {
@@ -343,7 +351,6 @@ void main() {
       await pump(
         tester,
         scale: 1.3,
-        monitorCount: 2,
         tiles: [
           for (final s in [live, stopped, starting, copying])
             EmulatorTileData(

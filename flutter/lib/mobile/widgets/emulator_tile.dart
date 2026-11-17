@@ -148,11 +148,19 @@ class _MoreButton extends StatelessWidget {
   Widget build(BuildContext context) => onMore == null
       ? const SizedBox.square(dimension: kMinInteractiveDimension)
       : IconButton(
-          icon: const Icon(Icons.more_vert),
+          icon: const Icon(Icons.more_vert, size: 20),
           tooltip: tr('More {$title} actions'),
           onPressed: onMore,
         );
 }
+
+/// A compact action over a preview: about 36 dp tall visually, with the full
+/// 48 dp hit area kept by the padded tap target.
+final ButtonStyle _compactActionStyle = FilledButton.styleFrom(
+  minimumSize: const Size(0, 36),
+  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+  tapTargetSize: MaterialTapTargetSize.padded,
+);
 
 /// Below this preview height the state badge would sit on top of the action
 /// in the middle of the preview, so the action wins.
@@ -221,8 +229,9 @@ class EmulatorTile extends StatelessWidget {
         return _PreviewContent(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               FilledButton.icon(
+                style: _compactActionStyle,
                 onPressed: onOpen,
-                icon: const Icon(Icons.play_arrow),
+                icon: const Icon(Icons.play_arrow, size: 18),
                 label: Text(tr('Start')),
               ),
               if (state.pcMessage.isNotEmpty) ...[
@@ -246,7 +255,9 @@ class EmulatorTile extends StatelessWidget {
                 const SizedBox(height: 6),
               ],
               FilledButton(
-                  onPressed: onOpen, child: Text(tr('Reconnect'))),
+                  style: _compactActionStyle,
+                  onPressed: onOpen,
+                  child: Text(tr('Reconnect'))),
             ]));
       case EmulatorUiWord.copying:
         final match = RegExp(r'\{(\d+)\}').firstMatch(state.label);
@@ -314,11 +325,11 @@ class EmulatorTile extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final palette = MirpgStudioPalette.of(context);
     return Padding(
-      padding: const EdgeInsets.only(left: 4, top: 6),
+      padding: const EdgeInsets.only(left: 4, top: 2),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: 6),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -326,7 +337,7 @@ class EmulatorTile extends StatelessWidget {
                 Text(data.title,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: text.titleMedium),
+                    style: text.titleSmall),
                 if (data.secondary.isNotEmpty)
                   Text(data.secondary,
                       maxLines: 1,
