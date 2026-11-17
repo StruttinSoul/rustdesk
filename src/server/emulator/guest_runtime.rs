@@ -21,7 +21,7 @@ const GUEST_BIT_RATE_OPTION: &str = "aperture-guest-bit-rate";
 const GUEST_KEYFRAME_INTERVAL_OPTION: &str = "aperture-guest-keyframe-interval";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GuestStreamProfile {
+pub(super) struct GuestStreamProfile {
     max_size: u32,
     max_fps: u32,
     bit_rate: u32,
@@ -78,6 +78,32 @@ impl GuestStreamProfile {
                 default.keyframe_interval_secs,
             ),
         }
+    }
+
+    /// The profile of a host-encoded Android Emulator stream: the preview
+    /// profile, or the full-screen one at the emulator's 60 Hz.
+    pub(super) fn for_android_emulator(preview: bool) -> Self {
+        if preview {
+            Self::preview()
+        } else {
+            Self::fullscreen().uncapped_fps()
+        }
+    }
+
+    pub(super) fn max_size(&self) -> u32 {
+        self.max_size
+    }
+
+    pub(super) fn max_fps(&self) -> u32 {
+        self.max_fps
+    }
+
+    pub(super) fn bit_rate(&self) -> u32 {
+        self.bit_rate
+    }
+
+    pub(super) fn keyframe_interval_secs(&self) -> u32 {
+        self.keyframe_interval_secs
     }
 
     fn scrcpy_args(&self) -> [String; 4] {

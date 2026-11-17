@@ -28,6 +28,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "avd_host_video.rs"]
+mod avd_host_video;
+
 const GUEST_INPUT_QUEUE_SIZE: usize = 256;
 const GUEST_INPUT_MOVE_SHED_THRESHOLD: usize = 24;
 
@@ -259,12 +262,43 @@ enum GuestInputCommand {
     ResetVideo,
 }
 
+/// How a `ResetVideo` request reaches the video encoder.
+enum VideoReset {
+    /// The helper encodes: send scrcpy's reset-video control message.
+    Helper,
+    /// The host encodes: raise the flag its video loop polls.
+    Host(Arc<AtomicBool>),
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct GuestGeometry {
     width: u16,
     height: u16,
+    /// The space the helper injects touches in. The stream size on the
+    /// helper path; the device display on the host path.
+    touch_space: (u16, u16),
     generation: u64,
     ready: bool,
+}
+
+/// The device display size oriented like the stream (landscape when the
+/// stream is), which is the space a control-only helper injects touches in.
+fn display_touch_space(display: (u16, u16), stream: (u16, u16)) -> (u16, u16) {
+    let (short, long) = (display.0.min(display.1), display.0.max(display.1));
+    if stream.0 > stream.1 {
+        (long, short)
+    } else {
+        (short, long)
+    }
+}
+
+/// A stream coordinate scaled to the touch space (rounded, kept inside it).
+fn scale_touch(value: u32, from: u16, to: u16) -> u32 {
+    if from == to || from == 0 || to == 0 {
+        return value;
+    }
+    let scaled = (u64::from(value) * u64::from(to) + u64::from(from) / 2) / u64::from(from);
+    scaled.min(u64::from(to) - 1) as u32
 }
 
 #[derive(Default)]
@@ -354,6 +388,7 @@ impl GuestGeometry {
         Self {
             width,
             height,
+            touch_space: (width, height),
             generation: 1,
             ready: true,
         }
@@ -363,6 +398,7 @@ impl GuestGeometry {
         let changed = self.generation == 0 || self.width != width || self.height != height;
         self.width = width;
         self.height = height;
+        self.touch_space = (width, height);
         self.generation = self.generation.saturating_add(1).max(1);
         self.ready = false;
         changed
@@ -624,6 +660,28 @@ fn run_session(
     if cancel.load(Ordering::Acquire) {
         return Ok(());
     }
+    let input = if local.target.provider.to_string() == "avd" {
+        let session = avd_host_video::HostSession {
+            request,
+            id,
+            target_id,
+            events,
+            cancel,
+            capture_input,
+            pending_requests,
+            preview,
+            adb: &adb,
+            serial: &serial,
+            helper: &helper,
+            avd: &local.target.provider_instance_id,
+        };
+        match avd_host_video::run(&session, input) {
+            avd_host_video::HostAttempt::Finished(result) => return result,
+            avd_host_video::HostAttempt::Fallback(input) => input,
+        }
+    } else {
+        input
+    };
     let mut helper = if preview {
         GuestHelper::connect_preview(&adb, &serial, &helper)?
     } else if local.target.provider.to_string() == "avd" {
@@ -651,10 +709,11 @@ fn run_session(
         .spawn(move || {
             if let Err(error) = input_loop(
                 control,
-                input,
+                &input,
                 &input_geometry,
                 &input_cancel,
                 &input_pending,
+                &VideoReset::Helper,
             ) {
                 log::warn!("Guest input stopped: {error}");
             }
@@ -671,39 +730,18 @@ fn run_session(
     let capture_idle = Arc::new(Mutex::new(GuestIdleRefresh::default()));
     let watchdog_idle = capture_idle.clone();
     let recovery_input = capture_input.clone();
-    let recovery_watchdog = thread::Builder::new()
-        .name("emulator-recovery-watchdog".to_owned())
-        .spawn(move || {
-            let mut observed_generation = 0;
-            let mut waiting_since = None;
-            while !recovery_stop.load(Ordering::Acquire) {
-                let current = *recovery_geometry.lock().unwrap();
-                if current.generation != observed_generation {
-                    observed_generation = current.generation;
-                    waiting_since = (current.generation != 0 && !current.ready).then(Instant::now);
-                } else if current.ready {
-                    waiting_since = None;
-                }
-                if waiting_since
-                    .map(|started| started.elapsed() >= Duration::from_secs(10))
-                    .unwrap_or(false)
-                {
-                    recovery_timeout.store(true, Ordering::Release);
-                    if let Err(error) = recovery_socket.shutdown(Shutdown::Both) {
-                        log::trace!("Guest recovery watchdog shutdown: {error}");
-                    }
-                    break;
-                }
-                // Some emulator encoders stop repeating frames on a static screen.
-                // Probe once; only an actual new capture can rearm the probe.
-                if watchdog_idle.lock().unwrap().take_due(Instant::now()) {
-                    if let Err(error) = recovery_input.try_send(GuestInputCommand::ResetVideo) {
-                        log::trace!("Idle guest refresh unavailable: {error}");
-                    }
-                }
-                thread::sleep(Duration::from_millis(100));
+    let recovery_watchdog = spawn_recovery_watchdog(
+        recovery_geometry,
+        watchdog_idle,
+        recovery_input,
+        recovery_stop,
+        recovery_timeout,
+        move || {
+            if let Err(error) = recovery_socket.shutdown(Shutdown::Both) {
+                log::trace!("Guest recovery watchdog shutdown: {error}");
             }
-        })?;
+        },
+    )?;
     let mut frames = H264Frames::default();
     let mut backpressure = GuestFrameBackpressure::default();
     let mut timing = crate::frame_timing::TimingWindow::new(
@@ -806,6 +844,50 @@ fn run_session(
     result
 }
 
+/// Fails a stream whose new geometry has no current frame within 10 s
+/// (`on_timeout` unblocks the video reader), and asks for a fresh frame once
+/// the screen has been still for 2 s.
+fn spawn_recovery_watchdog(
+    geometry: Arc<Mutex<GuestGeometry>>,
+    idle: Arc<Mutex<GuestIdleRefresh>>,
+    input: SyncSender<GuestInputCommand>,
+    stop: Arc<AtomicBool>,
+    timed_out: Arc<AtomicBool>,
+    on_timeout: impl FnOnce() + Send + 'static,
+) -> std::io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("emulator-recovery-watchdog".to_owned())
+        .spawn(move || {
+            let mut observed_generation = 0;
+            let mut waiting_since = None;
+            while !stop.load(Ordering::Acquire) {
+                let current = *geometry.lock().unwrap();
+                if current.generation != observed_generation {
+                    observed_generation = current.generation;
+                    waiting_since = (current.generation != 0 && !current.ready).then(Instant::now);
+                } else if current.ready {
+                    waiting_since = None;
+                }
+                if waiting_since
+                    .map(|started| started.elapsed() >= Duration::from_secs(10))
+                    .unwrap_or(false)
+                {
+                    timed_out.store(true, Ordering::Release);
+                    on_timeout();
+                    break;
+                }
+                // Some emulator encoders stop repeating frames on a static screen.
+                // Probe once; only an actual new capture can rearm the probe.
+                if idle.lock().unwrap().take_due(Instant::now()) {
+                    if let Err(error) = input.try_send(GuestInputCommand::ResetVideo) {
+                        log::trace!("Idle guest refresh unavailable: {error}");
+                    }
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        })
+}
+
 pub fn with_preview(mut response: EmulatorResponse, preview: bool) -> EmulatorResponse {
     if let Some(base::message_proto::emulator_response::Union::Status(status)) =
         response.union.as_mut()
@@ -831,10 +913,11 @@ fn decrement_pending(pending: &AtomicUsize) {
 
 fn input_loop(
     mut socket: TcpStream,
-    receiver: mpsc::Receiver<GuestInputCommand>,
+    receiver: &mpsc::Receiver<GuestInputCommand>,
     geometry: &Mutex<GuestGeometry>,
     cancel: &AtomicBool,
     pending_requests: &AtomicUsize,
+    reset: &VideoReset,
 ) -> ResultType<()> {
     let mut touches = BTreeMap::new();
     let mut keys = BTreeSet::new();
@@ -865,10 +948,13 @@ fn input_loop(
                 continue;
             }
             if matches!(command, GuestInputCommand::ResetVideo) {
-                // scrcpy v4 control message 17 resets video capture/encoding. It
-                // produces fresh codec config plus a random-access frame without
-                // tearing down the ADB/helper session.
-                socket.write_all(&[SCRCPY_CONTROL_RESET_VIDEO])?;
+                match reset {
+                    // scrcpy v4 control message 17 resets video capture/encoding. It
+                    // produces fresh codec config plus a random-access frame without
+                    // tearing down the ADB/helper session.
+                    VideoReset::Helper => socket.write_all(&[SCRCPY_CONTROL_RESET_VIDEO])?,
+                    VideoReset::Host(flag) => flag.store(true, Ordering::Release),
+                }
                 continue;
             }
             let GuestInputCommand::Request(request) = command else {
@@ -926,13 +1012,16 @@ fn input_loop(
                     {
                         bail!("Too many Android touch pointers")
                     }
+                    let (space_width, space_height) = current.touch_space;
+                    let x = scale_touch(touch.x, width, space_width);
+                    let y = scale_touch(touch.y, height, space_height);
                     socket.write_all(&touch_packet(
                         touch.action as u8,
                         touch.pointer_id,
-                        touch.x,
-                        touch.y,
-                        width,
-                        height,
+                        x,
+                        y,
+                        space_width,
+                        space_height,
                     )?)?;
                     if touch.action == 0 {
                         crate::frame_timing::HOST_TAPS.touch_down(Instant::now());
@@ -940,7 +1029,7 @@ fn input_loop(
                     if touch.action == 1 || touch.action == 3 {
                         touches.remove(&touch.pointer_id);
                     } else {
-                        touches.insert(touch.pointer_id, (touch.x, touch.y, width, height));
+                        touches.insert(touch.pointer_id, (x, y, space_width, space_height));
                     }
                 }
                 _ => bail!("Unexpected guest input request"),
@@ -1339,10 +1428,11 @@ mod tests {
         let worker = thread::spawn(move || {
             input_loop(
                 sender_socket,
-                receiver,
+                &receiver,
                 &Mutex::new(GuestGeometry::ready(1280, 720)),
                 &AtomicBool::new(false),
                 &AtomicUsize::new(0),
+                &VideoReset::Helper,
             )
         });
         let mut wire = [0; 92];
@@ -1406,10 +1496,11 @@ mod tests {
         let worker = thread::spawn(move || {
             input_loop(
                 sender_socket,
-                receiver,
+                &receiver,
                 &Mutex::new(GuestGeometry::ready(1280, 720)),
                 &AtomicBool::new(false),
                 &AtomicUsize::new(0),
+                &VideoReset::Helper,
             )
         });
         let mut wire = [0; 120];
@@ -1445,10 +1536,11 @@ mod tests {
         let worker = thread::spawn(move || {
             input_loop(
                 sender_socket,
-                receiver,
+                &receiver,
                 &Mutex::new(GuestGeometry::ready(1280, 720)),
                 &AtomicBool::new(false),
                 &AtomicUsize::new(0),
+                &VideoReset::Helper,
             )
         });
         let mut wire = [0_u8; 1];
@@ -1472,10 +1564,11 @@ mod tests {
         let worker = thread::spawn(move || {
             input_loop(
                 sender_socket,
-                receiver,
+                &receiver,
                 &worker_geometry,
                 &AtomicBool::new(false),
                 &AtomicUsize::new(0),
+                &VideoReset::Helper,
             )
         });
 
@@ -1539,6 +1632,113 @@ mod tests {
             &wire[32..],
             &touch_packet(1, 9, 200, 300, 720, 1280).unwrap()
         );
+    }
+
+    fn loopback_control() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender_socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (reader, _) = listener.accept().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        (sender_socket, reader)
+    }
+
+    #[test]
+    fn host_touch_maps_feed_space_to_display_space() {
+        let (sender_socket, mut reader) = loopback_control();
+        let _owned_control = sender_socket.try_clone().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let mut touch = EmulatorRequest::new();
+        touch.set_touch(base::message_proto::EmulatorTouch {
+            action: 0,
+            pointer_id: 1,
+            x: 288,
+            y: 640,
+            width: 576,
+            height: 1280,
+            ..Default::default()
+        });
+        sender.send(GuestInputCommand::Request(touch)).unwrap();
+        drop(sender);
+        let geometry = GuestGeometry {
+            touch_space: (1080, 2400),
+            ..GuestGeometry::ready(576, 1280)
+        };
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &Mutex::new(geometry),
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &VideoReset::Helper,
+            )
+        });
+        let mut wire = [0; 64];
+        reader.read_exact(&mut wire).unwrap();
+        worker.join().unwrap().unwrap();
+        let down = &wire[..32];
+        assert_eq!(down[1], 0);
+        assert_eq!(u32::from_be_bytes(down[10..14].try_into().unwrap()), 540);
+        assert_eq!(u32::from_be_bytes(down[14..18].try_into().unwrap()), 1200);
+        assert_eq!(u16::from_be_bytes(down[18..20].try_into().unwrap()), 1080);
+        assert_eq!(u16::from_be_bytes(down[20..22].try_into().unwrap()), 2400);
+        // The release on disconnect uses the same display-space contact.
+        assert_eq!(
+            &wire[32..],
+            &touch_packet(3, 1, 540, 1200, 1080, 2400).unwrap()
+        );
+    }
+
+    #[test]
+    fn host_touch_space_clamps_to_the_display_edge() {
+        assert_eq!(scale_touch(575, 576, 1080), 1078);
+        assert_eq!(scale_touch(576, 576, 1080), 1079);
+        assert_eq!(scale_touch(100, 1280, 1280), 100);
+    }
+
+    #[test]
+    fn display_space_follows_orientation() {
+        assert_eq!(display_touch_space((1080, 2400), (1280, 576)), (2400, 1080));
+        assert_eq!(display_touch_space((1080, 2400), (576, 1280)), (1080, 2400));
+        assert_eq!(display_touch_space((2400, 1080), (576, 1280)), (1080, 2400));
+    }
+
+    #[test]
+    fn host_reset_sets_flag_instead_of_writing_control() {
+        let (sender_socket, mut reader) = loopback_control();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(GuestInputCommand::ResetVideo).unwrap();
+        drop(sender);
+        let flag = Arc::new(AtomicBool::new(false));
+        let reset = VideoReset::Host(flag.clone());
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &Mutex::new(GuestGeometry::ready(1280, 720)),
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &reset,
+            )
+        });
+        worker.join().unwrap().unwrap();
+        assert!(flag.load(Ordering::Acquire));
+        let mut wire = Vec::new();
+        reader.read_to_end(&mut wire).unwrap();
+        assert!(wire.is_empty(), "wrote {wire:?}");
+    }
+
+    #[test]
+    fn size_change_starts_a_new_geometry() {
+        let mut geometry = GuestGeometry::default();
+        assert!(geometry.begin_stream(576, 1280));
+        let first = geometry.generation;
+        assert!(geometry.begin_stream(1280, 576));
+        assert!(geometry.generation > first);
+        assert!(!geometry.ready);
+        assert_eq!(geometry.touch_space, (1280, 576));
     }
 
     #[hbb_common::tokio::test]
@@ -1716,5 +1916,422 @@ mod tests {
             .unwrap();
         }
         result.unwrap();
+    }
+
+    const TRIAL_AVD: &str = "Aperture_Trial_Play35";
+
+    fn trial_adb() -> PathBuf {
+        PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
+            .join(r"Android\Sdk\platform-tools\adb.exe")
+    }
+
+    fn trial_shell(serial: &str, args: &[&str]) -> String {
+        let mut command = std::process::Command::new(trial_adb());
+        if !serial.is_empty() {
+            command.args(["-s", serial]);
+        }
+        let output = command.args(args).output().unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn trial_serial() -> String {
+        let devices = trial_shell("", &["devices"]);
+        for line in devices.lines().skip(1) {
+            let serial = line.split_whitespace().next().unwrap_or("");
+            if serial.starts_with("emulator-")
+                && trial_shell(serial, &["emu", "avd", "name"])
+                    .lines()
+                    .next()
+                    .map(str::trim)
+                    == Some(TRIAL_AVD)
+            {
+                return serial.to_owned();
+            }
+        }
+        panic!("{TRIAL_AVD} is not running");
+    }
+
+    fn trial_screen_texts(serial: &str) -> Vec<String> {
+        let xml = trial_shell(
+            serial,
+            &[
+                "shell",
+                "uiautomator dump /data/local/tmp/t5-ui.xml >/dev/null; cat /data/local/tmp/t5-ui.xml",
+            ],
+        );
+        xml.split(" text=\"")
+            .skip(1)
+            .filter_map(|part| part.split_once('"').map(|(text, _)| text.to_owned()))
+            .filter(|text| !text.is_empty())
+            .collect()
+    }
+
+    fn trial_open_settings(serial: &str) -> Vec<String> {
+        for package in ["com.android.settings", "com.google.android.settings.intelligence"] {
+            trial_shell(serial, &["shell", "am", "force-stop", package]);
+        }
+        trial_shell(serial, &["shell", "input", "keyevent", "3"]);
+        // NEW_TASK | CLEAR_TASK: always the main Settings screen.
+        trial_shell(
+            serial,
+            &["shell", "am", "start", "-f", "0x10008000", "-a", "android.settings.SETTINGS"],
+        );
+        thread::sleep(Duration::from_secs(3));
+        trial_screen_texts(serial)
+    }
+
+    fn trial_select() -> EmulatorRequest {
+        let mut request = EmulatorRequest {
+            request_id: 1,
+            protocol_version: PROTOCOL_VERSION,
+            ..Default::default()
+        };
+        request.set_select(base::message_proto::EmulatorSelectRequest {
+            target_id: format!("avd:{TRIAL_AVD}"),
+            ..Default::default()
+        });
+        request
+    }
+
+    type Events = hbb_common::tokio::sync::mpsc::Receiver<GuestEvent>;
+    type TestRuntime = hbb_common::tokio::runtime::Runtime;
+
+    fn test_runtime() -> TestRuntime {
+        hbb_common::tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn next_event(runtime: &TestRuntime, events: &mut Events, wait: Duration) -> Option<GuestEvent> {
+        runtime
+            .block_on(async { hbb_common::tokio::time::timeout(wait, events.recv()).await })
+            .ok()
+            .flatten()
+    }
+
+    /// Waits for `stream_ready` (optionally of a landscape or portrait
+    /// stream), returning its size.
+    fn wait_stream_ready(
+        runtime: &TestRuntime,
+        events: &mut Events,
+        within: Duration,
+        landscape: Option<bool>,
+    ) -> Option<(u32, u32)> {
+        let started = Instant::now();
+        while started.elapsed() < within {
+            let Some(event) = next_event(runtime, events, within.saturating_sub(started.elapsed()))
+            else {
+                break;
+            };
+            if let GuestEvent::Response(response) = event {
+                if let Some(base::message_proto::emulator_response::Union::Status(status)) =
+                    response.union
+                {
+                    let state = status.state.enum_value_or_default();
+                    assert_ne!(state, EmulatorSessionState::EmulatorFailed, "{}", status.error);
+                    if state == EmulatorSessionState::EmulatorStreaming
+                        && status.phase == "stream_ready"
+                        && landscape.map_or(true, |landscape| {
+                            (status.width > status.height) == landscape
+                        })
+                    {
+                        return Some((status.width, status.height));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Consumes events for `duration`: (frames, key frames).
+    fn pump(runtime: &TestRuntime, events: &mut Events, duration: Duration) -> (usize, usize) {
+        let started = Instant::now();
+        let (mut frames, mut keys) = (0, 0);
+        while started.elapsed() < duration {
+            if let Some(GuestEvent::Frame(frame)) =
+                next_event(runtime, events, duration.saturating_sub(started.elapsed()))
+            {
+                frames += 1;
+                keys += usize::from(frame.key);
+            }
+        }
+        (frames, keys)
+    }
+
+    fn tap(session: &GuestSession, (width, height): (u32, u32)) {
+        for action in [0, 1] {
+            let mut request = EmulatorRequest {
+                session_id: session.id,
+                ..Default::default()
+            };
+            request.set_touch(base::message_proto::EmulatorTouch {
+                action,
+                pointer_id: 0,
+                x: width / 2,
+                y: height / 2,
+                width,
+                height,
+                ..Default::default()
+            });
+            session.input(request).unwrap();
+            thread::sleep(Duration::from_millis(60));
+        }
+    }
+
+    fn close(runtime: &TestRuntime, session: GuestSession, mut events: Events) {
+        session.cancel();
+        drop(session);
+        runtime
+            .block_on(async {
+                hbb_common::tokio::time::timeout(Duration::from_secs(35), async {
+                    while events.recv().await.is_some() {}
+                })
+                .await
+            })
+            .expect("guest session did not close");
+    }
+
+    /// Restores the trial emulator's rotation settings on drop.
+    struct RotationGuard {
+        serial: String,
+        accelerometer: String,
+        user_rotation: String,
+    }
+
+    impl Drop for RotationGuard {
+        fn drop(&mut self) {
+            for (key, value) in [
+                ("user_rotation", &self.user_rotation),
+                ("accelerometer_rotation", &self.accelerometer),
+            ] {
+                let value = if value.is_empty() || value == "null" {
+                    "0"
+                } else {
+                    value.as_str()
+                };
+                trial_shell(&self.serial, &["shell", "settings", "put", "system", key, value]);
+            }
+        }
+    }
+
+    fn trial_setting(serial: &str, key: &str) -> String {
+        trial_shell(serial, &["shell", "settings", "get", "system", key])
+            .trim()
+            .to_owned()
+    }
+
+    #[test]
+    #[ignore = "Streams the running Aperture_Trial_Play35 emulator through the host GPU"]
+    fn real_local_avd_streams_from_host_near_sixty_fps() {
+        let serial = trial_serial();
+        capture_log();
+        assert!(
+            scrap::hwcodec::HwRamEncoder::try_get(scrap::CodecFormat::H264).is_some(),
+            "no hardware H.264 encoder in the hwcodec config"
+        );
+        let runtime = test_runtime();
+        trial_shell(&serial, &["shell", "input", "keyevent", "KEYCODE_HOME"]);
+        let host_streams = avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire);
+        let (sender, mut events) =
+            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
+        let started = Instant::now();
+        let session = GuestSession::start(trial_select(), sender).unwrap();
+        let size = wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), None)
+            .expect("no stream_ready within 10 s");
+        let ready_after = started.elapsed();
+        assert!(
+            avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire) > host_streams,
+            "the session fell back to in-Android video"
+        );
+        eprintln!("RESULT stream_ready after {ready_after:?} at {size:?}");
+
+        // A moving screen: one bounded on-device swipe loop.
+        let swiper = {
+            let serial = serial.clone();
+            thread::spawn(move || {
+                trial_shell(
+                    &serial,
+                    &[
+                        "shell",
+                        "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do input swipe 800 1500 100 1500 250; input swipe 100 1500 800 1500 250; done",
+                    ],
+                );
+            })
+        };
+        let first = loop {
+            match next_event(&runtime, &mut events, Duration::from_secs(2)) {
+                Some(GuestEvent::Frame(frame)) => break frame,
+                Some(_) => {}
+                None => panic!("no frame after stream_ready"),
+            }
+        };
+        assert!(first.key, "the first frame must be a keyframe");
+        thread::sleep(Duration::from_millis(300));
+        while events.try_recv().is_ok() {}
+        let (frames, keys) = pump(&runtime, &mut events, Duration::from_secs(5));
+        eprintln!("RESULT moving screen: {frames} frames ({keys} key) in 5 s");
+        swiper.join().unwrap();
+
+        // A still screen, then an explicit refresh.
+        let (still_frames, still_keys) = pump(&runtime, &mut events, Duration::from_secs(5));
+        eprintln!("RESULT still screen: {still_frames} frames ({still_keys} key) in 5 s");
+        let requested = Instant::now();
+        session.refresh_video().unwrap();
+        let refresh_latency = loop {
+            assert!(
+                requested.elapsed() < Duration::from_secs(1),
+                "no keyframe within 1 s of refresh"
+            );
+            if let Some(GuestEvent::Frame(frame)) =
+                next_event(&runtime, &mut events, Duration::from_millis(100))
+            {
+                if frame.key {
+                    break requested.elapsed();
+                }
+            }
+        };
+        eprintln!("RESULT refresh keyframe after {refresh_latency:?}");
+
+        // A tap through input() at the centre of the stream.
+        let main = trial_open_settings(&serial);
+        while events.try_recv().is_ok() {}
+        tap(&session, size);
+        pump(&runtime, &mut events, Duration::from_millis(1500));
+        let after = trial_screen_texts(&serial);
+        let portrait_tap = main != after;
+        eprintln!("RESULT portrait tap landed={portrait_tap}: {main:?} -> {after:?}");
+
+        // Landscape: rotate the guest, wait for the new geometry, tap again.
+        let landscape = {
+            let _restore = RotationGuard {
+                serial: serial.clone(),
+                accelerometer: trial_setting(&serial, "accelerometer_rotation"),
+                user_rotation: trial_setting(&serial, "user_rotation"),
+            };
+            trial_shell(&serial, &["shell", "settings", "put", "system", "accelerometer_rotation", "0"]);
+            trial_shell(&serial, &["shell", "settings", "put", "system", "user_rotation", "1"]);
+            let rotated =
+                wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), Some(true));
+            eprintln!("RESULT landscape stream_ready: {rotated:?}");
+            rotated.map(|rotated| {
+                let main = trial_open_settings(&serial);
+                while events.try_recv().is_ok() {}
+                tap(&session, rotated);
+                pump(&runtime, &mut events, Duration::from_millis(1500));
+                let after = trial_screen_texts(&serial);
+                eprintln!(
+                    "RESULT landscape tap landed={}: {main:?} -> {after:?}",
+                    main != after
+                );
+                main != after
+            })
+        };
+        trial_shell(&serial, &["shell", "input", "keyevent", "3"]);
+        pump(&runtime, &mut events, Duration::from_secs(2));
+        close(&runtime, session, events);
+
+        assert!(ready_after <= Duration::from_secs(10));
+        assert!(frames >= 250, "only {frames} frames in 5 s");
+        assert!(portrait_tap, "the portrait tap did not land");
+        assert_eq!(landscape, Some(true), "landscape stream or tap failed");
+    }
+
+    #[test]
+    #[ignore = "Rotates the running Aperture_Trial_Play35 emulator"]
+    fn real_rotation_watcher_follows_the_guest() {
+        let serial = trial_serial();
+        trial_open_settings(&serial);
+        let _restore = RotationGuard {
+            serial: serial.clone(),
+            accelerometer: trial_setting(&serial, "accelerometer_rotation"),
+            user_rotation: trial_setting(&serial, "user_rotation"),
+        };
+        trial_shell(&serial, &["shell", "settings", "put", "system", "accelerometer_rotation", "0"]);
+        trial_shell(&serial, &["shell", "settings", "put", "system", "user_rotation", "0"]);
+        let watcher = avd_host_video::RotationWatcher::start(&trial_adb(), &serial).unwrap();
+        let wait_for = |rotation: u32| {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(3) {
+                if watcher.rotation() == Some(rotation) {
+                    return Some(started.elapsed());
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            None
+        };
+        assert!(wait_for(0).is_some(), "no initial rotation");
+        let mut latencies = Vec::new();
+        for rotation in [1, 2, 3, 0] {
+            trial_shell(
+                &serial,
+                &["shell", "settings", "put", "system", "user_rotation", &rotation.to_string()],
+            );
+            latencies.push((rotation, wait_for(rotation)));
+        }
+        drop(watcher);
+        thread::sleep(Duration::from_secs(1));
+        let leftover = trial_shell(&serial, &["shell", "ps -A -o ARGS | grep -c '[m]CurrentOrientation'"]);
+        eprintln!("RESULT rotation latencies {latencies:?}; leftover loops {}", leftover.trim());
+        for (rotation, latency) in latencies {
+            let latency = latency.unwrap_or_else(|| panic!("rotation {rotation} not seen"));
+            assert!(latency <= Duration::from_millis(1500), "rotation {rotation}: {latency:?}");
+        }
+        assert_eq!(leftover.trim(), "0", "the guest loop outlived the watcher");
+    }
+
+    struct CapturedLog(Mutex<Vec<String>>);
+
+    impl hbb_common::log::Log for CapturedLog {
+        fn enabled(&self, metadata: &hbb_common::log::Metadata) -> bool {
+            metadata.level() <= hbb_common::log::Level::Info
+        }
+
+        fn log(&self, record: &hbb_common::log::Record) {
+            if self.enabled(record.metadata()) {
+                let line = format!("{} {}", record.level(), record.args());
+                eprintln!("{line}");
+                self.0.lock().unwrap().push(line);
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURED_LOG: CapturedLog = CapturedLog(Mutex::new(Vec::new()));
+
+    fn capture_log() {
+        // Only the first test of a run installs it; later ones share it.
+        if hbb_common::log::set_logger(&CAPTURED_LOG).is_ok() {
+            hbb_common::log::set_max_level(hbb_common::log::LevelFilter::Info);
+        }
+    }
+
+    #[test]
+    #[ignore = "Streams the running Aperture_Trial_Play35 emulator with its screen feed hidden"]
+    fn blocked_feed_falls_back_to_in_android_video() {
+        trial_serial();
+        capture_log();
+        *avd_host_video::FEED_AVD_OVERRIDE.lock().unwrap() =
+            Some("Aperture_No_Such_Avd".to_owned());
+        let runtime = test_runtime();
+        let (sender, mut events) =
+            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
+        let started = Instant::now();
+        let session = GuestSession::start(trial_select(), sender).unwrap();
+        let ready = wait_stream_ready(&runtime, &mut events, Duration::from_secs(25), None);
+        let ready_after = started.elapsed();
+        let (frames, _) = pump(&runtime, &mut events, Duration::from_secs(1));
+        close(&runtime, session, events);
+        *avd_host_video::FEED_AVD_OVERRIDE.lock().unwrap() = None;
+        let warned = CAPTURED_LOG.0.lock().unwrap().iter().any(|line| {
+            line.starts_with("WARN AVD host video unavailable, using in-Android video: ")
+        });
+        eprintln!(
+            "RESULT fallback stream_ready={ready:?} after {ready_after:?}, {frames} frames in 1 s, warned={warned}"
+        );
+        assert!(ready.is_some(), "no stream_ready within 25 s");
+        assert!(frames > 0);
+        assert!(warned, "the fallback warn line is missing");
     }
 }

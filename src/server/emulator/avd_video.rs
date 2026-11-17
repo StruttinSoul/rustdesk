@@ -11,9 +11,12 @@ use scrap::{
     codec::{EncoderApi, EncoderCfg},
     convert_to_yuv,
     hwcodec::{HwRamEncoder, HwRamEncoderConfig},
-    CodecFormat, PixelBuffer, Pixfmt,
+    ARGBRotate, CodecFormat, PixelBuffer, Pixfmt, RotationMode,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    os::raw::c_int,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 /// Rows of the emulator feed are delivered top-down (Task 3 ruling).
 pub const BOTTOM_UP: bool = false;
@@ -46,6 +49,51 @@ pub fn orient_rgba(image: &FeedImage, bottom_up: bool) -> Vec<u8> {
         out.extend_from_slice(&image.pixels[start..start + row]);
     }
     out
+}
+
+/// Turns an RGBA frame captured at Android display `rotation` (0-3, the
+/// emulator feed keeps the portrait panel) upright. Rotations 1 and 3 swap
+/// width and height. Returns the frame and its new size.
+pub fn upright_rgba(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    rotation: u32,
+) -> ResultType<(Vec<u8>, u32, u32)> {
+    let mode = match rotation % 4 {
+        0 => return Ok((rgba, width, height)),
+        // Android rotation 1 draws the landscape UI turned clockwise.
+        1 => RotationMode::kRotate270,
+        2 => RotationMode::kRotate180,
+        _ => RotationMode::kRotate90,
+    };
+    if rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+        bail!("Frame is {} bytes, expected {width}x{height} RGBA", rgba.len());
+    }
+    let (out_width, out_height) = if rotation % 2 == 1 {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    let mut out = vec![0u8; rgba.len()];
+    // SAFETY: both buffers hold width * height 4-byte pixels and the strides
+    // match their row widths; libyuv rotates 32-bit pixels whatever their
+    // channel order.
+    let result = unsafe {
+        ARGBRotate(
+            rgba.as_ptr(),
+            (width * 4) as c_int,
+            out.as_mut_ptr(),
+            (out_width * 4) as c_int,
+            width as c_int,
+            height as c_int,
+            mode,
+        )
+    };
+    if result != 0 {
+        bail!("Rotating the emulator frame failed ({result})");
+    }
+    Ok((out, out_width, out_height))
 }
 
 static IN_USE: AtomicUsize = AtomicUsize::new(0);
@@ -258,6 +306,27 @@ mod tests {
         assert_eq!(orient_rgba(&img, false), pixels);
         let flipped: Vec<u8> = bottom.iter().chain(top.iter()).copied().collect();
         assert_eq!(orient_rgba(&img, true), flipped);
+    }
+
+    #[test]
+    fn upright_rgba_rotates_each_android_rotation() {
+        // 2x3 image, pixel i has all four bytes == i:
+        //   0 1
+        //   2 3
+        //   4 5
+        let pixels: Vec<u8> = (0..6u8).flat_map(|i| [i; 4]).collect();
+        let ids = |out: &[u8]| out.chunks(4).map(|p| p[0]).collect::<Vec<_>>();
+        let (out, w, h) = upright_rgba(pixels.clone(), 2, 3, 0).unwrap();
+        assert_eq!((ids(&out), w, h), (vec![0, 1, 2, 3, 4, 5], 2, 3));
+        // Rotation 1: turn counter-clockwise.
+        let (out, w, h) = upright_rgba(pixels.clone(), 2, 3, 1).unwrap();
+        assert_eq!((ids(&out), w, h), (vec![1, 3, 5, 0, 2, 4], 3, 2));
+        let (out, w, h) = upright_rgba(pixels.clone(), 2, 3, 2).unwrap();
+        assert_eq!((ids(&out), w, h), (vec![5, 4, 3, 2, 1, 0], 2, 3));
+        // Rotation 3: turn clockwise.
+        let (out, w, h) = upright_rgba(pixels.clone(), 2, 3, 3).unwrap();
+        assert_eq!((ids(&out), w, h), (vec![4, 2, 0, 5, 3, 1], 3, 2));
+        assert!(upright_rgba(vec![0; 8], 2, 3, 1).is_err());
     }
 
     #[test]
