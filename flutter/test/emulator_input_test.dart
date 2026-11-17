@@ -164,8 +164,10 @@ void main() {
       expect(touches.single, (x: 180, y: 320));
 
       touches.clear();
-      await tester.tapAt(viewport.topLeft +
-          (screenHeight == 832 ? const Offset(192, 1) : const Offset(1, 322)));
+      // The collapsed rail opens over the video, so a 9:16 guest leaves a
+      // black bar at the top at both heights.
+      expect(frame.top, greaterThan(1));
+      await tester.tapAt(viewport.topLeft + const Offset(192, 1));
       expect(touches.single, isNull,
           reason: 'Black bars must not inject guest input');
     });

@@ -30,6 +30,7 @@ import '../widgets/emulator_tile.dart';
 import '../widgets/monitor_control_view.dart';
 import '../widgets/monitor_key_sender.dart';
 import '../widgets/monitor_session_continuity.dart';
+import '../widgets/play_rail.dart';
 import '../widgets/play_tab.dart';
 import '../widgets/privacy_controls_sheet.dart';
 import '../widgets/session_quality_panel.dart';
@@ -84,6 +85,13 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   /// its stream is live. Preview images are disposed when no longer retained,
   /// so this page owns its copy.
   ui.Image? _switchFrame;
+
+  /// The emulator played before the open one, for the rail's double tap.
+  String? _previousGuestId;
+
+  /// A chip switch has been accepted but has not reached the PC yet (so
+  /// `model.connecting` is still false); further switches are ignored.
+  bool _switchPending = false;
   bool _chooser = false;
   bool _background = false;
   bool _viewFocused = true;
@@ -972,11 +980,145 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     await _labels.setLabel(target.id, label);
   }
 
+  /// The play rail's chips: Live and Starting emulators plus the open one,
+  /// in grid order, named by their labels.
+  List<PlayAccount> _playAccounts() => playRailAccounts([
+        for (final target in targets)
+          if (target.instance != null) _playAccount(_guestTile(target)),
+      ], currentId: _fullscreen?.id);
+
+  static PlayAccount _playAccount(EmulatorTileData tile) =>
+      PlayAccount(id: tile.id, label: tile.title, word: tile.state.word);
+
+  /// In a game: switches to emulator [id] (starting it if stopped). Ignored
+  /// for the open emulator and while another switch is under way, so a
+  /// second chip tap during a switch does nothing.
+  Future<void> _switchTo(String id) async {
+    if (!playRailCanSwitch(
+        id: id,
+        currentId: _fullscreen?.id,
+        connecting: model.connecting,
+        pending: _switchPending)) {
+      return;
+    }
+    final target = _targetById(id);
+    if (target == null || target.instance == null) return;
+    if (!_canControl) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+            content: Text(translate("{$_hostName} hasn't granted control"))));
+      return;
+    }
+    _switchPending = true;
+    try {
+      if (_fullscreen?.instance != null) _previousGuestId = _fullscreen!.id;
+      await _open(target);
+    } finally {
+      _switchPending = false;
+    }
+  }
+
+  /// Double tap on the collapsed rail's button: back to the previously
+  /// played emulator, while it is still listed and not stopped.
+  Future<void> Function()? _previousTarget() {
+    final id = _previousGuestId;
+    if (id == null || id == _fullscreen?.id) return null;
+    final instance = _targetById(id)?.instance;
+    if (instance == null ||
+        instance.state == 'stopped' ||
+        model.isEmulatorShuttingDown(id)) {
+      return null;
+    }
+    return () => _switchTo(id);
+  }
+
+  /// The rail's "+": every emulator as a tile. Tapping one switches to it,
+  /// starting it if it is stopped. No extra preview streams are requested
+  /// while a game is streaming; tiles show their state and any frame held.
+  Future<void> _chooseEmulator() async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) => FractionallySizedBox(
+        heightFactor: 0.85,
+        child: AnimatedBuilder(
+          animation: Listenable.merge([widget.ffi.imageModel, model, _labels]),
+          builder: (context, _) {
+            final guests = [
+              for (final target in targets)
+                if (target.instance != null) target,
+            ];
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                      MirpgRemoteTheme.pageMargin,
+                      0,
+                      MirpgRemoteTheme.pageMargin,
+                      MirpgRemoteTheme.rhythm),
+                  child: Text(translate('Emulators'),
+                      style: Theme.of(context).textTheme.titleMedium),
+                ),
+                Expanded(
+                  child: LayoutBuilder(builder: (context, constraints) {
+                    // Two columns; four in landscape so a row fits the sheet.
+                    final size = MediaQuery.sizeOf(context);
+                    final columns = size.width > size.height ? 4 : 2;
+                    const spacing = 12.0;
+                    final tileWidth = math.max(
+                        0.0,
+                        (constraints.maxWidth -
+                                2 * MirpgRemoteTheme.pageMargin -
+                                (columns - 1) * spacing) /
+                            columns);
+                    return GridView.builder(
+                      padding: const EdgeInsets.fromLTRB(
+                          MirpgRemoteTheme.pageMargin,
+                          0,
+                          MirpgRemoteTheme.pageMargin,
+                          MirpgRemoteTheme.pageMargin),
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: columns,
+                        mainAxisSpacing: spacing,
+                        crossAxisSpacing: spacing,
+                        mainAxisExtent: playTabTileExtent(
+                            tileWidth, MediaQuery.textScalerOf(context)),
+                      ),
+                      itemCount: guests.length,
+                      itemBuilder: (_, index) {
+                        final data = _guestTile(guests[index]);
+                        return EmulatorTile(
+                          data: data,
+                          onOpen: data.state.canOpen &&
+                                  _canControl &&
+                                  !model.connecting
+                              ? () => Navigator.of(sheetContext).pop(data.id)
+                              : null,
+                        );
+                      },
+                    );
+                  }),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    if (!mounted || picked == null) return;
+    await _switchTo(picked);
+  }
+
   Future<void> _dashboard() async {
     await _releaseMonitorInput();
     await model.desktop();
     if (!mounted) return;
     setState(() {
+      // Start one, go back, start the next: the one left is "previous".
+      if (_fullscreen?.instance != null) _previousGuestId = _fullscreen!.id;
       _fullscreen = null;
       _switchFrame?.dispose();
       _switchFrame = null;
@@ -1125,13 +1267,17 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         child: EmulatorPage(
             ffi: widget.ffi,
             dashboardMode: true,
-            onSwitch: _choose,
+            onSwitch: _chooseEmulator,
             onReturn: _dashboard,
             nameFor: (id) =>
                 _labels.displayName(id, _targetById(id)?.name ?? ''),
             switchFrame: _switchFrame,
             onShowOnPc:
-                offerShowOnPc ? () => _toggleAvdWindow(current) : null),
+                offerShowOnPc ? () => _toggleAvdWindow(current) : null,
+            accounts: _playAccounts(),
+            onSelectTarget: _switchTo,
+            onPreviousTarget: _previousTarget(),
+            onCurrentActions: () => unawaited(_showEmulatorActions(current))),
       );
     }
     if (active?.display != null) {

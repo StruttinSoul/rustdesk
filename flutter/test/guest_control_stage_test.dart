@@ -1,8 +1,12 @@
+import 'package:flutter/gestures.dart' show kDoubleTapMinTime, kDoubleTapTimeout;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/mobile/pages/emulator_page.dart';
 import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_hbb/mobile/widgets/mirpg_remote_theme.dart';
+import 'package:flutter_hbb/mobile/widgets/play_rail.dart';
+
+import 'support/fake_translate.dart';
 
 Finder controlButton(String tooltip) => find
     .ancestor(of: find.byTooltip(tooltip), matching: find.byType(IconButton))
@@ -66,8 +70,9 @@ void main() {
           reason: 'Opening controls must not touch the guest');
       var video = tester.getRect(find.byKey(const Key('video')));
       final controls = tester.getRect(find.byKey(const Key('controls')));
-      expect(video.bottom, controls.top);
-      expect(video.height, size.height - 56);
+      expect(video.size, size,
+          reason: 'The collapsed rail opens over the game, never shrinking it');
+      expect(controls.bottom, size.height);
       await tester.tap(find.byTooltip('Guest Home'));
       expect(homeActions, 1);
       expect(touches, isEmpty);
@@ -81,8 +86,12 @@ void main() {
       expect(touches.single?.x, closeTo(width / 2, 1));
       expect(touches.single?.y, closeTo(height / 2, 1));
       touches.clear();
+      // The guest has the viewport's exact shape, so no black bars remain:
+      // the top-left corner maps to the guest's top-left corner. Black-bar
+      // rejection is covered by the docked test below.
       await tester.tapAt(video.topLeft + const Offset(1, 1));
-      expect(touches.single, isNull, reason: 'Natural black bars reject input');
+      expect(touches.single?.x, lessThanOrEqualTo(3));
+      expect(touches.single?.y, lessThanOrEqualTo(3));
       touches.clear();
       final before = tester.getRect(controlButton('Hide controls'));
       await tester.drag(
@@ -148,7 +157,8 @@ void main() {
       video: const ColoredBox(key: Key('video'), color: Colors.black),
       controlsVisible: true,
       onToggleControls: () {},
-      controls: GuestTextComposer(
+      controls: const SizedBox(height: 56),
+      composer: GuestTextComposer(
         controller: controller,
         focusNode: focus,
         onSubmitted: (_) {},
@@ -171,4 +181,170 @@ void main() {
     expect(closed, isTrue);
     expect(tester.takeException(), isNull);
   });
+
+  Widget guestVideo(List<({int x, int y})?> touches, int width, int height) =>
+      LayoutBuilder(
+          builder: (_, box) => Listener(
+                key: const Key('video'),
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (event) => touches.add(mapEmulatorTouch(
+                  localX: event.localPosition.dx,
+                  localY: event.localPosition.dy,
+                  viewportWidth: box.maxWidth,
+                  viewportHeight: box.maxHeight,
+                  guestWidth: width,
+                  guestHeight: height,
+                )),
+                child: const ColoredBox(color: Colors.black),
+              ));
+
+  Future<void> setSize(WidgetTester tester, Size size) async {
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+  }
+
+  testWidgets('docked bottom rail sits under the video without a toggle button',
+      (tester) async {
+    const size = Size(412, 915);
+    await setSize(tester, size);
+    final touches = <({int x, int y})?>[];
+    await tester.pumpWidget(MaterialApp(
+        home: GuestControlStage(
+      placement: PlayRailPlacement.bottom,
+      controlsVisible: false,
+      onToggleControls: () {},
+      video: guestVideo(touches, 1080, 1920),
+      controls: const ColoredBox(key: Key('controls'), color: Colors.black),
+    )));
+    final video = tester.getRect(find.byKey(const Key('video')));
+    final controls = tester.getRect(find.byKey(const Key('controls')));
+    expect(video.bottom, controls.top);
+    expect(controls.height, 88);
+    expect(controls.bottom, size.height);
+    expect(find.byTooltip('Show controls'), findsNothing);
+    expect(find.byTooltip('Hide controls'), findsNothing);
+    final frame = containedGuestFrame(
+        viewportWidth: video.width,
+        viewportHeight: video.height,
+        guestWidth: 1080,
+        guestHeight: 1920)!;
+    expect(frame.height, closeTo(732.4, 0.1),
+        reason: 'The docked rail sits in the letterbox; the game keeps its size');
+    await tester.tapAt(video.topLeft +
+        Offset(frame.left + frame.width / 2, frame.top + frame.height / 2));
+    expect(touches.single?.x, closeTo(540, 1));
+    expect(touches.single?.y, closeTo(960, 1));
+    touches.clear();
+    await tester.tapAt(video.topLeft + const Offset(1, 1));
+    expect(touches.single, isNull, reason: 'Natural black bars reject input');
+    touches.clear();
+    await tester.tapAt(controls.center);
+    expect(touches, isEmpty, reason: 'The rail never touches the guest');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('side rail sits beside the video', (tester) async {
+    const size = Size(915, 412);
+    await setSize(tester, size);
+    final touches = <({int x, int y})?>[];
+    await tester.pumpWidget(MaterialApp(
+        home: GuestControlStage(
+      placement: PlayRailPlacement.side,
+      controlsVisible: false,
+      onToggleControls: () {},
+      video: guestVideo(touches, 1920, 1080),
+      controls: const ColoredBox(key: Key('controls'), color: Colors.black),
+    )));
+    final video = tester.getRect(find.byKey(const Key('video')));
+    final controls = tester.getRect(find.byKey(const Key('controls')));
+    expect(video.right, controls.left);
+    expect(controls.width, 72);
+    expect(controls.height, size.height);
+    expect(find.byTooltip('Show controls'), findsNothing);
+    final frame = containedGuestFrame(
+        viewportWidth: video.width,
+        viewportHeight: video.height,
+        guestWidth: 1920,
+        guestHeight: 1080)!;
+    expect(frame.width, closeTo(732.4, 0.1));
+    await tester.tapAt(video.topLeft +
+        Offset(frame.left + frame.width / 2, frame.top + frame.height / 2));
+    expect(touches.single?.x, closeTo(960, 1));
+    expect(touches.single?.y, closeTo(540, 1));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('double tap on the round button jumps without toggling',
+      (tester) async {
+    await setSize(tester, const Size(915, 412));
+    var toggles = 0;
+    var doubles = 0;
+    await tester.pumpWidget(MaterialApp(
+        home: GuestControlStage(
+      controlsVisible: false,
+      onToggleControls: () => toggles++,
+      onDoubleTapToggle: () => doubles++,
+      video: const ColoredBox(color: Colors.black),
+      controls: const SizedBox(height: 88),
+    )));
+    await tester.tap(controlButton('Show controls'));
+    await tester.pump(kDoubleTapMinTime);
+    await tester.tap(controlButton('Show controls'));
+    await tester.pumpAndSettle();
+    expect(doubles, 1);
+    expect(toggles, 0);
+    await tester.tap(controlButton('Show controls'));
+    await tester.pump(kDoubleTapTimeout);
+    await tester.pumpAndSettle();
+    expect(toggles, 1);
+    expect(doubles, 1);
+  });
+
+  for (final size in [const Size(412, 915), const Size(915, 412)]) {
+    testWidgets(
+        'expanded rail over the game keeps rail and game touches apart '
+        'at $size', (tester) async {
+      await setSize(tester, size);
+      final touches = <({int x, int y})?>[];
+      final selected = <String>[];
+      final width = size.width > size.height ? 2400 : 1080;
+      final height = size.width > size.height ? 1080 : 2400;
+      await tester.pumpWidget(MaterialApp(
+          home: GuestControlStage(
+        controlsVisible: true,
+        onToggleControls: () {},
+        video: guestVideo(touches, width, height),
+        controls: PlayRail(
+          accounts: const [
+            PlayAccount(id: 'a', label: 'Main', word: EmulatorUiWord.live),
+            PlayAccount(id: 'b', label: 'Alt-1', word: EmulatorUiWord.live),
+          ],
+          currentId: 'a',
+          axis: Axis.horizontal,
+          onSelect: selected.add,
+          onGrid: () {},
+          tr: fakeTr,
+        ),
+      )));
+      final video = tester.getRect(find.byKey(const Key('video')));
+      final rail = tester.getRect(find.byType(PlayRail));
+      expect(video.size, size, reason: 'The overlay never shrinks the game');
+      expect(rail.height, 88);
+      expect(rail.bottom, size.height);
+      // Empty rail space (between the keyboard and Back keys, and beside the
+      // chips) is still rail.
+      await tester.tapAt(Offset(rail.center.dx, rail.bottom - 24));
+      await tester.tapAt(Offset(rail.right - 70, rail.top + 20));
+      expect(touches, isEmpty, reason: 'Rail touches must not reach the game');
+      await tester.tap(find.text('Alt-1'));
+      expect(selected, ['b']);
+      expect(touches, isEmpty);
+      await tester.tapAt(Offset(video.center.dx, rail.top - 24));
+      expect(touches, hasLength(1), reason: 'The game above the rail is live');
+      expect(selected, ['b']);
+      expect(tester.takeException(), isNull);
+    });
+  }
 }

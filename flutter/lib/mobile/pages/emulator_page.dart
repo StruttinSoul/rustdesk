@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../models/emulator_model.dart';
 import '../../models/model.dart';
+import '../../common.dart' show translate;
 import '../widgets/mirpg_remote_theme.dart';
+import '../widgets/play_rail.dart';
 import '../widgets/startup_checklist.dart';
 
 bool shouldCancelGuestComposition({
@@ -38,7 +40,9 @@ Duration? guestAutoReconnectDelay({
   return Duration(seconds: attempts == 0 ? 1 : 3);
 }
 
-/// Keeps the whole guest visible, with optional controls outside its image.
+/// Keeps the whole guest visible, with the controls (the play rail) docked
+/// in the letterbox beside it, or, when collapsed, behind a round button and
+/// shown over the bottom edge without changing the game's size.
 class GuestControlStage extends StatefulWidget {
   const GuestControlStage({
     super.key,
@@ -46,12 +50,24 @@ class GuestControlStage extends StatefulWidget {
     required this.controls,
     required this.controlsVisible,
     required this.onToggleControls,
+    this.placement = PlayRailPlacement.collapsed,
+    this.composer,
+    this.onDoubleTapToggle,
   });
 
   final Widget video;
   final Widget controls;
+
+  /// Only used when [placement] is collapsed; docked controls always show.
   final bool controlsVisible;
   final VoidCallback onToggleControls;
+  final PlayRailPlacement placement;
+
+  /// The text composer; while set it replaces the controls under the video.
+  final Widget? composer;
+
+  /// Double tap on the round button (collapsed only).
+  final VoidCallback? onDoubleTapToggle;
 
   @override
   State<GuestControlStage> createState() => _GuestControlStageState();
@@ -61,10 +77,48 @@ class _GuestControlStageState extends State<GuestControlStage> {
   // Relative placement survives orientation changes and the soft keyboard.
   Offset _buttonPosition = const Offset(1, 0.75);
 
+  // One Flex and one Stack in every placement, so the video keeps its
+  // element (and its pointer listener) when the rail docks, collapses or the
+  // composer opens.
   @override
-  Widget build(BuildContext context) => Column(children: [
+  Widget build(BuildContext context) {
+    final composer = widget.composer;
+    final placement = widget.placement;
+    final collapsed = placement == PlayRailPlacement.collapsed;
+    final side = composer == null && placement == PlayRailPlacement.side;
+    return Flex(
+      direction: side ? Axis.horizontal : Axis.vertical,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
         Expanded(
-          child: LayoutBuilder(builder: (context, constraints) {
+          child: Stack(children: [
+            Positioned.fill(child: widget.video),
+            if (collapsed)
+              // Passes touches through to the video except on the button and
+              // the expanded rail.
+              Positioned.fill(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(child: _toggleLayer()),
+                    if (composer == null && widget.controlsVisible)
+                      widget.controls,
+                  ],
+                ),
+              ),
+          ]),
+        ),
+        if (composer != null)
+          composer
+        else if (placement == PlayRailPlacement.bottom)
+          SizedBox(height: kPlayRailBottomHeight, child: widget.controls)
+        else if (side)
+          SizedBox(width: kPlayRailSideWidth, child: widget.controls),
+      ],
+    );
+  }
+
+  Widget _toggleLayer() => LayoutBuilder(builder: (context, constraints) {
             final horizontalSpace = (constraints.maxWidth - 64)
                 .clamp(0.0, double.infinity)
                 .toDouble();
@@ -72,12 +126,12 @@ class _GuestControlStageState extends State<GuestControlStage> {
                 .clamp(0.0, double.infinity)
                 .toDouble();
             return Stack(children: [
-              Positioned.fill(child: widget.video),
               if (constraints.maxHeight >= 64)
                 Positioned(
                   left: 8 + horizontalSpace * _buttonPosition.dx,
                   top: 8 + verticalSpace * _buttonPosition.dy,
                   child: GestureDetector(
+                    onDoubleTap: widget.onDoubleTapToggle,
                     onPanUpdate: (details) => setState(() {
                       _buttonPosition = Offset(
                         horizontalSpace == 0
@@ -119,10 +173,7 @@ class _GuestControlStageState extends State<GuestControlStage> {
                   ),
                 ),
             ]);
-          }),
-        ),
-        if (widget.controlsVisible) widget.controls,
-      ]);
+          });
 }
 
 class GuestTextComposer extends StatelessWidget {
@@ -189,9 +240,16 @@ class EmulatorPage extends StatefulWidget {
       this.onReturn,
       this.nameFor,
       this.switchFrame,
-      this.onShowOnPc});
+      this.onShowOnPc,
+      this.accounts = const [],
+      this.onSelectTarget,
+      this.onPreviousTarget,
+      this.onCurrentActions});
   final FFI ffi;
   final bool dashboardMode;
+
+  /// Dashboard: opens the emulator grid sheet (the rail's "+"). Without a
+  /// dashboard the legacy controls return to the Windows desktop instead.
   final Future<void> Function()? onSwitch;
   final Future<void> Function()? onReturn;
 
@@ -204,6 +262,19 @@ class EmulatorPage extends StatefulWidget {
 
   /// Shows the emulator's window on the PC; null when not offered.
   final Future<void> Function()? onShowOnPc;
+
+  /// The play rail's chips, in grid order (dashboard only).
+  final List<PlayAccount> accounts;
+
+  /// Switches the game to another emulator (a chip tap).
+  final Future<void> Function(String targetId)? onSelectTarget;
+
+  /// Switches back to the previously played emulator (double tap on the
+  /// collapsed rail's button); null when there is none to go back to.
+  final Future<void> Function()? onPreviousTarget;
+
+  /// Opens the current emulator's action sheet (long press on ▦).
+  final VoidCallback? onCurrentActions;
 
   @override
   State<EmulatorPage> createState() => _EmulatorPageState();
@@ -234,6 +305,13 @@ class _EmulatorPageState extends State<EmulatorPage>
   int _observedSessionId = 0;
   String _observedTargetId = '';
   (int, int)? _observedGeometry;
+
+  /// Where the play rail sits; kept between layouts for the hysteresis.
+  PlayRailPlacement _railPlacement = PlayRailPlacement.collapsed;
+  final _banner = NameBannerController();
+
+  /// The (emulator, guest session) the name banner last announced.
+  (String, int)? _bannerFor;
 
   /// The emulator the startup screen describes, and whether it was already
   /// running (ready to reconnect) when it was opened.
@@ -266,6 +344,19 @@ class _EmulatorPageState extends State<EmulatorPage>
     if (!widget.dashboardMode) unawaited(model.refresh());
     _updateGuestRecovery();
     _trackStartup();
+    _announceLive();
+  }
+
+  /// Names the emulator for two seconds the first time each open or switch
+  /// (each guest session) goes live, so the account in play is never a guess.
+  void _announceLive() {
+    if (!widget.dashboardMode || !model.streaming || model.targetId.isEmpty) {
+      return;
+    }
+    final live = (model.targetId, model.guestSessionId);
+    if (live == _bannerFor) return;
+    _bannerFor = live;
+    _banner.show('$_shownName · ${translate('Live')}');
   }
 
   bool _targetRunning(String target) => model.instances
@@ -441,6 +532,7 @@ class _EmulatorPageState extends State<EmulatorPage>
     }
     _updateGuestRecovery();
     _trackStartup();
+    _announceLive();
     setState(() {});
     _syncGuestPresentation();
     if (_returning && !model.selected && !model.connecting) {
@@ -485,6 +577,7 @@ class _EmulatorPageState extends State<EmulatorPage>
     _keyboardFocus.dispose();
     _textFocus.dispose();
     _textController.dispose();
+    _banner.dispose();
     if (!widget.dashboardMode) model.framePacer.focused = true;
     super.dispose();
   }
@@ -874,24 +967,45 @@ class _EmulatorPageState extends State<EmulatorPage>
       child: ColoredBox(
         color: Colors.black,
         child: SafeArea(
-          child: Stack(
+          child: LayoutBuilder(builder: (context, constraints) {
+            final placement = _placementFor(constraints.biggest);
+            final inset = model.height > model.width ? 8.0 : 64.0;
+            final railInset =
+                placement == PlayRailPlacement.side ? kPlayRailSideWidth : 0.0;
+            final previous = widget.onPreviousTarget;
+            return Stack(
             children: [
               GuestControlStage(
+                placement: placement,
                 video: _guestCanvas(),
                 controlsVisible: _guestControlsVisible,
                 onToggleControls: _toggleGuestControls,
-                controls: ColoredBox(
-                  color: Colors.black,
-                  child: _textComposerVisible
-                      ? _guestTextComposer()
-                      : _guestControls(),
-                ),
+                onDoubleTapToggle: widget.dashboardMode && previous != null
+                    ? () => unawaited(_switchGuest(previous))
+                    : null,
+                composer: _textComposerVisible ? _guestTextComposer() : null,
+                controls: widget.dashboardMode
+                    ? _playRail(placement)
+                    : ColoredBox(color: Colors.black, child: _guestControls()),
               ),
+              if (widget.dashboardMode)
+                Positioned(
+                  top: 8,
+                  left: inset,
+                  right: inset + railInset,
+                  child: GuestNameBanner(controller: _banner),
+                ),
               if (!canControl || !model.guestFrameFresh)
-              Positioned(
-                top: 8,
-                left: model.height > model.width ? 8 : 64,
-                right: model.height > model.width ? 8 : 64,
+              ListenableBuilder(
+                listenable: _banner,
+                // The banner sits above the warning chip while it shows.
+                builder: (context, child) => AnimatedPositioned(
+                  duration: const Duration(milliseconds: 300),
+                  top: _banner.visible ? 8.0 + 48 : 8,
+                  left: inset,
+                  right: inset + railInset,
+                  child: child!,
+                ),
                 child: IgnorePointer(
                   child: Center(
                     child: MirpgStatusChip(
@@ -911,10 +1025,76 @@ class _EmulatorPageState extends State<EmulatorPage>
                 ),
               ),
             ],
-          ),
+          );
+          }),
         ),
       ),
     );
+  }
+
+  /// Docked or collapsed rail for this viewport (dashboard only; the legacy
+  /// page keeps its controls behind the round button). Held while the
+  /// composer and its keyboard are up, when the rail is hidden anyway, so the
+  /// keyboard's resize never flips it.
+  PlayRailPlacement _placementFor(Size viewport) {
+    if (!widget.dashboardMode) return PlayRailPlacement.collapsed;
+    // Until the stream reports its size there is nothing to fit against.
+    if (_textComposerVisible || model.width <= 0 || model.height <= 0) {
+      return _railPlacement;
+    }
+    final next = playRailPlacement(
+      viewport: viewport,
+      guestWidth: model.width,
+      guestHeight: model.height,
+      previous: _railPlacement,
+    );
+    if (next != _railPlacement) {
+      _railPlacement = next;
+      // A rail that collapses starts hidden behind the round button.
+      if (next == PlayRailPlacement.collapsed) _guestControlsVisible = false;
+    }
+    return next;
+  }
+
+  Widget _playRail(PlayRailPlacement placement) => PlayRail(
+        accounts: widget.accounts,
+        currentId: model.targetId,
+        axis: placement == PlayRailPlacement.side
+            ? Axis.vertical
+            : Axis.horizontal,
+        onSelect: (id) {
+          final select = widget.onSelectTarget;
+          if (select != null && id != model.targetId) {
+            unawaited(_switchGuest(() => select(id)));
+          }
+        },
+        onShowAll: widget.onSwitch == null || _returning
+            ? null
+            : () => unawaited(_switchView()),
+        onGrid: () {
+          if (!_returning) unawaited(_back());
+        },
+        onGridLongPress: widget.onCurrentActions,
+        onType: canGuestControl &&
+                model.streaming &&
+                model.guestTextSupported &&
+                !_returning
+            ? _openTextComposer
+            : null,
+        onNavigate: canGuestControl && model.streaming && !_returning
+            ? (action) => unawaited(model.navigation(action))
+            : null,
+        switching: model.connecting,
+        tr: translate,
+      );
+
+  /// Leaves this emulator for another one: input held on this guest is
+  /// released and the composer closed before the switch starts.
+  Future<void> _switchGuest(Future<void> Function() switchTo) async {
+    if (model.connecting || _returning) return;
+    _cancelGuestInput();
+    _discardTextComposer(restoreKeyboardFocus: false);
+    await switchTo();
   }
 
   String get _shownName {
@@ -1074,6 +1254,17 @@ class _EmulatorPageState extends State<EmulatorPage>
         ),
       );
 
+  /// The collapsed rail shows over the game until the next touch on the
+  /// game. Only the overlay hides: the touch itself still goes to the guest.
+  void _hideOverlayRail() {
+    if (_railPlacement != PlayRailPlacement.collapsed ||
+        !_guestControlsVisible ||
+        _textComposerVisible) {
+      return;
+    }
+    setState(() => _guestControlsVisible = false);
+  }
+
   void _restoreGuestCanvasFocus() {
     // A delivered touch proves view focus even if Android missed its focus event.
     if (_textComposerVisible ||
@@ -1093,7 +1284,10 @@ class _EmulatorPageState extends State<EmulatorPage>
   }
 
   void _touch(int action, PointerEvent event, BoxConstraints box) {
-    if (action == 0) _restoreGuestCanvasFocus();
+    if (action == 0) {
+      _restoreGuestCanvasFocus();
+      _hideOverlayRail();
+    }
     if (!canGuestControl ||
         !model.streaming ||
         box.maxWidth <= 0 ||
