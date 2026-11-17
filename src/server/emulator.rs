@@ -12,6 +12,8 @@ pub mod avd_files;
 #[cfg(windows)]
 pub mod avd_launch_windows;
 #[cfg(windows)]
+pub mod avd_video;
+#[cfg(windows)]
 pub mod bluestacks;
 #[cfg(windows)]
 pub mod boot_windows;
