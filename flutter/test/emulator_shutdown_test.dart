@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/mobile/pages/target_dashboard_page.dart';
+import 'support/fake_translate.dart';
 
 void main() {
   for (final compact in [false, true]) {
@@ -47,12 +48,13 @@ void main() {
     testWidgets('shutdown confirmation ${confirmed ? 'accepts' : 'cancels'} the named instance', (tester) async {
       bool? result;
       await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) => Scaffold(body: TextButton(
-        onPressed: () async { result = await showEmulatorShutdownConfirmation(context, 'Player 1'); },
+        onPressed: () async { result = await showEmulatorShutdownConfirmation(context, 'Player 1', tr: fakeTr); },
         child: const Text('Ask'))))));
       await tester.tap(find.text('Ask'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('Player 1'), findsWidgets);
-      await tester.tap(find.text(confirmed ? 'Shut down' : 'Cancel'));
+      expect(find.text('Stop Player 1?'), findsOneWidget);
+      expect(find.text('Apps running in it will close.'), findsOneWidget);
+      await tester.tap(find.text(confirmed ? 'Stop' : 'Cancel'));
       await tester.pumpAndSettle();
       expect(result, confirmed);
     });

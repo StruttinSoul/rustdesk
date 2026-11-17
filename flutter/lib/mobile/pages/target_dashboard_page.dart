@@ -5,9 +5,11 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
+import '../../common.dart' show translate;
 import '../../consts.dart' show kPeerPlatformLinux, kPeerPlatformWindows;
 import '../../common/widgets/dialog.dart' show clientClose;
 import '../../models/platform_model.dart' show bind;
+import '../../models/emulator_labels.dart';
 import '../../models/emulator_model.dart';
 import '../../models/host_management_model.dart';
 import '../../models/input_model.dart';
@@ -115,6 +117,23 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   int _peerInfoGeneration = 0;
   int _reconnectGeneration = 0;
   EmulatorModel get model => widget.ffi.emulatorModel;
+  late final EmulatorLabelStore _labels = EmulatorLabelStore(
+    peerId: widget.ffi.id,
+    read: (k) => bind.getLocalFlutterOption(k: k),
+    write: (k, v) => bind.setLocalFlutterOption(k: k, v: v),
+  );
+
+  void _labelsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// The name a confirmation dialog shows: "Label (emulator name)" when a
+  /// phone-side label is set, so the person sees both what they named it and
+  /// what the PC calls it.
+  String _confirmationName(_Target target) {
+    final label = _labels.labelFor(target.id);
+    return label.isEmpty ? target.name : '$label (${target.name})';
+  }
 
   String get _qualityPreferenceKey => 'mirpg-quality-profile:${widget.ffi.id}';
 
@@ -167,6 +186,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     model.addListener(_changed);
+    _labels.addListener(_labelsChanged);
     widget.ffi.ffiModel.addListener(_changed);
     widget.ffi.qualityMonitorModel.addListener(_qualityChanged);
     _peerInfoGeneration = widget.ffi.ffiModel.peerInfoGeneration;
@@ -599,7 +619,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   Future<void> _shutdownEmulator(_Target target) async {
-    if (!await showEmulatorShutdownConfirmation(context, target.name) || !mounted) return;
+    if (!await showEmulatorShutdownConfirmation(context, _confirmationName(target)) || !mounted) return;
     if (_fullscreen?.id == target.id) await _dashboard();
     await model.shutdownEmulator(target.id);
     if (mounted && model.hostError.isNotEmpty) {
@@ -617,33 +637,57 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         _avdRawName(item.id).toLowerCase() == lower);
   }
 
-  /// Shows the PC's refusal or failure; success stays quiet (the card updates).
-  void _reportAvdResult(AvdActionResult result) {
-    if (mounted && !result.ok && result.message.isNotEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.message)));
+  /// Shows the PC's refusal or failure as is; on success a short [success]
+  /// confirmation (already translated) replaces whatever snackbar is showing.
+  void _reportAvdResult(AvdActionResult result, {required String success}) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (!result.ok) {
+      if (result.message.isNotEmpty) {
+        messenger.showSnackBar(SnackBar(content: Text(result.message)));
+      }
+      return;
     }
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+          content: Text(success), duration: const Duration(seconds: 2)));
   }
 
+  /// The label when set, else the emulator name, for confirmations.
+  String _shownName(String id, String name) => _labels.displayName(id, name);
+
   Future<void> _newAvd() async {
-    final name = await showAvdNameSheet(context,
+    final created = await showAvdCreateSheet(context,
         title: 'New emulator',
         initialName: model.suggestAvdName('Emulator'),
         note: 'Android 15 · 4 GB · 4 cores · about 12 GB on D after setup',
         isTaken: _avdNameTaken);
-    if (name == null || !mounted) return;
-    _reportAvdResult(await model.createAvd(name));
+    if (created == null || !mounted) return;
+    final shown = created.label.isEmpty ? created.name : created.label;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+          content: Text(translate('Setting up {$shown} on the PC')),
+          duration: const Duration(seconds: 2)));
+    final result = await model.createAvd(created.name);
+    if (result.ok) await _labels.setLabel('avd:${created.name}', created.label);
+    _reportAvdResult(result, success: translate('Created {$shown}'));
   }
 
   Future<void> _cloneAvd(_Target target) async {
     final raw = _avdRawName(target.id);
-    final name = await showAvdNameSheet(context,
+    final created = await showAvdCreateSheet(context,
         title: 'Clone ${target.name}',
         initialName: model.suggestAvdName('${raw}_copy'),
         note: 'Exact copy, including Google and game sign-ins. The game will see it as the same device.',
         isTaken: _avdNameTaken,
         confirmLabel: 'Clone');
-    if (name == null || !mounted) return;
-    _reportAvdResult(await model.cloneAvd(target.id, name));
+    if (created == null || !mounted) return;
+    final shown = created.label.isEmpty ? created.name : created.label;
+    final result = await model.cloneAvd(target.id, created.name);
+    if (result.ok) await _labels.setLabel('avd:${created.name}', created.label);
+    _reportAvdResult(result, success: translate('Copied to {$shown}'));
   }
 
   Future<void> _renameAvd(_Target target) async {
@@ -653,19 +697,30 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         initialName: raw,
         note: 'Only the name changes. The emulator keeps everything in it.',
         isTaken: (candidate) => _avdNameTaken(candidate, except: target.id),
-        confirmLabel: 'Rename');
+        confirmLabel: 'Rename',
+        tr: translate);
     if (name == null || name == raw || !mounted) return;
-    _reportAvdResult(await model.renameAvd(target.id, name));
+    final result = await model.renameAvd(target.id, name);
+    final newId = 'avd:$name';
+    if (result.ok) await _labels.moveLabel(target.id, newId);
+    _reportAvdResult(result,
+        success: translate('Renamed to {${_shownName(newId, name)}}'));
   }
 
   Future<void> _deleteAvd(_Target target) async {
-    if (!await confirmAvdDelete(context, target.name) || !mounted) return;
-    _reportAvdResult(await model.deleteAvd(target.id));
+    final shown = _shownName(target.id, target.name);
+    if (!await confirmAvdDelete(context, _confirmationName(target)) || !mounted) {
+      return;
+    }
+    final result = await model.deleteAvd(target.id);
+    if (result.ok) await _labels.clearLabel(target.id);
+    _reportAvdResult(result, success: translate('Deleted {$shown}'));
   }
 
   Future<void> _toggleAvdWindow(_Target target) async {
-    _reportAvdResult(await model.setAvdWindowVisible(
-        target.id, !(target.instance?.windowVisible ?? false)));
+    final show = !(target.instance?.windowVisible ?? false);
+    _reportAvdResult(await model.setAvdWindowVisible(target.id, show),
+        success: translate(show ? 'Shown on the PC' : 'Hidden on the PC'));
   }
 
   Future<void> _dashboard() async {
@@ -776,6 +831,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     model.removeListener(_changed);
+    _labels.removeListener(_labelsChanged);
+    _labels.dispose();
     widget.ffi.ffiModel.removeListener(_changed);
     widget.ffi.qualityMonitorModel.removeListener(_qualityChanged);
     widget.ffi.aperturePairResult.removeListener(_pairResultChanged);
@@ -2916,15 +2973,15 @@ class TargetPreviewCard extends StatelessWidget {
   }
 }
 
-Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name) async =>
-    await showDialog<bool>(context: context, builder: (dialogContext) => AlertDialog(
-      title: Text('Shut down $name?'),
-      content: const Text('This closes the apps running in this emulator. You can boot it again later.'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
-        FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Shut down')),
-      ],
-    )) ?? false;
+Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name,
+        {String Function(String) tr = translate}) =>
+    showDestructiveConfirmation(
+      context,
+      title: tr('Stop {$name}?'),
+      body: tr('Apps running in it will close.'),
+      confirmLabel: tr('Stop'),
+      cancelLabel: tr('Cancel'),
+    );
 
 class _EmulatorShutdownMenu extends StatelessWidget {
   const _EmulatorShutdownMenu({required this.name, required this.onShutdown,

@@ -80,6 +80,8 @@ abstract final class MirpgRemoteTheme {
   static const divider = Color(0xFF36475B);
   static const error = Color(0xFFFFB4AB);
   static const warning = Color(0xFFFFE0A6);
+  /// Fill for the confirming button of a destructive dialog (Delete, Stop).
+  static const destructiveFill = Color(0xFFB43E43);
 
   static const double pageMargin = 16;
   static const double rhythm = 8;
