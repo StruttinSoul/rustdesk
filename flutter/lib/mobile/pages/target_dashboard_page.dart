@@ -463,15 +463,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
 
   Future<void> _showQualityConnection() async {
     if (!mounted) return;
-    final studioTheme = MirpgRemoteTheme.build(Theme.of(context));
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: studioTheme.colorScheme.surface,
-      builder: (sheetContext) => Theme(
-        data: studioTheme,
-        child: StatefulBuilder(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (sheetContext) => StatefulBuilder(
         builder: (context, sheetSetState) => AnimatedBuilder(
           animation: widget.ffi.qualityMonitorModel,
           builder: (_, __) => SessionQualityConnectionSheet(
@@ -488,7 +485,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               if (sheetContext.mounted) sheetSetState(() {});
             },
           ),
-        ),
         ),
       ),
     );
@@ -1303,30 +1299,24 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       final offerShowOnPc = instance.provider == 'avd' &&
           model.canManageAvds &&
           !instance.windowVisible;
-      return Theme(
-        data: MirpgRemoteTheme.build(Theme.of(context)),
-        child: EmulatorPage(
-            ffi: widget.ffi,
-            dashboardMode: true,
-            onSwitch: _chooseEmulator,
-            onReturn: _dashboard,
-            nameFor: (id) =>
-                _labels.displayName(id, _targetById(id)?.name ?? ''),
-            switchFrame: _switchFrame,
-            onShowOnPc:
-                offerShowOnPc ? () => _toggleAvdWindow(current) : null,
-            accounts: _playAccounts(),
-            onSelectTarget: _switchTo,
-            onPreviousTarget: _previousTarget(),
-            onCurrentActions: () => unawaited(_showEmulatorActions(current)),
-            alreadyRunning: _alreadyRunning),
-      );
+      return EmulatorPage(
+          ffi: widget.ffi,
+          dashboardMode: true,
+          onSwitch: _chooseEmulator,
+          onReturn: _dashboard,
+          nameFor: (id) =>
+              _labels.displayName(id, _targetById(id)?.name ?? ''),
+          switchFrame: _switchFrame,
+          onShowOnPc:
+              offerShowOnPc ? () => _toggleAvdWindow(current) : null,
+          accounts: _playAccounts(),
+          onSelectTarget: _switchTo,
+          onPreviousTarget: _previousTarget(),
+          onCurrentActions: () => unawaited(_showEmulatorActions(current)),
+          alreadyRunning: _alreadyRunning);
     }
     if (active?.display != null) {
-      return Theme(
-        data: MirpgRemoteTheme.build(Theme.of(context)),
-        child: _monitor(active!),
-      );
+      return _monitor(active!);
     }
     final pi = widget.ffi.ffiModel.pi;
     final filesAvailable = widget.ffi.ffiModel.permissions['file'] != false;
@@ -1352,7 +1342,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     };
     final hostName = _hostName;
     final play = activeSection == _ConnectedPcSection.devices;
-    final studioTheme = MirpgRemoteTheme.build(Theme.of(context));
+    final theme = Theme.of(context);
     final connToken = bind.sessionGetConnToken(sessionId: widget.ffi.sessionId);
     final pages = <Widget>[
       _homeBody(hostName),
@@ -1410,139 +1400,136 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           onStayConnected: _showSessionStillConnected,
         );
       },
-      child: Theme(
-        data: studioTheme,
-        child: Scaffold(
-          appBar: AppBar(
-            automaticallyImplyLeading: false,
-            leadingWidth: 64,
-            leading: activeSection == _ConnectedPcSection.devices
-                ? Padding(
-                    padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8),
-                    child: const ApertureBrandMark(),
-                  )
-                : IconButton(
-                    tooltip: 'Back',
-                    icon: const Icon(Icons.arrow_back_rounded),
-                    onPressed: () => setState(() {
-                      _section = switch (activeSection) {
-                        _ConnectedPcSection.system ||
-                        _ConnectedPcSection.files ||
-                        _ConnectedPcSection.powershell => _ConnectedPcSection.tools,
-                        _ => _ConnectedPcSection.devices,
-                      };
-                      _subscription = '';
-                      _subscribe();
-                    }),
-                  ),
-            titleSpacing: 10,
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  switch (activeSection) {
-                    _ConnectedPcSection.devices => hostName,
-                    _ConnectedPcSection.screens => 'All screens',
-                    _ConnectedPcSection.tools => 'Tools',
-                    _ConnectedPcSection.system => 'System',
-                    _ConnectedPcSection.files => 'Files',
-                    _ConnectedPcSection.powershell => 'PowerShell',
-                  },
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+      child: Scaffold(
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          leadingWidth: 64,
+          leading: activeSection == _ConnectedPcSection.devices
+              ? Padding(
+                  padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8),
+                  child: const ApertureBrandMark(),
+                )
+              : IconButton(
+                  tooltip: 'Back',
+                  icon: const Icon(Icons.arrow_back_rounded),
+                  onPressed: () => setState(() {
+                    _section = switch (activeSection) {
+                      _ConnectedPcSection.system ||
+                      _ConnectedPcSection.files ||
+                      _ConnectedPcSection.powershell => _ConnectedPcSection.tools,
+                      _ => _ConnectedPcSection.devices,
+                    };
+                    _subscription = '';
+                    _subscribe();
+                  }),
                 ),
-                if (!play)
-                  Text(
-                    hostName,
-                    style: studioTheme.textTheme.labelSmall,
-                  ),
-              ],
-            ),
-            actions: [
-              // Play always shows the status pill (compact on narrow
-              // phones); other tabs keep it for wide screens only.
-              if (play || MediaQuery.sizeOf(context).width >= 480)
-                SessionStatusButton(
-                  compact: MediaQuery.sizeOf(context).width < 480,
-                  direct: widget.ffi.ffiModel.direct,
-                  data: widget.ffi.qualityMonitorModel.data,
-                  now: DateTime.now(),
-                  onPressed: () => unawaited(_showQualityConnection()),
-                ),
-              // Play refreshes by pulling the grid down.
-              if (activeSection == _ConnectedPcSection.screens)
-                IconButton(
-                    tooltip: 'Refresh views',
-                    icon: const Icon(Icons.refresh),
-                    onPressed: model.loading
-                        ? null
-                        : () {
-                            _subscription = '';
-                            unawaited(model.refresh());
-                          }),
-              if (activeSection == _ConnectedPcSection.system)
-                IconButton(
-                    tooltip: 'Refresh system status',
-                    icon: const Icon(Icons.refresh),
-                    onPressed: model.hostLoading
-                        ? null
-                        : () => unawaited(model.refreshHost())),
-              ConnectedPcSessionMenu(
-                onQualityConnection: () => unawaited(_showQualityConnection()),
-                onPrivacyControls: () => unawaited(showPrivacyControlsSheet(
-                  context,
-                  ffi: widget.ffi,
-                )),
-                pairingState: _pairingState,
-                onTrustPhone: () => unawaited(_trustThisPhone()),
-                onForgetPairing: () => unawaited(_forgetPairing()),
-                onSettings: _openSettings,
-                onEndSession: () =>
-                    clientClose(widget.ffi.sessionId, widget.ffi),
+          titleSpacing: 10,
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                switch (activeSection) {
+                  _ConnectedPcSection.devices => hostName,
+                  _ConnectedPcSection.screens => 'All screens',
+                  _ConnectedPcSection.tools => 'Tools',
+                  _ConnectedPcSection.system => 'System',
+                  _ConnectedPcSection.files => 'Files',
+                  _ConnectedPcSection.powershell => 'PowerShell',
+                },
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
+              if (!play)
+                Text(
+                  hostName,
+                  style: theme.textTheme.labelSmall,
+                ),
             ],
           ),
-          body: IndexedStack(
-            index: sectionIndex,
-            children: pages,
-          ),
-          floatingActionButton: play &&
-                  model.canManageAvds &&
-                  widget.ffi.ffiModel.keyboard &&
-                  !widget.ffi.ffiModel.viewOnly
-              ? FloatingActionButton.extended(
-                  onPressed: () => unawaited(_newAvd()),
-                  icon: const Icon(Icons.add),
-                  label: Text(translate('New')),
-                )
-              : null,
-          bottomNavigationBar: ConnectedPcTabBar(
-            currentIndex: navigationIndex,
-            filesAvailable: filesAvailable,
-            hostManagementAvailable: hostManagementAvailable,
-            powershellAvailable: powershellAvailable,
-            onDestinationSelected: (index) {
-              final selected = switch (index) {
-                0 => _ConnectedPcSection.devices,
-                1 => _ConnectedPcSection.screens,
-                2 => _ConnectedPcSection.tools,
-                _ => activeSection,
-              };
-              if (selected == activeSection) return;
-              setState(() {
-                _section = selected;
-                if (selected == _ConnectedPcSection.system) {
-                  _systemOpened = true;
-                }
-                if (selected == _ConnectedPcSection.files) _filesOpened = true;
-                if (selected == _ConnectedPcSection.powershell) {
-                  _powershellOpened = true;
-                }
-              });
-              _subscribe();
-            },
-          ),
+          actions: [
+            // Play always shows the status pill (compact on narrow
+            // phones); other tabs keep it for wide screens only.
+            if (play || MediaQuery.sizeOf(context).width >= 480)
+              SessionStatusButton(
+                compact: MediaQuery.sizeOf(context).width < 480,
+                direct: widget.ffi.ffiModel.direct,
+                data: widget.ffi.qualityMonitorModel.data,
+                now: DateTime.now(),
+                onPressed: () => unawaited(_showQualityConnection()),
+              ),
+            // Play refreshes by pulling the grid down.
+            if (activeSection == _ConnectedPcSection.screens)
+              IconButton(
+                  tooltip: 'Refresh views',
+                  icon: const Icon(Icons.refresh),
+                  onPressed: model.loading
+                      ? null
+                      : () {
+                          _subscription = '';
+                          unawaited(model.refresh());
+                        }),
+            if (activeSection == _ConnectedPcSection.system)
+              IconButton(
+                  tooltip: 'Refresh system status',
+                  icon: const Icon(Icons.refresh),
+                  onPressed: model.hostLoading
+                      ? null
+                      : () => unawaited(model.refreshHost())),
+            ConnectedPcSessionMenu(
+              onQualityConnection: () => unawaited(_showQualityConnection()),
+              onPrivacyControls: () => unawaited(showPrivacyControlsSheet(
+                context,
+                ffi: widget.ffi,
+              )),
+              pairingState: _pairingState,
+              onTrustPhone: () => unawaited(_trustThisPhone()),
+              onForgetPairing: () => unawaited(_forgetPairing()),
+              onSettings: _openSettings,
+              onEndSession: () =>
+                  clientClose(widget.ffi.sessionId, widget.ffi),
+            ),
+          ],
+        ),
+        body: IndexedStack(
+          index: sectionIndex,
+          children: pages,
+        ),
+        floatingActionButton: play &&
+                model.canManageAvds &&
+                widget.ffi.ffiModel.keyboard &&
+                !widget.ffi.ffiModel.viewOnly
+            ? FloatingActionButton.extended(
+                onPressed: () => unawaited(_newAvd()),
+                icon: const Icon(Icons.add),
+                label: Text(translate('New')),
+              )
+            : null,
+        bottomNavigationBar: ConnectedPcTabBar(
+          currentIndex: navigationIndex,
+          filesAvailable: filesAvailable,
+          hostManagementAvailable: hostManagementAvailable,
+          powershellAvailable: powershellAvailable,
+          onDestinationSelected: (index) {
+            final selected = switch (index) {
+              0 => _ConnectedPcSection.devices,
+              1 => _ConnectedPcSection.screens,
+              2 => _ConnectedPcSection.tools,
+              _ => activeSection,
+            };
+            if (selected == activeSection) return;
+            setState(() {
+              _section = selected;
+              if (selected == _ConnectedPcSection.system) {
+                _systemOpened = true;
+              }
+              if (selected == _ConnectedPcSection.files) _filesOpened = true;
+              if (selected == _ConnectedPcSection.powershell) {
+                _powershellOpened = true;
+              }
+            });
+            _subscribe();
+          },
         ),
       ),
     );
@@ -1550,12 +1537,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
 
   void _openSettings() {
     Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (routeContext) => Theme(
-        data: MirpgRemoteTheme.build(Theme.of(routeContext)),
-        child: Scaffold(
-          appBar: AppBar(title: const Text('Settings')),
-          body: SettingsPage(),
-        ),
+      builder: (routeContext) => Scaffold(
+        appBar: AppBar(title: const Text('Settings')),
+        body: SettingsPage(),
       ),
     ));
   }

@@ -411,6 +411,12 @@ abstract final class MirpgRemoteTheme {
   }
 }
 
+/// The app-wide theme. The phone app gets Studio over RustDesk's theme (its
+/// `ColorThemeExtension` and `TabbarTheme` extensions are preserved); desktop
+/// keeps RustDesk's own theme object unchanged.
+ThemeData apertureAppTheme(ThemeData rustDeskTheme, {required bool mobile}) =>
+    mobile ? MirpgRemoteTheme.build(rustDeskTheme) : rustDeskTheme;
+
 class MirpgSurface extends StatelessWidget {
   const MirpgSurface({
     super.key,

@@ -862,60 +862,57 @@ class _EmulatorPageState extends State<EmulatorPage>
   }
 
   @override
-  Widget build(BuildContext context) => Theme(
-        data: MirpgRemoteTheme.build(Theme.of(context)),
-        child: PopScope(
-          canPop: !widget.dashboardMode && !model.selected && !model.connecting,
-          onPopInvokedWithResult: (didPop, result) {
-            if (didPop || _returning) return;
-            if (widget.dashboardMode && model.streaming) {
-              _gameBack();
-            } else {
-              unawaited(_back());
-            }
-          },
-          child: AnimatedBuilder(
-            animation: model,
-            builder: (context, _) {
-              final immersive = model.selected && model.streaming;
-              return Scaffold(
-                backgroundColor: immersive ? Colors.black : null,
-                appBar: immersive || widget.dashboardMode
-                    ? null
-                    : AppBar(
-                        title: Text(model.selected
-                            ? _selectedName
-                            : translate('Emulators')),
-                        leading: IconButton(
-                          tooltip: model.selected
-                              ? 'Return to Windows desktop'
-                              : 'Back',
-                          icon: const Icon(Icons.arrow_back),
-                          onPressed: _returning
-                              ? null
-                              : () async {
-                                  if (await _back() && mounted) {
-                                    Navigator.of(context).pop();
-                                  }
-                                },
-                        ),
-                        actions: [
-                          if (!model.selected)
-                            IconButton(
-                              tooltip: 'Refresh emulator instances',
-                              onPressed: model.loading || model.connecting
-                                  ? null
-                                  : () => unawaited(model.refresh()),
-                              icon: const Icon(Icons.refresh),
-                            ),
-                        ],
+  Widget build(BuildContext context) => PopScope(
+        canPop: !widget.dashboardMode && !model.selected && !model.connecting,
+        onPopInvokedWithResult: (didPop, result) {
+          if (didPop || _returning) return;
+          if (widget.dashboardMode && model.streaming) {
+            _gameBack();
+          } else {
+            unawaited(_back());
+          }
+        },
+        child: AnimatedBuilder(
+          animation: model,
+          builder: (context, _) {
+            final immersive = model.selected && model.streaming;
+            return Scaffold(
+              backgroundColor: immersive ? Colors.black : null,
+              appBar: immersive || widget.dashboardMode
+                  ? null
+                  : AppBar(
+                      title: Text(model.selected
+                          ? _selectedName
+                          : translate('Emulators')),
+                      leading: IconButton(
+                        tooltip: model.selected
+                            ? 'Return to Windows desktop'
+                            : 'Back',
+                        icon: const Icon(Icons.arrow_back),
+                        onPressed: _returning
+                            ? null
+                            : () async {
+                                if (await _back() && mounted) {
+                                  Navigator.of(context).pop();
+                                }
+                              },
                       ),
-                body: model.selected || widget.dashboardMode
-                    ? _guest()
-                    : _picker(),
-              );
-            },
-          ),
+                      actions: [
+                        if (!model.selected)
+                          IconButton(
+                            tooltip: 'Refresh emulator instances',
+                            onPressed: model.loading || model.connecting
+                                ? null
+                                : () => unawaited(model.refresh()),
+                            icon: const Icon(Icons.refresh),
+                          ),
+                      ],
+                    ),
+              body: model.selected || widget.dashboardMode
+                  ? _guest()
+                  : _picker(),
+            );
+          },
         ),
       );
 

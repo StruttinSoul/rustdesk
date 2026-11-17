@@ -75,44 +75,41 @@ class HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Theme(
-      data: MirpgRemoteTheme.build(Theme.of(context)),
-      child: WillPopScope(
-          onWillPop: () async {
-            if (_selectedIndex != 0) {
-              setState(() {
-                _selectedIndex = 0;
-              });
-            } else {
-              return true;
-            }
-            return false;
-          },
-          child: Scaffold(
-            appBar: AppBar(
-              automaticallyImplyLeading: false,
-              title: appTitle(),
-              actions: _pages.elementAt(_selectedIndex).appBarActions,
-            ),
-            bottomNavigationBar: MobileHomeNavigationBar(
-              key: navigationBarKey,
-              pages: _pages,
-              currentIndex: _selectedIndex,
-              onDestinationSelected: (index) => setState(() {
-                if (_selectedIndex != index) {
-                  _selectedIndex = index;
-                  if (isChatPageCurrentTab) {
-                    gFFI.chatModel.hideChatIconOverlay();
-                    gFFI.chatModel.hideChatWindowOverlay();
-                    gFFI.chatModel.mobileClearClientUnread(
-                        gFFI.chatModel.currentKey.connId);
-                  }
+    return WillPopScope(
+        onWillPop: () async {
+          if (_selectedIndex != 0) {
+            setState(() {
+              _selectedIndex = 0;
+            });
+          } else {
+            return true;
+          }
+          return false;
+        },
+        child: Scaffold(
+          appBar: AppBar(
+            automaticallyImplyLeading: false,
+            title: appTitle(),
+            actions: _pages.elementAt(_selectedIndex).appBarActions,
+          ),
+          bottomNavigationBar: MobileHomeNavigationBar(
+            key: navigationBarKey,
+            pages: _pages,
+            currentIndex: _selectedIndex,
+            onDestinationSelected: (index) => setState(() {
+              if (_selectedIndex != index) {
+                _selectedIndex = index;
+                if (isChatPageCurrentTab) {
+                  gFFI.chatModel.hideChatIconOverlay();
+                  gFFI.chatModel.hideChatWindowOverlay();
+                  gFFI.chatModel.mobileClearClientUnread(
+                      gFFI.chatModel.currentKey.connId);
                 }
-              }),
-            ),
-            body: _pages.elementAt(_selectedIndex),
-          )),
-    );
+              }
+            }),
+          ),
+          body: _pages.elementAt(_selectedIndex),
+        ));
   }
 
   Widget appTitle() {
