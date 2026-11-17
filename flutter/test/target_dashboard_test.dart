@@ -95,14 +95,14 @@ void main() {
 
     expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('PC'), findsOneWidget);
     expect(selected, 0);
 
     await tester.tap(find.text('Screens'));
     await tester.pump();
     expect(selected, 1);
 
-    await tester.tap(find.text('Tools'));
+    await tester.tap(find.text('PC'));
     await tester.pump();
     expect(selected, 2);
 
@@ -126,7 +126,7 @@ void main() {
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('PC'), findsOneWidget);
     expect(find.text('Codex'), findsNothing);
   });
 
@@ -147,7 +147,7 @@ void main() {
 
     expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('PC'), findsOneWidget);
     expect(find.text('System'), findsNothing);
     expect(find.text('Files'), findsNothing);
     expect(find.text('Shell'), findsNothing);
@@ -176,7 +176,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Play'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('PC'), findsOneWidget);
   });
 
   testWidgets('Studio screen rows keep boot, open and game actions accessible',
@@ -287,61 +287,6 @@ void main() {
       await tester.tap(find.text('Start'));
     }
     expect(starts, 2);
-  });
-
-  testWidgets('connected PC session menu exposes settings and explicit end',
-      (tester) async {
-    var quality = 0;
-    var privacy = 0;
-    var settings = 0;
-    var endSession = 0;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        appBar: AppBar(actions: [
-          ConnectedPcSessionMenu(
-            onQualityConnection: () => quality++,
-            onPrivacyControls: () => privacy++,
-            onSettings: () => settings++,
-            onEndSession: () => endSession++,
-          ),
-        ]),
-      ),
-    ));
-
-    await tester.tap(find.byTooltip('Session menu'));
-    await tester.pumpAndSettle();
-    expect(find.text('Quality & connection'), findsOneWidget);
-    expect(find.text('Privacy & host controls'), findsOneWidget);
-    expect(find.text('App settings'), findsOneWidget);
-    expect(find.text('End session'), findsOneWidget);
-
-    await tester.tap(find.text('Quality & connection'));
-    await tester.pumpAndSettle();
-    expect(quality, 1);
-    expect(privacy, 0);
-    expect(settings, 0);
-    expect(endSession, 0);
-
-    await tester.tap(find.byTooltip('Session menu'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Privacy & host controls'));
-    await tester.pumpAndSettle();
-    expect(privacy, 1);
-    expect(settings, 0);
-    expect(endSession, 0);
-
-    await tester.tap(find.byTooltip('Session menu'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('App settings'));
-    await tester.pumpAndSettle();
-    expect(settings, 1);
-    expect(endSession, 0);
-
-    await tester.tap(find.byTooltip('Session menu'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('End session'));
-    await tester.pumpAndSettle();
-    expect(endSession, 1);
   });
 
   test('quality profiles map only to supported RustDesk presets', () {

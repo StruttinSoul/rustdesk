@@ -31,6 +31,7 @@ import '../widgets/monitor_control_view.dart';
 import '../widgets/monitor_key_sender.dart';
 import '../widgets/monitor_session_continuity.dart';
 import '../widgets/play_rail.dart';
+import '../widgets/pc_tab.dart';
 import '../widgets/play_tab.dart';
 import '../widgets/privacy_controls_sheet.dart';
 import '../widgets/session_quality_panel.dart';
@@ -39,7 +40,7 @@ import '../widgets/window_picker_sheet.dart';
 enum _ConnectedPcSection {
   devices,
   screens,
-  tools,
+  pc,
   system,
   files,
   powershell,
@@ -1327,7 +1328,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final sections = <_ConnectedPcSection>[
       _ConnectedPcSection.devices,
       _ConnectedPcSection.screens,
-      _ConnectedPcSection.tools,
+      _ConnectedPcSection.pc,
       if (hostManagementAvailable) _ConnectedPcSection.system,
       if (filesAvailable) _ConnectedPcSection.files,
       if (powershellAvailable) _ConnectedPcSection.powershell,
@@ -1342,15 +1343,34 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     };
     final hostName = _hostName;
     final play = activeSection == _ConnectedPcSection.devices;
+    final subPage = activeSection == _ConnectedPcSection.system ||
+        activeSection == _ConnectedPcSection.files ||
+        activeSection == _ConnectedPcSection.powershell;
     final theme = Theme.of(context);
     final connToken = bind.sessionGetConnToken(sessionId: widget.ffi.sessionId);
     final pages = <Widget>[
       _homeBody(hostName),
       _devicesBody(),
-      _toolsBody(
-        hostManagementAvailable: hostManagementAvailable,
-        filesAvailable: filesAvailable,
-        powershellAvailable: powershellAvailable,
+      PcTabBody(
+        onSystem: hostManagementAvailable
+            ? () => _openToolsSection(_ConnectedPcSection.system)
+            : null,
+        onFiles: filesAvailable
+            ? () => _openToolsSection(_ConnectedPcSection.files)
+            : null,
+        onPowerShell: powershellAvailable
+            ? () => _openToolsSection(_ConnectedPcSection.powershell)
+            : null,
+        onQuality: () => unawaited(_showQualityConnection()),
+        onPrivacy: () => unawaited(showPrivacyControlsSheet(
+          context,
+          ffi: widget.ffi,
+        )),
+        pairingState: _pairingState,
+        onTrustPhone: () => unawaited(_trustThisPhone()),
+        onForgetPairing: () => unawaited(_forgetPairing()),
+        onSettings: _openSettings,
+        onEndSession: () => clientClose(widget.ffi.sessionId, widget.ffi),
       ),
       if (hostManagementAvailable)
         _systemOpened
@@ -1391,7 +1411,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             _section = switch (activeSection) {
               _ConnectedPcSection.system ||
               _ConnectedPcSection.files ||
-              _ConnectedPcSection.powershell => _ConnectedPcSection.tools,
+              _ConnectedPcSection.powershell => _ConnectedPcSection.pc,
               _ => _ConnectedPcSection.devices,
             };
             _subscription = '';
@@ -1416,7 +1436,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                     _section = switch (activeSection) {
                       _ConnectedPcSection.system ||
                       _ConnectedPcSection.files ||
-                      _ConnectedPcSection.powershell => _ConnectedPcSection.tools,
+                      _ConnectedPcSection.powershell => _ConnectedPcSection.pc,
                       _ => _ConnectedPcSection.devices,
                     };
                     _subscription = '';
@@ -1430,9 +1450,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             children: [
               Text(
                 switch (activeSection) {
-                  _ConnectedPcSection.devices => hostName,
-                  _ConnectedPcSection.screens => 'All screens',
-                  _ConnectedPcSection.tools => 'Tools',
+                  _ConnectedPcSection.devices ||
+                  _ConnectedPcSection.screens ||
+                  _ConnectedPcSection.pc => hostName,
                   _ConnectedPcSection.system => 'System',
                   _ConnectedPcSection.files => 'Files',
                   _ConnectedPcSection.powershell => 'PowerShell',
@@ -1442,22 +1462,27 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
               ),
               if (!play)
                 Text(
-                  hostName,
-                  style: theme.textTheme.labelSmall,
+                  switch (activeSection) {
+                    _ConnectedPcSection.screens => translate('Screens'),
+                    _ConnectedPcSection.pc => translate('PC'),
+                    _ => hostName,
+                  },
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelMedium,
                 ),
             ],
           ),
           actions: [
-            // Play always shows the status pill (compact on narrow
-            // phones); other tabs keep it for wide screens only.
-            if (play || MediaQuery.sizeOf(context).width >= 480)
-              SessionStatusButton(
-                compact: MediaQuery.sizeOf(context).width < 480,
-                direct: widget.ffi.ffiModel.direct,
-                data: widget.ffi.qualityMonitorModel.data,
-                now: DateTime.now(),
-                onPressed: () => unawaited(_showQualityConnection()),
-              ),
+            // The status pill is on every tab and sub-page (compact on
+            // narrow phones).
+            SessionStatusButton(
+              compact: MediaQuery.sizeOf(context).width < 480,
+              direct: widget.ffi.ffiModel.direct,
+              data: widget.ffi.qualityMonitorModel.data,
+              now: DateTime.now(),
+              onPressed: () => unawaited(_showQualityConnection()),
+            ),
             // Play refreshes by pulling the grid down.
             if (activeSection == _ConnectedPcSection.screens)
               IconButton(
@@ -1476,19 +1501,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                   onPressed: model.hostLoading
                       ? null
                       : () => unawaited(model.refreshHost())),
-            ConnectedPcSessionMenu(
-              onQualityConnection: () => unawaited(_showQualityConnection()),
-              onPrivacyControls: () => unawaited(showPrivacyControlsSheet(
-                context,
-                ffi: widget.ffi,
-              )),
-              pairingState: _pairingState,
-              onTrustPhone: () => unawaited(_trustThisPhone()),
-              onForgetPairing: () => unawaited(_forgetPairing()),
-              onSettings: _openSettings,
-              onEndSession: () =>
-                  clientClose(widget.ffi.sessionId, widget.ffi),
-            ),
           ],
         ),
         body: IndexedStack(
@@ -1505,32 +1517,36 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                 label: Text(translate('New')),
               )
             : null,
-        bottomNavigationBar: ConnectedPcTabBar(
-          currentIndex: navigationIndex,
-          filesAvailable: filesAvailable,
-          hostManagementAvailable: hostManagementAvailable,
-          powershellAvailable: powershellAvailable,
-          onDestinationSelected: (index) {
-            final selected = switch (index) {
-              0 => _ConnectedPcSection.devices,
-              1 => _ConnectedPcSection.screens,
-              2 => _ConnectedPcSection.tools,
-              _ => activeSection,
-            };
-            if (selected == activeSection) return;
-            setState(() {
-              _section = selected;
-              if (selected == _ConnectedPcSection.system) {
-                _systemOpened = true;
-              }
-              if (selected == _ConnectedPcSection.files) _filesOpened = true;
-              if (selected == _ConnectedPcSection.powershell) {
-                _powershellOpened = true;
-              }
-            });
-            _subscribe();
-          },
-        ),
+        // System, Files and PowerShell look like pushed pages (back arrow,
+        // no tab bar) but stay in the IndexedStack so their sessions survive.
+        bottomNavigationBar: subPage
+            ? null
+            : ConnectedPcTabBar(
+              currentIndex: navigationIndex,
+              filesAvailable: filesAvailable,
+              hostManagementAvailable: hostManagementAvailable,
+              powershellAvailable: powershellAvailable,
+              onDestinationSelected: (index) {
+                final selected = switch (index) {
+                  0 => _ConnectedPcSection.devices,
+                  1 => _ConnectedPcSection.screens,
+                  2 => _ConnectedPcSection.pc,
+                  _ => activeSection,
+                };
+                if (selected == activeSection) return;
+                setState(() {
+                  _section = selected;
+                  if (selected == _ConnectedPcSection.system) {
+                    _systemOpened = true;
+                  }
+                  if (selected == _ConnectedPcSection.files) _filesOpened = true;
+                  if (selected == _ConnectedPcSection.powershell) {
+                    _powershellOpened = true;
+                  }
+                });
+                _subscribe();
+              },
+            ),
       ),
     );
   }
@@ -1547,9 +1563,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   void _showSessionStillConnected() {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(
-        content:
-            Text('Session still connected. Use the session menu to end it.'),
+      ..showSnackBar(SnackBar(
+        content: Text(translate('Session still connected. End it from the PC tab.')),
         duration: Duration(seconds: 2),
       ));
   }
@@ -1624,75 +1639,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             onNew: canCreate ? () => unawaited(_newAvd()) : null,
           );
         },
-      );
-    });
-  }
-
-  Widget _toolsBody({
-    required bool hostManagementAvailable,
-    required bool filesAvailable,
-    required bool powershellAvailable,
-  }) {
-    return Builder(builder: (context) {
-      final items = <Widget>[
-      if (hostManagementAvailable)
-        ListTile(
-          leading: const Icon(Icons.monitor_heart_outlined),
-          title: const Text('System and host'),
-          subtitle: const Text('PC status, processes and host controls'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _openToolsSection(_ConnectedPcSection.system),
-        ),
-      if (filesAvailable)
-        ListTile(
-          leading: const Icon(Icons.folder_outlined),
-          title: const Text('Files'),
-          subtitle: const Text('Browse and transfer files'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _openToolsSection(_ConnectedPcSection.files),
-        ),
-      if (powershellAvailable)
-        ListTile(
-          leading: const Icon(Icons.terminal_outlined),
-          title: const Text('PowerShell'),
-          subtitle: const Text('Open the authenticated remote terminal'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _openToolsSection(_ConnectedPcSection.powershell),
-        ),
-      ListTile(
-        leading: const Icon(Icons.network_check_outlined),
-        title: const Text('Quality and connection'),
-        subtitle: const Text('Direct or relay route, latency and stream health'),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: () => unawaited(_showQualityConnection()),
-      ),
-      ListTile(
-        leading: const Icon(Icons.settings_outlined),
-        title: const Text('Appearance and settings'),
-        subtitle: const Text('System, light or dark mode and more'),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: _openSettings,
-      ),
-    ];
-      return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        MirpgSectionHeader(
-          title: 'Workspace tools',
-          subtitle: translate(
-              'Manage {$_hostName} without leaving your connection.'),
-        ),
-        const SizedBox(height: 20),
-        MirpgSurface(
-          padding: EdgeInsets.zero,
-          child: Column(children: [
-            for (var i = 0; i < items.length; i++) ...[
-              items[i],
-              if (i < items.length - 1) const Divider(height: 1),
-            ],
-          ]),
-        ),
-      ],
       );
     });
   }
@@ -2484,15 +2430,15 @@ class ConnectedPcTabBar extends StatelessWidget {
         selectedIcon: const Icon(Icons.sports_esports_rounded),
         label: tr('Play'),
       ),
-      const NavigationDestination(
-        icon: Icon(Icons.layers_outlined),
-        selectedIcon: Icon(Icons.layers_rounded),
-        label: 'Screens',
+      NavigationDestination(
+        icon: const Icon(Icons.layers_outlined),
+        selectedIcon: const Icon(Icons.layers_rounded),
+        label: tr('Screens'),
       ),
-      const NavigationDestination(
-        icon: Icon(Icons.tune_outlined),
-        selectedIcon: Icon(Icons.tune_rounded),
-        label: 'Tools',
+      NavigationDestination(
+        icon: const Icon(Icons.computer_outlined),
+        selectedIcon: const Icon(Icons.computer_rounded),
+        label: tr('PC'),
       ),
     ];
     if (destinations.length <= 1) return const SizedBox.shrink();
@@ -2502,114 +2448,6 @@ class ConnectedPcTabBar extends StatelessWidget {
       destinations: destinations,
     );
   }
-}
-
-enum _ConnectedPcSessionAction {
-  qualityConnection,
-  privacyControls,
-  trustPhone,
-  forgetPairing,
-  settings,
-  endSession,
-}
-
-class ConnectedPcSessionMenu extends StatelessWidget {
-  const ConnectedPcSessionMenu({
-    super.key,
-    this.onQualityConnection,
-    this.onPrivacyControls,
-    this.pairingState = '',
-    this.onTrustPhone,
-    this.onForgetPairing,
-    required this.onSettings,
-    required this.onEndSession,
-  });
-
-  final VoidCallback? onQualityConnection;
-  final VoidCallback? onPrivacyControls;
-  final String pairingState;
-  final VoidCallback? onTrustPhone;
-  final VoidCallback? onForgetPairing;
-  final VoidCallback onSettings;
-  final VoidCallback onEndSession;
-
-  @override
-  Widget build(BuildContext context) =>
-      PopupMenuButton<_ConnectedPcSessionAction>(
-        tooltip: 'Session menu',
-        icon: const Icon(Icons.more_vert),
-        onSelected: (action) {
-          switch (action) {
-            case _ConnectedPcSessionAction.qualityConnection:
-              onQualityConnection?.call();
-            case _ConnectedPcSessionAction.privacyControls:
-              onPrivacyControls?.call();
-            case _ConnectedPcSessionAction.trustPhone:
-              onTrustPhone?.call();
-            case _ConnectedPcSessionAction.forgetPairing:
-              onForgetPairing?.call();
-            case _ConnectedPcSessionAction.settings:
-              onSettings();
-            case _ConnectedPcSessionAction.endSession:
-              onEndSession();
-          }
-        },
-        itemBuilder: (context) => [
-          const PopupMenuItem(
-            value: _ConnectedPcSessionAction.qualityConnection,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.network_check),
-              title: Text('Quality & connection'),
-            ),
-          ),
-          if (onPrivacyControls != null)
-            const PopupMenuItem(
-              value: _ConnectedPcSessionAction.privacyControls,
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.privacy_tip_outlined),
-                title: Text('Privacy & host controls'),
-              ),
-            ),
-          if (pairingState == 'can-pair' && onTrustPhone != null)
-            const PopupMenuItem(
-              value: _ConnectedPcSessionAction.trustPhone,
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.phonelink_lock_outlined),
-                title: Text('Trust this phone'),
-              ),
-            ),
-          if (pairingState == 'paired' && onForgetPairing != null)
-            const PopupMenuItem(
-              value: _ConnectedPcSessionAction.forgetPairing,
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.link_off),
-                title: Text('Forget pairing'),
-                subtitle: Text('This phone connects without a password at home'),
-              ),
-            ),
-          const PopupMenuItem(
-            value: _ConnectedPcSessionAction.settings,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.settings_outlined),
-              title: Text('App settings'),
-            ),
-          ),
-          const PopupMenuDivider(),
-          const PopupMenuItem(
-            value: _ConnectedPcSessionAction.endSession,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.logout),
-              title: Text('End session'),
-            ),
-          ),
-        ],
-      );
 }
 
 class _Target {
