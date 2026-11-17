@@ -111,6 +111,87 @@ class RemoteEmulator {
       };
 }
 
+/// The one-word status every emulator surface shows.
+enum EmulatorUiWord { live, starting, stopped, stopping, copying, problem }
+
+/// `label` and `causeKey` are translate keys (label may carry one `{value}`).
+/// `pcMessage` is the PC's own text, shown verbatim and preferred over
+/// `causeKey`.
+class EmulatorUiState {
+  const EmulatorUiState(this.word, this.label,
+      {this.causeKey = '', this.pcMessage = ''});
+  final EmulatorUiWord word;
+  final String label;
+  final String causeKey;
+  final String pcMessage;
+
+  bool get canOpen =>
+      word != EmulatorUiWord.stopping && word != EmulatorUiWord.copying;
+  bool get hasCause => causeKey.isNotEmpty || pcMessage.isNotEmpty;
+}
+
+/// Phone-side signals that the PC's instance state does not carry.
+class EmulatorUiFlags {
+  const EmulatorUiFlags(
+      {this.frameCurrent = false,
+      this.shuttingDown = false,
+      this.startRequested = false,
+      this.guestFailure = ''});
+  final bool frameCurrent;
+  final bool shuttingDown;
+  final bool startRequested;
+  final String guestFailure;
+}
+
+EmulatorUiState emulatorUiState(RemoteEmulator instance,
+    {RemotePreview? preview,
+    EmulatorUiFlags flags = const EmulatorUiFlags()}) {
+  final state = instance.state;
+  if (flags.shuttingDown || state == 'stopping') {
+    return const EmulatorUiState(EmulatorUiWord.stopping, 'Stopping');
+  }
+  if (state == 'shutdown_failed') {
+    return instance.error.isNotEmpty
+        ? EmulatorUiState(EmulatorUiWord.problem, 'Problem',
+            pcMessage: instance.error)
+        : const EmulatorUiState(EmulatorUiWord.problem, 'Problem',
+            causeKey: "Couldn't stop");
+  }
+  if (state == 'cloning') {
+    final p = instance.progressPercent.clamp(0, 100);
+    return EmulatorUiState(EmulatorUiWord.copying, 'Copying {$p}%');
+  }
+  if (flags.guestFailure.isNotEmpty || preview?.state == 'failed') {
+    final previewError = preview?.error ?? '';
+    return EmulatorUiState(EmulatorUiWord.problem, 'Problem',
+        causeKey: 'Stream stopped',
+        pcMessage: previewError.isNotEmpty ? previewError : flags.guestFailure);
+  }
+  if (state == 'stopped') {
+    if (flags.startRequested) {
+      return const EmulatorUiState(EmulatorUiWord.starting, 'Starting');
+    }
+    return EmulatorUiState(EmulatorUiWord.stopped, 'Stopped',
+        pcMessage: instance.error);
+  }
+  if (state == 'booting' || state == 'starting') {
+    return const EmulatorUiState(EmulatorUiWord.starting, 'Starting');
+  }
+  if (state == 'adb_offline') {
+    return EmulatorUiState(EmulatorUiWord.problem, 'Problem',
+        causeKey: 'Android not responding', pcMessage: instance.error);
+  }
+  if (state == 'ready' || state == 'running') {
+    if (preview?.state == 'streaming' && !flags.frameCurrent) {
+      return const EmulatorUiState(EmulatorUiWord.problem, 'Problem',
+          causeKey: 'Stream stopped');
+    }
+    return const EmulatorUiState(EmulatorUiWord.live, 'Live');
+  }
+  return EmulatorUiState(EmulatorUiWord.problem, 'Problem',
+      causeKey: 'Status unavailable', pcMessage: instance.error);
+}
+
 class EmulatorModel extends ChangeNotifier {
   EmulatorModel(
     this.sessionId, {
