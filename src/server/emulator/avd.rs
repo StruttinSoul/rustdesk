@@ -677,6 +677,10 @@ impl EmulatorProvider for AvdProvider {
         }
         self.check_not_cloning(name)?;
         self.home.check_ini_path(name)?;
+        if let Some(old) = self.home.ensure_managed_screen(name)? {
+            let (width, height) = super::avd_files::MANAGED_SCREEN;
+            log::info!("Changed the screen of {name} from {old} to {width}x{height}");
+        }
         starts.retain(|(at, _, _)| at.elapsed() < START_RESERVATION);
         let reserved = starts.iter().map(|(_, _, mb)| u64::from(*mb)).sum();
         let ram_mb = match instance.entry.ram_mb {
@@ -1041,6 +1045,39 @@ pub(crate) mod tests {
         let error = provider.start(&target("Elsewhere")).unwrap_err().to_string();
         assert!(error.contains("emulator folder"), "{error}");
         assert!(system.launched.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_gives_an_old_avd_the_managed_screen() {
+        let root = temp_root("screen");
+        create(&root, "Maple_1");
+        let config = root.0.join("Maple_1.avd").join("config.ini");
+        let old = std::fs::read_to_string(&config)
+            .unwrap()
+            .replace("hw.lcd.height=2208", "hw.lcd.height=2400");
+        std::fs::write(&config, &old).unwrap();
+        let system = FakeSystem::new(64_000);
+        let provider = provider(&root, &system);
+        provider.start(&target("Maple_1")).unwrap();
+        let new = std::fs::read_to_string(&config).unwrap();
+        assert!(new.lines().any(|l| l == "hw.lcd.height=2208"), "{new}");
+        assert!(new.lines().any(|l| l == "hw.lcd.width=1080"), "{new}");
+        assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_1"]);
+    }
+
+    #[test]
+    fn a_running_avd_keeps_its_config() {
+        let root = temp_root("screen-running");
+        create(&root, "Maple_1");
+        let config = root.0.join("Maple_1.avd").join("config.ini");
+        let old = std::fs::read_to_string(&config)
+            .unwrap()
+            .replace("hw.lcd.height=2208", "hw.lcd.height=2400");
+        std::fs::write(&config, &old).unwrap();
+        let system = FakeSystem::new(64_000);
+        system.run("Maple_1", Some("emulator-5556"));
+        assert!(provider(&root, &system).start(&target("Maple_1")).is_err());
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), old);
     }
 
     #[test]

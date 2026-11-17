@@ -102,7 +102,7 @@ hw.lcd.backlight=yes
 hw.lcd.circular=false
 hw.lcd.density=420
 hw.lcd.depth=32
-hw.lcd.height=2400
+hw.lcd.height=2208
 hw.lcd.transparent=false
 hw.lcd.vsync=60
 hw.lcd.width=1080
@@ -237,6 +237,23 @@ fn set_key(text: &str, key: &str, value: &str) -> String {
     let mut out = lines.join(eol);
     out.push_str(eol);
     out
+}
+
+/// The screen of every Aperture-managed emulator: it fills the phone's game
+/// area above the in-game bar (384x784 dp) without black bars.
+pub const MANAGED_SCREEN: (u32, u32) = (1080, 2208);
+
+/// `config` with `MANAGED_SCREEN` as its LCD size, or None if it has it already.
+fn with_managed_screen(config: &str) -> Option<String> {
+    let width = MANAGED_SCREEN.0.to_string();
+    let height = MANAGED_SCREEN.1.to_string();
+    if get_key(config, "hw.lcd.width") == Some(width.as_str())
+        && get_key(config, "hw.lcd.height") == Some(height.as_str())
+    {
+        return None;
+    }
+    let config = set_key(config, "hw.lcd.width", &width);
+    Some(set_key(&config, "hw.lcd.height", &height))
 }
 
 /// `text` without any `key=` line; other lines and the line endings are kept.
@@ -462,6 +479,34 @@ impl AvdHome {
             bail!("{name} points outside the Aperture emulator folder");
         }
         Ok(())
+    }
+
+    /// Gives a stopped emulator's `config.ini` the managed screen size. Returns
+    /// the size it had when it was changed. Callers check it is not running.
+    pub fn ensure_managed_screen(&self, name: &str) -> ResultType<Option<String>> {
+        let name = Self::checked_name(name)?;
+        let dir = self.avd_dir(name);
+        self.ensure_inside(&dir)?;
+        let path = dir.join("config.ini");
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("Cannot read the configuration of {name}"))?;
+        let Some(updated) = with_managed_screen(&text) else {
+            return Ok(None);
+        };
+        let old = format!(
+            "{}x{}",
+            get_key(&text, "hw.lcd.width").unwrap_or("?"),
+            get_key(&text, "hw.lcd.height").unwrap_or("?")
+        );
+        // Replaced in one step, so the emulator never reads a half-written file.
+        let temp = dir.join("config.ini.aperture-tmp");
+        if let Err(e) = fs::write(&temp, updated).and_then(|()| fs::rename(&temp, &path)) {
+            if let Err(cleanup) = fs::remove_file(&temp) {
+                log::trace!("Removing {}: {cleanup}", temp.display());
+            }
+            return Err(e).with_context(|| format!("Cannot set the screen size of {name}"));
+        }
+        Ok(Some(old))
     }
 
     fn exists(&self, name: &str) -> bool {
@@ -888,6 +933,9 @@ mod tests {
             "PlayStore.enabled=true",
             "AvdId=Maple_2",
             "avd.ini.displayname=Maple 2",
+            "hw.lcd.width=1080",
+            "hw.lcd.height=2208",
+            "hw.lcd.density=420",
             r"image.sysdir.1=system-images\android-35\google_apis_playstore\x86_64\",
         ] {
             assert!(cfg.lines().any(|l| l == line), "{line}");
@@ -896,6 +944,82 @@ mod tests {
         assert!(home.create("Maple_2", NEW_AVD_TEMPLATE).is_err(), "name collision");
         assert!(home.create("../x", NEW_AVD_TEMPLATE).is_err());
         cleanup(home);
+    }
+
+    #[test]
+    fn managed_screen_rewrites_only_the_lcd_size() {
+        let old = "hw.lcd.density=420
+hw.lcd.height=2400
+hw.lcd.vsync=60
+hw.lcd.width=1080
+";
+        assert_eq!(
+            with_managed_screen(old).as_deref(),
+            Some("hw.lcd.density=420
+hw.lcd.height=2208
+hw.lcd.vsync=60
+hw.lcd.width=1080
+")
+        );
+        let wide = "a=1
+hw.lcd.width=720
+hw.lcd.height=1280
+b=2
+";
+        assert_eq!(
+            with_managed_screen(wide).as_deref(),
+            Some("a=1
+hw.lcd.width=1080
+hw.lcd.height=2208
+b=2
+")
+        );
+        assert_eq!(
+            with_managed_screen("a=1
+").as_deref(),
+            Some("a=1
+hw.lcd.width=1080
+hw.lcd.height=2208
+")
+        );
+        assert_eq!(with_managed_screen("hw.lcd.width = 1080
+hw.lcd.height=2208
+"), None);
+    }
+
+    #[test]
+    fn ensure_managed_screen_rewrites_a_stopped_avd_once() {
+        let home = temp_home("screen");
+        let dir = make_source(&home, "Maple_1");
+        let config = dir.join("config.ini");
+        let old = read(&config).replace("hw.lcd.height=2208", "hw.lcd.height=2400");
+        fs::write(&config, &old).unwrap();
+        assert_eq!(home.ensure_managed_screen("Maple_1").unwrap().as_deref(), Some("1080x2400"));
+        let new = read(&config);
+        assert_eq!(new, old.replace("hw.lcd.height=2400", "hw.lcd.height=2208"));
+        assert_eq!(home.ensure_managed_screen("Maple_1").unwrap(), None);
+        assert_eq!(read(&config), new);
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert!(home.ensure_managed_screen("../x").is_err());
+        cleanup(home);
+    }
+
+    /// Run only while the trial AVD is stopped: Aperture's start does the same.
+    #[test]
+    #[ignore = "Rewrites the stopped Aperture_Trial_Play35 config.ini"]
+    fn real_trial_gets_the_managed_screen() {
+        let home = AvdHome::new(AvdHome::default_root());
+        let old = home.ensure_managed_screen("Aperture_Trial_Play35").unwrap();
+        eprintln!("RESULT trial screen was {old:?}");
+        let config = read(home.root().join("Aperture_Trial_Play35.avd").join("config.ini"));
+        assert_eq!(get_key(&config, "hw.lcd.width"), Some("1080"));
+        assert_eq!(get_key(&config, "hw.lcd.height"), Some("2208"));
     }
 
     #[test]
