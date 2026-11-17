@@ -35,6 +35,7 @@ import '../widgets/pc_tab.dart';
 import '../widgets/play_tab.dart';
 import '../widgets/privacy_controls_sheet.dart';
 import '../widgets/session_quality_panel.dart';
+import '../widgets/trust_phone_sheet.dart';
 import '../widgets/window_picker_sheet.dart';
 
 enum _ConnectedPcSection {
@@ -267,8 +268,39 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           param: '');
       if (!mounted) return;
       setState(() => _pairingState = state ?? '');
+      if (state == 'paired') _setPairedFlag('Y');
+      if (state == 'can-pair') _setPairedFlag('N');
     } catch (_) {
       if (mounted) setState(() => _pairingState = 'unavailable');
+      return;
+    }
+    unawaited(_maybeOfferPairing());
+  }
+
+  void _setPairedFlag(String value) => unawaited(bind.setLocalFlutterOption(
+      k: pairedFlagKey(widget.ffi.id), v: value));
+
+  /// Offers "Trust this phone" once per PC, never over a game or the monitor;
+  /// a prompt deferred meanwhile appears when the dashboard is shown again.
+  bool _offeringPairing = false;
+
+  Future<void> _maybeOfferPairing() async {
+    if (!mounted || _fullscreen != null || _offeringPairing) return;
+    final promptedKey = pairPromptedKey(widget.ffi.id);
+    if (!shouldOfferPairing(
+        pairingState: _pairingState,
+        promptedFlag: bind.getLocalFlutterOption(k: promptedKey))) {
+      return;
+    }
+    _offeringPairing = true;
+    try {
+      // Recorded before the sheet opens so it is one-time even if the app dies.
+      await bind.setLocalFlutterOption(k: promptedKey, v: 'Y');
+      if (!mounted) return;
+      final trust = await showTrustPhoneSheet(context, hostName: _hostName);
+      if (trust == true) await _trustThisPhone();
+    } finally {
+      _offeringPairing = false;
     }
   }
 
@@ -294,6 +326,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         sessionId: widget.ffi.sessionId,
         key: 'aperture-forget-pairing',
         value: '');
+    _setPairedFlag('N');
     await _refreshPairingState();
   }
 
@@ -307,9 +340,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(
         content: Text(ok
-            ? 'This phone connects without a password at home'
-            : (error.isEmpty ? 'Pairing failed' : error)),
+            ? translate('This phone connects without a password at home')
+            : (error.isEmpty ? translate('Pairing failed') : error)),
       ));
+    if (ok) _setPairedFlag('Y');
     unawaited(_refreshPairingState());
   }
 
@@ -1167,6 +1201,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _subscription = '';
     _subscribe();
+    unawaited(_maybeOfferPairing());
   }
 
   void _presentation() {
