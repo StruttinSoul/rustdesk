@@ -189,6 +189,8 @@ pub(crate) trait AvdSystem: Send + Sync {
     fn kill(&self, serial: &str) -> ResultType<()>;
     /// Powers Android off, which ends the emulator too.
     fn power_off(&self, serial: &str) -> ResultType<()>;
+    /// Reports when `name`'s emulator exits without a stop from Aperture.
+    fn watch_exit(&self, _name: &str) {}
 }
 
 /// The real PC: sysinfo processes, the default ADB server, Windows memory.
@@ -253,6 +255,10 @@ impl AvdSystem for HostSystem {
             bail!("ADB is not running on the PC")
         };
         adb_command(&adb, serial, &["shell", "reboot", "-p"]).map(|_| ())
+    }
+
+    fn watch_exit(&self, name: &str) {
+        super::avd_exit_watch::watch(name)
     }
 }
 
@@ -504,8 +510,12 @@ impl AvdProvider {
                     .iter()
                     .position(|(_, probe)| probe.name == entry.name)
                     .map(|index| guests.remove(index));
+                let is_running = guest.is_some() || running.contains(&entry.name);
+                if is_running {
+                    self.system.watch_exit(&entry.name);
+                }
                 Instance {
-                    running: guest.is_some() || running.contains(&entry.name),
+                    running: is_running,
                     guest,
                     entry,
                 }
@@ -677,6 +687,7 @@ impl EmulatorProvider for AvdProvider {
             bail!("Not enough free memory on atlas to start {name}")
         }
         self.system.launch(name)?;
+        self.system.watch_exit(name);
         starts.push((Instant::now(), name.to_owned(), ram_mb));
         log::info!("Started Android Emulator {name} ({ram_mb} MB)");
         Ok(())
@@ -685,6 +696,7 @@ impl EmulatorProvider for AvdProvider {
     fn stop(&self, target: &EmulatorTarget) -> ResultType<()> {
         let name = target.provider_instance_id.as_str();
         let serial = self.serial(target)?;
+        super::avd_exit_watch::expect_stop(name);
         self.system.kill(&serial)?;
         self.wait_after_kill(name, &serial)?;
         // Its RAM is free again, so a restart need not wait out the reservation.

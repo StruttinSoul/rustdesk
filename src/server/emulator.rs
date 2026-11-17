@@ -6,6 +6,8 @@ pub const MAX_TEXT_BYTES: usize = 4096;
 #[cfg(windows)]
 pub mod avd;
 #[cfg(windows)]
+mod avd_exit_watch;
+#[cfg(windows)]
 pub mod avd_feed;
 #[cfg(windows)]
 pub mod avd_files;
