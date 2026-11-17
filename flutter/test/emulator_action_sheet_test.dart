@@ -37,6 +37,7 @@ void main() {
     VoidCallback? onStop,
     VoidCallback? onLabel,
     AvdCardActions? avd,
+    bool shuttingDown = false,
   }) =>
       EmulatorActionSheet(
         title: 'Maple_1',
@@ -49,6 +50,7 @@ void main() {
         onStop: onStop,
         onLabel: onLabel ?? () {},
         avd: avd,
+        shuttingDown: shuttingDown,
         tr: fakeTr,
       );
 
@@ -206,5 +208,44 @@ void main() {
     await tester.tap(find.text('Stop'));
     await tester.pumpAndSettle();
     expect(stops, 1);
+  });
+
+  testWidgets('shutting down disables every row except Label', (tester) async {
+    var labels = 0;
+    var calls = 0;
+    await open(
+        tester,
+        () => sheet(
+              shuttingDown: true,
+              onOpen: () => calls++,
+              onLaunchGame: () => calls++,
+              onLabel: () => labels++,
+              avd: AvdCardActions(
+                running: true,
+                onToggleWindow: () => calls++,
+                onStop: () => calls++,
+                onClone: () => calls++,
+                onRename: () => calls++,
+                onDelete: () => calls++,
+              ),
+            ));
+    for (final row in [
+      'Open',
+      'Open and launch game',
+      'Show on PC',
+      'Stop',
+      'Clone',
+      'Rename',
+      'Delete'
+    ]) {
+      expect(tile(tester, row).enabled, isFalse, reason: row);
+    }
+    expect(tile(tester, 'Label').enabled, isTrue);
+    await tester.tap(find.text('Stop'));
+    await tester.pump();
+    expect(calls, 0);
+    await tester.tap(find.text('Label'));
+    await tester.pumpAndSettle();
+    expect(labels, 1);
   });
 }

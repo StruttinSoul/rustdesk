@@ -111,12 +111,16 @@ class SessionStatusButton extends StatelessWidget {
     required this.data,
     required this.now,
     this.onPressed,
+    this.compact = false,
   });
 
   final bool? direct;
   final QualityMonitorData data;
   final DateTime now;
   final VoidCallback? onPressed;
+
+  /// Narrow app bars: no leading icon and 8 dp horizontal padding.
+  final bool compact;
 
   String get _transport => direct == null
       ? 'Connecting'
@@ -149,8 +153,9 @@ class SessionStatusButton extends StatelessWidget {
       borderRadius: BorderRadius.circular(999),
       child: MirpgStatusChip(
         label: _label,
-        icon: slow ? Icons.network_check : Icons.lan_outlined,
+        icon: compact ? null : (slow ? Icons.network_check : Icons.lan_outlined),
         tone: slow ? MirpgStatusTone.warning : MirpgStatusTone.good,
+        horizontalPadding: compact ? 8 : 10,
       ),
     );
   }

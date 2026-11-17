@@ -142,6 +142,9 @@ class EmulatorActionSheet extends StatelessWidget {
 
     final stop = avd?.onStop ?? onStop;
     final managed = avd;
+    // While the emulator shuts down only the phone-side label stays editable.
+    VoidCallback? unlessShuttingDown(VoidCallback? action) =>
+        shuttingDown ? null : action;
     final copying = managed?.cloningLabel != null;
     final manageBlocker = copying
         ? tr('Copy in progress')
@@ -179,13 +182,13 @@ class EmulatorActionSheet extends StatelessWidget {
               row(rowContext,
                   icon: stopped ? Icons.play_arrow : Icons.open_in_new,
                   label: tr(stopped ? 'Start' : 'Open'),
-                  action: onOpen,
+                  action: unlessShuttingDown(onOpen),
                   subtitle: onOpen == null ? openBlocker : null),
               if (onLaunchGame != null)
                 row(rowContext,
                     icon: Icons.sports_esports_outlined,
                     label: tr('Open and launch game'),
-                    action: onLaunchGame),
+                    action: unlessShuttingDown(onLaunchGame)),
               if (managed != null &&
                   managed.running &&
                   managed.onToggleWindow != null)
@@ -194,12 +197,12 @@ class EmulatorActionSheet extends StatelessWidget {
                         ? Icons.desktop_access_disabled_outlined
                         : Icons.desktop_windows_outlined,
                     label: tr(managed.windowVisible ? 'Hide on PC' : 'Show on PC'),
-                    action: managed.onToggleWindow),
+                    action: unlessShuttingDown(managed.onToggleWindow)),
               if (!stopped && stop != null)
                 row(rowContext,
                     icon: Icons.stop_circle_outlined,
                     label: tr('Stop'),
-                    action: shuttingDown ? null : stop),
+                    action: unlessShuttingDown(stop)),
               const Divider(height: 1),
               row(rowContext,
                   icon: Icons.label_outline, label: tr('Label'), action: onLabel),
@@ -207,17 +210,23 @@ class EmulatorActionSheet extends StatelessWidget {
                 row(rowContext,
                     icon: Icons.copy_outlined,
                     label: tr('Clone'),
-                    action: manageBlocker != null ? null : managed.onClone,
+                    action: manageBlocker != null
+                        ? null
+                        : unlessShuttingDown(managed.onClone),
                     subtitle: manageBlocker),
                 row(rowContext,
                     icon: Icons.drive_file_rename_outline,
                     label: tr('Rename'),
-                    action: manageBlocker != null ? null : managed.onRename,
+                    action: manageBlocker != null
+                        ? null
+                        : unlessShuttingDown(managed.onRename),
                     subtitle: manageBlocker),
                 row(rowContext,
                     icon: Icons.delete_outline,
                     label: tr('Delete'),
-                    action: manageBlocker != null ? null : managed.onDelete,
+                    action: manageBlocker != null
+                        ? null
+                        : unlessShuttingDown(managed.onDelete),
                     subtitle: manageBlocker,
                     color: palette.error),
               ],

@@ -1,0 +1,321 @@
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+
+import '../../common.dart' show translate;
+import '../../models/emulator_model.dart';
+import 'emulator_tile.dart';
+import 'mirpg_remote_theme.dart';
+
+const double _gridSpacing = 12;
+const double _bottomClearance = 88;
+
+/// How long a phone-side start request keeps a stopped tile on "Starting"
+/// (the same 120 s the startup screen waits before giving up).
+const Duration kPlayStartRequestHold = Duration(seconds: 120);
+
+/// Height of one Play grid tile for a [tileWidth]: a 3:4 preview plus the
+/// name bar, which grows with the text scale.
+double playTabTileExtent(double tileWidth, TextScaler textScaler) =>
+    tileWidth * 4 / 3 + textScaler.scale(64);
+
+/// Distance between the tops of two grid rows for a Play tab [width].
+double playTabRowExtent(double width, TextScaler textScaler) {
+  final tileWidth = math.max(
+      0.0, (width - 2 * MirpgRemoteTheme.pageMargin - _gridSpacing) / 2);
+  return playTabTileExtent(tileWidth, textScaler) + _gridSpacing;
+}
+
+/// Index of the first tile in the row nearest the top of the viewport.
+int playTabFirstVisibleIndex(double scrollOffset, double rowExtent) {
+  if (rowExtent <= 0) return 0;
+  return 2 * (math.max(0.0, scrollOffset - 36) / rowExtent).floor();
+}
+
+/// Which guests get one of the four preview streams on Play.
+///
+/// Stopped, stopping, copying and shutting-down emulators never take a slot,
+/// nor does the one already open. Tiles at or below [firstVisibleIndex] come
+/// first, top down; then the ones above it, nearest first.
+List<String> playTabPreviewIds(
+  List<RemoteEmulator> guests, {
+  required int firstVisibleIndex,
+  bool Function(String id)? shuttingDown,
+  String? activeId,
+}) {
+  bool candidate(RemoteEmulator guest) =>
+      guest.state != 'stopped' &&
+      guest.state != 'stopping' &&
+      guest.state != 'cloning' &&
+      !(shuttingDown?.call(guest.id) ?? false) &&
+      guest.id != activeId;
+  final first = firstVisibleIndex.clamp(0, guests.length);
+  return [
+    for (var i = first; i < guests.length; i++)
+      if (candidate(guests[i])) guests[i].id,
+    for (var i = first - 1; i >= 0; i--)
+      if (candidate(guests[i])) guests[i].id,
+  ].take(4).toList(growable: false);
+}
+
+/// Records that the phone asked a stopped emulator to start.
+void noteStartRequest(
+    Map<String, DateTime> requests, RemoteEmulator instance, DateTime now) {
+  if (instance.state == 'stopped') requests[instance.id] = now;
+}
+
+/// Whether [id] still reads "Starting" because of a phone-side request.
+bool startRequestPending(
+    Map<String, DateTime> requests, String id, DateTime now) {
+  final at = requests[id];
+  return at != null && now.difference(at) < kPlayStartRequestHold;
+}
+
+/// Drops requests the PC's list has caught up with (no longer stopped, or no
+/// longer listed) and requests older than [kPlayStartRequestHold].
+void pruneStartRequests(Map<String, DateTime> requests,
+    Iterable<RemoteEmulator> instances, DateTime now) {
+  requests.removeWhere((id, at) =>
+      now.difference(at) >= kPlayStartRequestHold ||
+      !instances.any((item) => item.id == id && item.state == 'stopped'));
+}
+
+/// The Play tab: every emulator as a tile in the PC's list order, then one
+/// row for the PC's monitors.
+class PlayTabBody extends StatelessWidget {
+  const PlayTabBody({
+    super.key,
+    required this.tiles,
+    required this.hostName,
+    required this.firstLoad,
+    required this.listError,
+    required this.monitorCount,
+    required this.onRefresh,
+    required this.onRetryList,
+    required this.onOpen,
+    required this.onMore,
+    this.onOpenScreens,
+    this.onNew,
+    this.scrollController,
+    this.tr = translate,
+  });
+
+  final List<EmulatorTileData> tiles;
+  final String hostName;
+  final bool firstLoad;
+  final String listError;
+  final int monitorCount;
+  final Future<void> Function() onRefresh;
+  final VoidCallback onRetryList;
+  final void Function(String id) onOpen;
+  final void Function(String id) onMore;
+  final VoidCallback? onOpenScreens;
+  final VoidCallback? onNew;
+  final ScrollController? scrollController;
+  final String Function(String) tr;
+
+  static const _margin = MirpgRemoteTheme.pageMargin;
+
+  Widget _grid(BuildContext context, int count, IndexedWidgetBuilder builder) {
+    final textScaler = MediaQuery.textScalerOf(context);
+    return SliverPadding(
+      padding: const EdgeInsets.symmetric(horizontal: _margin),
+      sliver: SliverLayoutBuilder(builder: (context, constraints) {
+        final tileWidth =
+            math.max(0.0, (constraints.crossAxisExtent - _gridSpacing) / 2);
+        return SliverGrid(
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            mainAxisSpacing: _gridSpacing,
+            crossAxisSpacing: _gridSpacing,
+            mainAxisExtent: playTabTileExtent(tileWidth, textScaler),
+          ),
+          delegate: SliverChildBuilderDelegate(builder, childCount: count),
+        );
+      }),
+    );
+  }
+
+  Widget _skeleton(BuildContext context) {
+    final palette = MirpgStudioPalette.of(context);
+    return Column(
+      key: const ValueKey('play-skeleton'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: palette.raised,
+              borderRadius:
+                  BorderRadius.circular(MirpgRemoteTheme.controlRadius),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 14, right: 48),
+          child: Container(
+            height: 16,
+            decoration: BoxDecoration(
+              color: palette.raised,
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+        const SizedBox(height: 18),
+      ],
+    );
+  }
+
+  Widget _errorCard(BuildContext context) {
+    final palette = MirpgStudioPalette.of(context);
+    final text = Theme.of(context).textTheme;
+    return MirpgSurface(
+      color: palette.error.withOpacity(0.08),
+      borderColor: palette.error.withOpacity(0.45),
+      padding: const EdgeInsets.fromLTRB(16, 16, 8, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.error_outline, color: palette.error),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                          tr("Couldn't get the emulator list from {$hostName}"),
+                          style: text.titleSmall),
+                      const SizedBox(height: 4),
+                      Text(listError, style: text.bodySmall),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: TextButton(
+              onPressed: onRetryList,
+              child: Text(tr('Try again')),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyCard(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final palette = MirpgStudioPalette.of(context);
+    return MirpgSurface(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(tr('No emulators on {$hostName} yet'), style: text.titleMedium),
+          if (onNew != null) ...[
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: onNew,
+              icon: const Icon(Icons.add),
+              label: Text(tr('New emulator')),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Text(tr('BlueStacks instances appear here when BlueStacks is installed.'),
+              style: text.bodySmall?.copyWith(color: palette.textSecondary)),
+        ],
+      ),
+    );
+  }
+
+  Widget _screensRow(BuildContext context) {
+    final palette = MirpgStudioPalette.of(context);
+    final numbers = [for (var i = 1; i <= monitorCount; i++) '$i'].join(' · ');
+    return MirpgSurface(
+      padding: EdgeInsets.zero,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(MirpgRemoteTheme.surfaceRadius),
+        onTap: onOpenScreens,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 56),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(children: [
+              Icon(Icons.desktop_windows_outlined, color: palette.accent),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Text(tr('Monitor {$numbers}'),
+                    style: Theme.of(context).textTheme.bodyLarge),
+              ),
+              Icon(Icons.chevron_right, color: palette.textSecondary),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final listed = tiles.where((tile) => !tile.placeholder);
+    final running = listed
+        .where((tile) =>
+            tile.state.word == EmulatorUiWord.live ||
+            tile.state.word == EmulatorUiWord.starting)
+        .length;
+    Widget box(Widget child, {EdgeInsets? padding}) => SliverToBoxAdapter(
+          child: Padding(
+            padding: padding ??
+                const EdgeInsets.fromLTRB(_margin, 8, _margin, 8),
+            child: child,
+          ),
+        );
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: CustomScrollView(
+        controller: scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          if (!firstLoad && tiles.isNotEmpty)
+            box(Text(
+              '${tr('Emulators')} · ${tr('{$running/${listed.length}} running')}',
+              style: text.titleSmall,
+            )),
+          if (listError.isNotEmpty) box(_errorCard(context)),
+          if (firstLoad)
+            _grid(context, 4, (context, _) => _skeleton(context))
+          else if (tiles.isEmpty && listError.isEmpty)
+            box(_emptyCard(context))
+          else
+            _grid(context, tiles.length, (context, index) {
+              final data = tiles[index];
+              return EmulatorTile(
+                key: ValueKey(data.id),
+                data: data,
+                tr: tr,
+                onOpen: data.state.canOpen && !data.placeholder
+                    ? () => onOpen(data.id)
+                    : null,
+                onMore: data.placeholder ? null : () => onMore(data.id),
+              );
+            }),
+          if (monitorCount > 0) ...[
+            box(Text(tr('PC screens'), style: text.titleSmall),
+                padding: const EdgeInsets.fromLTRB(_margin, 24, _margin, 8)),
+            box(_screensRow(context),
+                padding: const EdgeInsets.symmetric(horizontal: _margin)),
+          ],
+          const SliverToBoxAdapter(
+              child: SizedBox(height: _bottomClearance)),
+        ],
+      ),
+    );
+  }
+}

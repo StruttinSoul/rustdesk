@@ -6,6 +6,8 @@ import 'package:flutter_hbb/mobile/widgets/session_quality_panel.dart';
 import 'package:flutter_hbb/mobile/widgets/monitor_session_continuity.dart';
 import 'package:flutter_hbb/models/model.dart';
 
+import 'support/fake_translate.dart';
+
 void main() {
   test('a monitor frame is usable only for the acknowledged preview request',
       () {
@@ -82,12 +84,13 @@ void main() {
             filesAvailable: true,
             powershellAvailable: true,
             onDestinationSelected: (index) => setState(() => selected = index),
+            tr: fakeTr,
           ),
         );
       }),
     ));
 
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
     expect(find.text('Tools'), findsOneWidget);
     expect(selected, 0);
@@ -112,12 +115,13 @@ void main() {
           filesAvailable: true,
           powershellAvailable: true,
           onDestinationSelected: (_) {},
+          tr: fakeTr,
         ),
       ),
     ));
 
     expect(find.byType(NavigationBar), findsOneWidget);
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
     expect(find.text('Tools'), findsOneWidget);
     expect(find.text('Codex'), findsNothing);
@@ -133,11 +137,12 @@ void main() {
           filesAvailable: false,
           powershellAvailable: false,
           onDestinationSelected: (_) {},
+          tr: fakeTr,
         ),
       ),
     ));
 
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
     expect(find.text('Tools'), findsOneWidget);
     expect(find.text('System'), findsNothing);
@@ -160,13 +165,14 @@ void main() {
             filesAvailable: true,
             powershellAvailable: true,
             onDestinationSelected: (_) {},
+            tr: fakeTr,
           ),
         ),
       ),
     ));
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Play'), findsOneWidget);
     expect(find.text('Tools'), findsOneWidget);
   });
 
@@ -356,6 +362,43 @@ void main() {
     expect(find.text('45 ms · stale'), findsOneWidget);
     expect(find.text('Unavailable'), findsWidgets);
     expect(find.textContaining('prove a LAN route'), findsOneWidget);
+  });
+
+  testWidgets('compact status button fits 360 dp at 1.3 text scale',
+      (tester) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final now = DateTime(2026, 10, 4, 12);
+    final data = QualityMonitorData()
+      ..delay = '3'
+      ..delayUpdatedAt = now.subtract(const Duration(seconds: 1));
+    await tester.pumpWidget(MaterialApp(
+      theme: MirpgRemoteTheme.build(ThemeData.dark()),
+      home: MediaQuery(
+        data: const MediaQueryData(
+          size: Size(360, 800),
+          textScaler: TextScaler.linear(1.3),
+        ),
+        child: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 120,
+              child: SessionStatusButton(
+                compact: true,
+                direct: true,
+                data: data,
+                now: now,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ));
+
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('Direct'), findsOneWidget);
+    expect(find.byIcon(Icons.lan_outlined), findsNothing);
   });
 
   testWidgets('stopped cards boot only after an explicit tap', (tester) async {

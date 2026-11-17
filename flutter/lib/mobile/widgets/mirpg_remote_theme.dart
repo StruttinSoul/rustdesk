@@ -482,11 +482,13 @@ class MirpgStatusChip extends StatelessWidget {
     this.icon,
     this.tone = MirpgStatusTone.neutral,
     this.onDarkSurface = false,
+    this.horizontalPadding = 10,
   });
 
   final String label;
   final IconData? icon;
   final MirpgStatusTone tone;
+  final double horizontalPadding;
   /// Use a dark backdrop and bright labels over live video previews.
   final bool onDarkSurface;
 
@@ -504,7 +506,7 @@ class MirpgStatusChip extends StatelessWidget {
         : MirpgStudioPalette.of(context));
     return Container(
       constraints: const BoxConstraints(minHeight: 32),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 6),
       decoration: BoxDecoration(
         color: onDarkSurface
             ? const Color(0xE6101923)
