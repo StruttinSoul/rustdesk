@@ -3,6 +3,10 @@ import 'package:flutter/material.dart';
 import '../../common.dart' show translate;
 import '../../common/widgets/studio_theme.dart';
 
+/// How a PC's name is shown on the phone: in capitals. Display only; the
+/// stored name and ID never change.
+String hostDisplayName(String name) => name.toUpperCase();
+
 enum ConnectPhase { idle, connecting, failed }
 
 /// One connection attempt as the Computers page sees it.
@@ -107,7 +111,7 @@ class ComputerHeroCard extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(name,
+                child: Text(hostDisplayName(name),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.titleMedium),

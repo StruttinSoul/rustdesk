@@ -83,7 +83,8 @@ void main() {
           tester,
           card(const ComputerHeroData(
               id: '1', name: 'atlas', online: true, trusted: true)));
-      expect(find.text('atlas'), findsOneWidget);
+      expect(find.text('ATLAS'), findsOneWidget);
+      expect(find.text('atlas'), findsNothing);
       expect(find.text('Online'), findsOneWidget);
       expect(find.text('Trusted · connects without password'), findsOneWidget);
       expect(find.byType(FilledButton), findsOneWidget);
@@ -161,6 +162,16 @@ void main() {
                   phase: ConnectPhase.failed, peerId: '1', reason: reason)),
           textScale: 1.3);
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('hostDisplayName', () {
+    test('shows the PC name in capitals without changing the stored name', () {
+      const data = ComputerHeroData(id: '1', name: 'atlas');
+      expect(hostDisplayName(data.name), 'ATLAS');
+      expect(data.name, 'atlas');
+      expect(hostDisplayName('Your PC'), 'YOUR PC');
+      expect(hostDisplayName(''), '');
     });
   });
 

@@ -193,8 +193,9 @@ void main() {
       String listError = '',
       bool withNew = true,
       double scale = 1.0,
+      Size size = const Size(360, 800),
     }) async {
-      tester.view.physicalSize = const Size(360, 800);
+      tester.view.physicalSize = size;
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       await tester.pumpWidget(MaterialApp(
@@ -292,11 +293,11 @@ void main() {
       await pump(tester, tiles: [
         t('A', live),
         const EmulatorTileData(
-            id: 'avd:New', title: 'New', state: starting, placeholder: true),
+            id: 'avd:Fresh', title: 'Fresh', state: starting, placeholder: true),
       ]);
       expect(find.text('Setting up…'), findsOneWidget);
-      await tester.tap(find.text('New'));
-      await tester.longPress(find.text('New'));
+      await tester.tap(find.text('Fresh'));
+      await tester.longPress(find.text('Fresh'));
       expect(opens, isEmpty);
       expect(mores, isEmpty);
     });
@@ -364,13 +365,69 @@ void main() {
       expect(find.byType(EmulatorTile), findsNWidgets(4));
     });
 
-    testWidgets('the last row clears the floating New button', (tester) async {
+    testWidgets('New sits in the header row, calls onNew, and there is no FAB',
+        (tester) async {
+      await pump(tester, tiles: [t('A', live), t('B', stopped)]);
+      expect(find.byType(FloatingActionButton), findsNothing);
+      final header = tester.getRect(find.text('Emulators · 1/2 running'));
+      final newButton = find.ancestor(
+          of: find.text('New'),
+          matching: find.byWidgetPredicate((w) => w is TextButton));
+      expect(newButton, findsOneWidget);
+      final rect = tester.getRect(newButton);
+      expect(rect.center.dy, closeTo(header.center.dy, 2));
+      expect(rect.right, greaterThan(360 - 32));
+      expect(rect.height, greaterThanOrEqualTo(48));
+      await tester.tap(newButton);
+      expect(news, 1);
+    });
+
+    testWidgets('no New in the header when onNew is null', (tester) async {
+      await pump(tester, tiles: [t('A', live)], withNew: false);
+      expect(find.text('New'), findsNothing);
+    });
+
+    testWidgets('four tiles fit a 412x915 phone without scrolling',
+        (tester) async {
+      // 915 dp less status bar (28), app bar (64), navigation bar (80).
+      await pump(tester,
+          size: const Size(412, 915 - 28 - 64 - 80),
+          tiles: [for (final n in 'ABCD'.split('')) t(n, stopped)]);
+      final scrollable = tester.state<ScrollableState>(find.byType(Scrollable));
+      expect(scrollable.position.maxScrollExtent, 0);
+      final lastBottom = tester.getBottomLeft(find.byType(EmulatorTile).last).dy;
+      expect(lastBottom, lessThanOrEqualTo(915 - 28 - 64 - 80));
+    });
+
+    testWidgets('tiles shrink to fit a shorter screen, to a minimum preview',
+        (tester) async {
+      await pump(tester,
+          size: const Size(412, 600),
+          tiles: [for (final n in 'ABCD'.split('')) t(n, stopped)]);
+      final scrollable = tester.state<ScrollableState>(find.byType(Scrollable));
+      expect(scrollable.position.maxScrollExtent, 0);
+      final tile = tester.getSize(find.byType(EmulatorTile).first);
+      expect(tile.height, lessThan(tile.width * 4 / 3 + 60));
+
+      // Too small for even the minimum: scrolls instead of squashing further.
+      await pump(tester,
+          size: const Size(412, 420),
+          tiles: [for (final n in 'ABCD'.split('')) t(n, stopped)]);
+      final small = tester.state<ScrollableState>(find.byType(Scrollable));
+      expect(small.position.maxScrollExtent, greaterThan(0));
+      final min = tester.getSize(find.byType(EmulatorTile).first);
+      expect(min.height, greaterThanOrEqualTo(min.width + 60));
+    });
+
+    testWidgets('more than four tiles scroll and the last row is reachable',
+        (tester) async {
       await pump(tester, tiles: [for (final n in 'ABCDEF'.split('')) t(n, live)]);
       final scrollable = tester.state<ScrollableState>(find.byType(Scrollable));
+      expect(scrollable.position.maxScrollExtent, greaterThan(0));
       scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
       await tester.pump();
       final lastBottom = tester.getBottomLeft(find.byType(EmulatorTile).last).dy;
-      expect(800 - lastBottom, greaterThanOrEqualTo(88));
+      expect(800 - lastBottom, lessThan(40));
     });
   });
 }

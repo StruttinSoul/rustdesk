@@ -25,6 +25,7 @@ import '../widgets/mirpg_remote_theme.dart';
 import '../../common/widgets/aperture_brand.dart';
 import '../widgets/avd_manage_sheets.dart';
 import '../widgets/clipboard_transfer_sheet.dart';
+import '../widgets/computers_hero.dart' show hostDisplayName;
 import '../widgets/emulator_action_sheet.dart';
 export '../widgets/emulator_action_sheet.dart' show AvdCardActions;
 import '../widgets/emulator_tile.dart';
@@ -1411,7 +1412,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final navigationIndex = connectedPcNavigationIndex(activeSection);
     final hostName = _hostName;
     final root = activeSection == kConnectedPcInitialSection;
-    final play = activeSection == ConnectedPcSection.devices;
     final subPage = activeSection == ConnectedPcSection.system ||
         activeSection == ConnectedPcSection.files ||
         activeSection == ConnectedPcSection.powershell;
@@ -1513,7 +1513,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                 switch (activeSection) {
                   ConnectedPcSection.devices ||
                   ConnectedPcSection.screens ||
-                  ConnectedPcSection.pc => hostName,
+                  ConnectedPcSection.pc => hostDisplayName(hostName),
                   ConnectedPcSection.system => 'System',
                   ConnectedPcSection.files => 'Files',
                   ConnectedPcSection.powershell => 'PowerShell',
@@ -1526,7 +1526,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                   switch (activeSection) {
                     ConnectedPcSection.devices => translate('Play'),
                     ConnectedPcSection.pc => translate('PC'),
-                    _ => hostName,
+                    _ => hostDisplayName(hostName),
                   },
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -1562,18 +1562,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           index: sectionIndex,
           children: pages,
         ),
-        floatingActionButton: play &&
-                model.canManageAvds &&
-                widget.ffi.ffiModel.keyboard &&
-                !widget.ffi.ffiModel.viewOnly
-            ? FloatingActionButton.extended(
-                // Compact (40 dp, from the Studio theme); the grid scrolls
-                // past it with bottom clearance.
-                onPressed: () => unawaited(_newAvd()),
-                icon: const Icon(Icons.add),
-                label: Text(translate('New')),
-              )
-            : null,
         // System, Files and PowerShell look like pushed pages (back arrow,
         // no tab bar) but stay in the IndexedStack so their sessions survive.
         bottomNavigationBar: subPage

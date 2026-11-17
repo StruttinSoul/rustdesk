@@ -8,7 +8,15 @@ import 'emulator_tile.dart';
 import 'mirpg_remote_theme.dart';
 
 const double _gridSpacing = 12;
-const double _bottomClearance = 88;
+const double _gridBottomPadding = 8;
+
+/// Height of the "Emulators · n/4 running" header row; it holds the 48 dp
+/// New button.
+const double _headerExtent = kMinInteractiveDimension;
+
+/// The smallest preview, as a share of the tile width (square). Below it the
+/// grid scrolls rather than squash the previews further.
+const double _minPreviewAspect = 1.0;
 
 /// How long a phone-side start request keeps a stopped tile on "Starting"
 /// (the same 120 s the startup screen waits before giving up).
@@ -18,6 +26,25 @@ const Duration kPlayStartRequestHold = Duration(seconds: 120);
 /// name bar, which grows with the text scale.
 double playTabTileExtent(double tileWidth, TextScaler textScaler) =>
     tileWidth * 4 / 3 + textScaler.scale(60);
+
+/// Height of one tile so that [rows] rows plus the header fit in
+/// [bodyHeight]: the natural 3:4 tile when it fits, else shorter down to a
+/// square preview. Never taller than natural, so one or two emulators do not
+/// stretch.
+double playTabFittedTileExtent({
+  required double bodyHeight,
+  required double tileWidth,
+  required TextScaler textScaler,
+  int rows = 2,
+}) {
+  final natural = playTabTileExtent(tileWidth, textScaler);
+  final minimum = tileWidth * _minPreviewAspect + textScaler.scale(60);
+  final available = bodyHeight -
+      _headerExtent -
+      _gridBottomPadding -
+      (rows - 1) * _gridSpacing;
+  return (available / rows).clamp(minimum, natural).toDouble();
+}
 
 /// Distance between the tops of two grid rows for a Play tab [width].
 double playTabRowExtent(double width, TextScaler textScaler) {
@@ -141,7 +168,8 @@ class PlayTabBody extends StatelessWidget {
 
   static const _margin = MirpgRemoteTheme.pageMargin;
 
-  Widget _grid(BuildContext context, int count, IndexedWidgetBuilder builder) {
+  Widget _grid(BuildContext context, int count, double bodyHeight,
+      IndexedWidgetBuilder builder) {
     final textScaler = MediaQuery.textScalerOf(context);
     return SliverPadding(
       padding: const EdgeInsets.symmetric(horizontal: _margin),
@@ -153,7 +181,14 @@ class PlayTabBody extends StatelessWidget {
             crossAxisCount: 2,
             mainAxisSpacing: _gridSpacing,
             crossAxisSpacing: _gridSpacing,
-            mainAxisExtent: playTabTileExtent(tileWidth, textScaler),
+            // Up to four tiles (two rows) are sized to fit the screen; more
+            // scroll at the natural size.
+            mainAxisExtent: count <= 4
+                ? playTabFittedTileExtent(
+                    bodyHeight: bodyHeight,
+                    tileWidth: tileWidth,
+                    textScaler: textScaler)
+                : playTabTileExtent(tileWidth, textScaler),
           ),
           delegate: SliverChildBuilderDelegate(builder, childCount: count),
         );
@@ -252,7 +287,8 @@ class PlayTabBody extends StatelessWidget {
             ),
           ],
           const SizedBox(height: 12),
-          Text(tr('BlueStacks instances appear here when BlueStacks is installed.'),
+          Text(
+              tr('BlueStacks instances appear here when BlueStacks is installed.'),
               style: text.bodySmall?.copyWith(color: palette.textSecondary)),
         ],
       ),
@@ -270,44 +306,67 @@ class PlayTabBody extends StatelessWidget {
         .length;
     Widget box(Widget child, {EdgeInsets? padding}) => SliverToBoxAdapter(
           child: Padding(
-            padding: padding ??
-                const EdgeInsets.fromLTRB(_margin, 8, _margin, 8),
+            padding:
+                padding ?? const EdgeInsets.fromLTRB(_margin, 8, _margin, 8),
             child: child,
           ),
         );
-    return RefreshIndicator(
-      onRefresh: onRefresh,
-      child: CustomScrollView(
-        controller: scrollController,
-        physics: const AlwaysScrollableScrollPhysics(),
-        slivers: [
-          if (!firstLoad && tiles.isNotEmpty)
-            box(Text(
-              '${tr('Emulators')} · ${tr('{$running/${listed.length}} running')}',
-              style: text.titleSmall,
-            ), padding: const EdgeInsets.fromLTRB(_margin, 4, _margin, 8)),
-          if (listError.isNotEmpty) box(_errorCard(context)),
-          if (firstLoad)
-            _grid(context, 4, (context, _) => _skeleton(context))
-          else if (tiles.isEmpty && listError.isEmpty)
-            box(_emptyCard(context))
-          else
-            _grid(context, tiles.length, (context, index) {
-              final data = tiles[index];
-              return EmulatorTile(
-                key: ValueKey(data.id),
-                data: data,
-                tr: tr,
-                onOpen: data.state.canOpen && !data.placeholder
-                    ? () => onOpen(data.id)
-                    : null,
-                onMore: data.placeholder ? null : () => onMore(data.id),
-              );
-            }),
-          const SliverToBoxAdapter(
-              child: SizedBox(height: _bottomClearance)),
-        ],
-      ),
-    );
+    return LayoutBuilder(builder: (context, constraints) {
+      final bodyHeight = constraints.maxHeight;
+      return RefreshIndicator(
+        onRefresh: onRefresh,
+        child: CustomScrollView(
+          controller: scrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            if (!firstLoad && tiles.isNotEmpty)
+              box(
+                SizedBox(
+                  height: _headerExtent,
+                  child: Row(children: [
+                    Expanded(
+                      child: Text(
+                        '${tr('Emulators')} · ${tr('{$running/${listed.length}} running')}',
+                        style: text.titleSmall,
+                      ),
+                    ),
+                    if (onNew != null)
+                      TextButton.icon(
+                        style: TextButton.styleFrom(
+                          minimumSize: const Size(0, kMinInteractiveDimension),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                        ),
+                        onPressed: onNew,
+                        icon: const Icon(Icons.add, size: 20),
+                        label: Text(tr('New')),
+                      ),
+                  ]),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: _margin),
+              ),
+            if (listError.isNotEmpty) box(_errorCard(context)),
+            if (firstLoad)
+              _grid(context, 4, bodyHeight, (context, _) => _skeleton(context))
+            else if (tiles.isEmpty && listError.isEmpty)
+              box(_emptyCard(context))
+            else
+              _grid(context, tiles.length, bodyHeight, (context, index) {
+                final data = tiles[index];
+                return EmulatorTile(
+                  key: ValueKey(data.id),
+                  data: data,
+                  tr: tr,
+                  onOpen: data.state.canOpen && !data.placeholder
+                      ? () => onOpen(data.id)
+                      : null,
+                  onMore: data.placeholder ? null : () => onMore(data.id),
+                );
+              }),
+            const SliverToBoxAdapter(
+                child: SizedBox(height: _gridBottomPadding)),
+          ],
+        ),
+      );
+    });
   }
 }
