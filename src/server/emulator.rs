@@ -14,6 +14,8 @@ pub mod avd_files;
 #[cfg(windows)]
 pub mod avd_launch_windows;
 #[cfg(windows)]
+pub mod avd_settings;
+#[cfg(windows)]
 pub mod avd_video;
 #[cfg(windows)]
 pub mod bluestacks;
@@ -21,6 +23,8 @@ pub mod bluestacks;
 pub mod boot_windows;
 #[cfg(windows)]
 pub mod eco_fps;
+#[cfg(windows)]
+mod emulator_power;
 #[cfg(windows)]
 pub mod gateway_management;
 #[cfg(windows)]

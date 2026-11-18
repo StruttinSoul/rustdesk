@@ -9,6 +9,7 @@
 use super::{
     avd_files::{valid_avd_name, AvdEntry, AvdHome, CLONE_HEADROOM_BYTES},
     avd_launch_windows,
+    avd_settings::AvdSettings,
     guest_runtime::{adb_command, adb_devices},
     AdbEndpoint, EmulatorCapabilities, EmulatorProvider, EmulatorRuntimeState, EmulatorState,
     EmulatorTarget, ProviderId,
@@ -270,6 +271,7 @@ struct Instance {
     guest: Option<(String, Probe)>,
 }
 
+#[derive(Clone)]
 pub struct AvdProvider {
     home: AvdHome,
     system: Arc<dyn AvdSystem>,
@@ -467,6 +469,72 @@ impl AvdProvider {
         avd_launch_windows::set_window_visible(name, visible)
     }
 
+    /// The settings in `name`'s configuration, the chosen ones it does not
+    /// have yet (they apply at its next start), and whether it is running.
+    pub fn settings(&self, name: &str) -> ResultType<(AvdSettings, AvdSettings, bool)> {
+        let (instance, _) = self.instance(name)?;
+        let (current, chosen) = self.home.settings(name)?;
+        Ok((current, chosen.unapplied(&current), instance.running))
+    }
+
+    /// Saves `change` for `name`. A stopped emulator gets it in its
+    /// configuration at once; a running one (or one just started) at its
+    /// next start, which is when true is returned.
+    pub fn save_settings(&self, name: &str, change: AvdSettings) -> ResultType<bool> {
+        // Held so a start never reads the configuration while it is written.
+        let starts = self.reservations();
+        let (instance, others) = self.instance(name)?;
+        if instance.entry.clone.is_some()
+            || others
+                .iter()
+                .any(|other| other.entry.clone.as_ref().map_or(false, |c| c.source == name))
+        {
+            bail!("{name} is being copied; wait for the copy in progress to finish")
+        }
+        self.check_not_cloning(name)?;
+        self.home.check_ini_path(name)?;
+        let running = instance.running
+            || starts
+                .iter()
+                .any(|(at, started, _)| started == name && at.elapsed() < START_RESERVATION);
+        let chosen = self.home.choose_settings(name, change)?;
+        if running {
+            log::info!("Saved the settings of {name} for its next start: {}", chosen.to_json());
+        } else {
+            let applied = self.home.apply_settings(name)?;
+            log::info!("Saved the settings of {name}: {}", applied.unwrap_or_default());
+        }
+        Ok(running)
+    }
+
+    /// Stops `name` the usual way and starts it again (applying its chosen
+    /// settings) on a thread of its own. One restart per emulator at a time.
+    pub fn restart_in_background(&self, name: &str) -> ResultType<thread::JoinHandle<()>> {
+        let (instance, _) = self.instance(name)?;
+        if !instance.running {
+            bail!("{name} is not running")
+        }
+        if !restarting().insert(name.to_owned()) {
+            bail!("{name} is already restarting")
+        }
+        let provider = self.clone();
+        let target = to_target(&instance);
+        let owned = name.to_owned();
+        let spawned = thread::Builder::new()
+            .name("avd-restart".to_owned())
+            .spawn(move || {
+                match provider.restart(&target) {
+                    Ok(()) => log::info!("Restarted Android Emulator {owned} on request"),
+                    Err(error) => log::warn!("Restarting Android Emulator {owned} failed: {error}"),
+                }
+                restarting().remove(&owned);
+            });
+        spawned.map_err(|error| {
+            restarting().remove(name);
+            error.into()
+        })
+    }
+
     /// Free space on the emulator folder's drive, less what the copies in
     /// progress are still to write.
     pub fn free_disk_bytes(&self) -> ResultType<u64> {
@@ -603,6 +671,13 @@ impl AvdProvider {
     }
 }
 
+/// Emulators a "Save and restart" is stopping and starting again.
+fn restarting() -> std::sync::MutexGuard<'static, BTreeSet<String>> {
+    static RESTARTING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    // A plain set: a panicking holder leaves nothing half-updated.
+    RESTARTING.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn state(instance: &Instance) -> EmulatorState {
     match &instance.guest {
         Some((_, probe)) if probe.booted => EmulatorState::Ready,
@@ -680,16 +755,15 @@ impl EmulatorProvider for AvdProvider {
         self.home.check_ini_path(name)?;
         starts.retain(|(at, _, _)| at.elapsed() < START_RESERVATION);
         let reserved = starts.iter().map(|(_, _, mb)| u64::from(*mb)).sum();
-        let ram_mb = match instance.entry.ram_mb {
+        let ram_mb = match self.home.start_ram_mb(name)?.unwrap_or(instance.entry.ram_mb) {
             0 => DEFAULT_RAM_MB,
             ram_mb => ram_mb,
         };
         if !memory_allows(self.system.available_memory_mb(), ram_mb, reserved) {
             bail!("Not enough free memory on atlas to start {name}")
         }
-        if let Some(old) = self.home.ensure_managed_screen(name)? {
-            let (width, height) = super::avd_files::MANAGED_SCREEN;
-            log::info!("Changed the screen of {name} from {old} to {width}x{height}");
+        if let Some(change) = self.home.apply_settings(name)? {
+            log::info!("Applied the settings of {name} before its start: {change}");
         }
         self.system.launch(name)?;
         self.system.watch_exit(name, true);
@@ -1064,6 +1138,139 @@ pub(crate) mod tests {
         assert!(new.lines().any(|l| l == "hw.lcd.height=2208"), "{new}");
         assert!(new.lines().any(|l| l == "hw.lcd.width=1080"), "{new}");
         assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_1"]);
+    }
+
+    fn settings_change(ram: u32, cores: u32, screen: (u32, u32)) -> AvdSettings {
+        AvdSettings::requested(ram, cores, screen.0, screen.1).unwrap()
+    }
+
+    fn config_of(root: &TempRoot, name: &str) -> String {
+        std::fs::read_to_string(root.0.join(format!("{name}.avd")).join("config.ini")).unwrap()
+    }
+
+    #[test]
+    fn settings_of_a_stopped_emulator_apply_at_once() {
+        let root = temp_root("settings-stopped");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        let provider = provider(&root, &system);
+        let pending = provider.save_settings("Maple_1", settings_change(6144, 6, (1080, 2400))).unwrap();
+        assert!(!pending);
+        let config = config_of(&root, "Maple_1");
+        for line in ["hw.ramSize=6144", "hw.cpu.ncore=6", "hw.lcd.width=1080", "hw.lcd.height=2400"] {
+            assert!(config.lines().any(|l| l == line), "{line} in {config}");
+        }
+        let (current, unapplied, running) = provider.settings("Maple_1").unwrap();
+        assert_eq!(current.ram_mb, Some(6144));
+        assert!(unapplied.is_empty());
+        assert!(!running);
+        // The chosen screen survives a start (no forced 2208).
+        provider.start(&target("Maple_1")).unwrap();
+        assert!(config_of(&root, "Maple_1").lines().any(|l| l == "hw.lcd.height=2400"));
+    }
+
+    #[test]
+    fn settings_of_a_running_emulator_wait_for_its_next_start() {
+        let root = temp_root("settings-running");
+        create(&root, "Maple_1");
+        let before = config_of(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        system.run("Maple_1", Some("emulator-5554"));
+        let provider = provider(&root, &system);
+        assert!(provider.save_settings("Maple_1", settings_change(8192, 0, (0, 0))).unwrap());
+        assert_eq!(config_of(&root, "Maple_1"), before, "a running emulator's config is never written");
+        let (current, unapplied, running) = provider.settings("Maple_1").unwrap();
+        assert_eq!(current.ram_mb, Some(4096));
+        assert_eq!(unapplied, AvdSettings { ram_mb: Some(8192), ..Default::default() });
+        assert!(running);
+        provider.stop(&target("Maple_1")).unwrap();
+        provider.start(&target("Maple_1")).unwrap();
+        assert!(config_of(&root, "Maple_1").lines().any(|l| l == "hw.ramSize=8192"));
+        assert!(provider.settings("Maple_1").unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn a_start_checks_memory_for_the_chosen_ram_before_writing() {
+        let root = temp_root("settings-memory");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(7_000);
+        system.run("Maple_1", Some("emulator-5554"));
+        let provider = provider(&root, &system);
+        provider.save_settings("Maple_1", settings_change(8192, 0, (0, 0))).unwrap();
+        provider.stop(&target("Maple_1")).unwrap();
+        let before = config_of(&root, "Maple_1");
+        let error = provider.start(&target("Maple_1")).unwrap_err().to_string();
+        assert_eq!(error, "Not enough free memory on atlas to start Maple_1");
+        assert_eq!(config_of(&root, "Maple_1"), before);
+        assert!(system.launched.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_copy_in_progress_refuses_new_settings() {
+        let root = temp_root("settings-copy");
+        create(&root, "Maple_1");
+        cloning(&root, "Maple_2", "Maple_1");
+        let before = config_of(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        let provider = provider(&root, &system);
+        for name in ["Maple_1", "Maple_2"] {
+            let error = provider.save_settings(name, settings_change(2048, 0, (0, 0))).unwrap_err().to_string();
+            assert!(error.contains("copy in progress"), "{error}");
+        }
+        assert_eq!(config_of(&root, "Maple_1"), before);
+    }
+
+    #[test]
+    fn save_and_restart_stops_and_starts_with_the_new_settings() {
+        let root = temp_root("settings-restart");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        system.run("Maple_1", Some("emulator-5560"));
+        let provider = provider(&root, &system);
+        assert!(provider.save_settings("Maple_1", settings_change(0, 2, (0, 0))).unwrap());
+        provider.restart_in_background("Maple_1").unwrap().join().unwrap();
+        assert_eq!(*system.killed.lock().unwrap(), vec!["emulator-5560"]);
+        assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_1"]);
+        assert!(config_of(&root, "Maple_1").lines().any(|l| l == "hw.cpu.ncore=2"));
+        // Not running any more in the fake: a second restart is refused.
+        assert!(provider.restart_in_background("Maple_1").is_err());
+    }
+
+    /// Saves `APERTURE_TRIAL_SETTINGS` (`ram,cores,widthxheight`) for the
+    /// running trial emulator, checks they wait for the next start, stops it
+    /// and applies them as a start does. The caller starts it again.
+    #[test]
+    #[ignore = "Stops the running Aperture_Trial_Play35 and rewrites its config.ini"]
+    fn real_trial_settings_wait_for_the_next_start() {
+        const TRIAL: &str = "Aperture_Trial_Play35";
+        let wanted = std::env::var("APERTURE_TRIAL_SETTINGS").unwrap();
+        let mut parts = wanted.split(',');
+        let ram: u32 = parts.next().unwrap().parse().unwrap();
+        let cores: u32 = parts.next().unwrap().parse().unwrap();
+        let (width, height) = parts.next().unwrap().split_once('x').unwrap();
+        let change = AvdSettings::requested(ram, cores, width.parse().unwrap(), height.parse().unwrap()).unwrap();
+        let provider = AvdProvider::detect().unwrap().unwrap();
+        let config_path = provider.home().root().join(format!("{TRIAL}.avd")).join("config.ini");
+        let before = std::fs::read_to_string(&config_path).unwrap();
+        let (current, _, running) = provider.settings(TRIAL).unwrap();
+        assert!(running, "start the trial first");
+        assert!(provider.save_settings(TRIAL, change).unwrap(), "a running emulator waits");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+        let (_, pending, _) = provider.settings(TRIAL).unwrap();
+        eprintln!("RESULT running: current {current:?}, pending {pending:?}");
+        assert_eq!(pending, change.unapplied(&current));
+        let target = provider
+            .discover()
+            .unwrap()
+            .into_iter()
+            .find(|target| target.stable_id == stable_id(TRIAL))
+            .unwrap();
+        provider.stop(&target).unwrap();
+        let applied = provider.home().apply_settings(TRIAL).unwrap();
+        let (now, pending, running) = provider.settings(TRIAL).unwrap();
+        eprintln!("RESULT stopped and applied: {applied:?}; config {now:?}, pending {pending:?}, running {running}");
+        assert!(!running && pending.is_empty());
+        assert_eq!(now, current.merged(change));
     }
 
     #[test]

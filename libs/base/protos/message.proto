@@ -1134,6 +1134,11 @@ message EmulatorHostRequest {
   bool gateway_active_sessions_known = 20;
   string new_name = 21;
   bool window_visible = 22;
+  uint32 avd_ram_mb = 23;
+  uint32 avd_cpu_cores = 24;
+  uint32 avd_screen_width = 25;
+  uint32 avd_screen_height = 26;
+  bool avd_restart = 27;
 }
 
 message EmulatorHostResponse {

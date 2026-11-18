@@ -261,10 +261,15 @@ pub fn handle_request_scoped(
             ),
             "process_end_failed",
         ),
-        "avd_create" | "avd_clone" | "avd_rename" | "avd_delete" | "avd_window" => avd_value(
+        "avd_create" | "avd_clone" | "avd_rename" | "avd_delete" | "avd_window"
+        | "avd_settings_get" | "avd_settings_set" => avd_value(
             request,
             &super::avd::AvdProvider::for_management(),
         ),
+        "emulator_reboot" => match super::emulator_power::reboot(&request.component) {
+            Ok(message) => serde_json::json!({"ok": true, "accepted": true, "message": message}),
+            Err(error) => avd_failure("emulator_reboot_failed", error),
+        },
         "emulator_shutdown" => match super::shutdown_windows::request(&request.component) {
             Ok(message) => serde_json::json!({"ok": true, "accepted": true, "message": message}),
             Err(error) => serde_json::json!({"ok": false, "accepted": true, "error_code": "emulator_shutdown_failed", "error": error.to_string()}),
@@ -353,6 +358,29 @@ fn avd_clone(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) 
     Ok("Cloning\u{2026}".to_owned())
 }
 
+/// Saves the settings an `avd_settings_set` asks for; with `avd_restart` a
+/// running emulator is stopped and started again with them.
+fn avd_settings_set(
+    request: &EmulatorHostRequest,
+    provider: &super::avd::AvdProvider,
+) -> ResultType<String> {
+    let name = avd_name(&request.component)?;
+    let change = super::avd_settings::AvdSettings::requested(
+        request.avd_ram_mb,
+        request.avd_cpu_cores,
+        request.avd_screen_width,
+        request.avd_screen_height,
+    )?;
+    if !provider.save_settings(name, change)? {
+        return Ok(format!("Saved the settings of {name}"));
+    }
+    if !request.avd_restart {
+        return Ok(format!("Saved; {name} uses them from its next start"));
+    }
+    provider.restart_in_background(name)?;
+    Ok(format!("Restarting {name} with the new settings"))
+}
+
 /// Runs one managed-emulator action against `provider`.
 fn avd_value(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) -> serde_json::Value {
     let ok = |message: String| serde_json::json!({"ok": true, "accepted": true, "message": message});
@@ -390,6 +418,21 @@ fn avd_value(request: &EmulatorHostRequest, provider: &super::avd::AvdProvider) 
                 "Emulator window hidden on the PC".to_owned()
             }),
             Err(error) => avd_failure("avd_window_failed", error),
+        },
+        "avd_settings_get" => match avd_name(&request.component).and_then(|name| provider.settings(name)) {
+            Ok((current, pending, running)) => serde_json::json!({
+                "ok": true,
+                "avd_settings": {
+                    "current": current.to_json(),
+                    "pending": pending.to_json(),
+                    "running": running,
+                },
+            }),
+            Err(error) => avd_failure("avd_settings_failed", error),
+        },
+        "avd_settings_set" => match avd_settings_set(request, provider) {
+            Ok(message) => ok(message),
+            Err(error) => avd_failure("avd_settings_failed", error),
         },
         _ => avd_failure("unsupported_action", "Unknown host management action"),
     }
@@ -880,6 +923,41 @@ mod tests {
             name,
             name,
         )
+    }
+
+    #[test]
+    fn avd_settings_are_reported_and_saved() {
+        use super::super::avd::tests::{create, temp_root, FakeSystem};
+        let root = temp_root("host-settings");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        system.run("Maple_1", Some("emulator-5554"));
+        let provider = avd_provider(&root, &system);
+        let mut set = avd_request("avd_settings_set", "avd:Maple_1", "");
+        set.avd_ram_mb = 6144;
+        set.avd_screen_width = 1080;
+        set.avd_screen_height = 2400;
+        let value = avd_value(&set, &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        assert!(value["message"].as_str().unwrap().contains("next start"), "{value}");
+        let value = avd_value(&avd_request("avd_settings_get", "avd:Maple_1", ""), &provider);
+        assert_eq!(value["ok"], true, "{value}");
+        let settings = &value["avd_settings"];
+        assert_eq!(settings["running"], true);
+        assert_eq!(
+            settings["current"],
+            serde_json::json!({"ram_mb": 4096, "cpu_cores": 4, "screen_width": 1080, "screen_height": 2208})
+        );
+        assert_eq!(
+            settings["pending"],
+            serde_json::json!({"ram_mb": 6144, "screen_width": 1080, "screen_height": 2400})
+        );
+        set.avd_ram_mb = 5000;
+        let value = avd_value(&set, &provider);
+        assert_eq!(value["ok"], false, "{value}");
+        assert_eq!(value["error_code"], "avd_settings_failed");
+        let value = avd_value(&avd_request("avd_settings_get", "avd:Missing", ""), &provider);
+        assert_eq!(value["ok"], false, "{value}");
     }
 
     #[test]

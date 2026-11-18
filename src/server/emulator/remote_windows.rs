@@ -78,6 +78,18 @@ fn targets() -> (Vec<LocalTarget>, Vec<String>) {
     (found, errors)
 }
 
+/// The provider and current listing of emulator `target_id`.
+pub(super) fn find_target(
+    target_id: &str,
+) -> ResultType<(Arc<dyn EmulatorProvider>, EmulatorTarget)> {
+    let (targets, _) = targets();
+    targets
+        .into_iter()
+        .find(|local| local.target.stable_id == target_id)
+        .map(|local| (local.provider, local.target))
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("This emulator no longer exists"))
+}
+
 pub fn inventory(
     request_id: u64,
     operation_session_identity: &str,
@@ -135,6 +147,8 @@ pub fn inventory(
             "host.window_focus.v1".to_owned(),
             "host.emulator_shutdown.v1".to_owned(),
             "host.avd_manage.v1".to_owned(),
+            "host.emulator_power.v1".to_owned(),
+            "host.avd_settings.v1".to_owned(),
             "host.process_end".to_owned(),
             "host.shell_restart.v1".to_owned(),
             "host.process_identity.v2".to_owned(),
@@ -220,6 +234,10 @@ pub(super) fn running_adb_server() -> Option<PathBuf> {
                 && process.exe().is_file())
             .then(|| process.exe().to_path_buf())
         })
+}
+
+pub(super) fn adb_path() -> ResultType<PathBuf> {
+    adb_executable()
 }
 
 fn adb_executable() -> ResultType<PathBuf> {
@@ -2299,6 +2317,145 @@ mod tests {
         trial_shell(serial, &["shell", "settings", "get", "system", key])
             .trim()
             .to_owned()
+    }
+
+    /// What a session sent while Android rebooted: frames, the statuses in
+    /// order, and when (since the reboot) it failed, if it did.
+    fn watch_reboot(
+        runtime: &TestRuntime,
+        events: &mut Events,
+        serial: &str,
+        since: Instant,
+    ) -> (usize, Vec<String>, Option<Duration>) {
+        let (mut frames, mut statuses, mut failed) = (0, Vec::new(), None);
+        let mut went_down = false;
+        let mut booted_at: Option<Instant> = None;
+        while since.elapsed() < Duration::from_secs(150)
+            && booted_at.map_or(true, |at| at.elapsed() < Duration::from_secs(20))
+        {
+            match next_event(runtime, events, Duration::from_millis(500)) {
+                Some(GuestEvent::Frame(_)) => frames += 1,
+                Some(GuestEvent::Response(response)) => {
+                    if let Some(base::message_proto::emulator_response::Union::Status(status)) =
+                        response.union
+                    {
+                        let state = status.state.enum_value_or_default();
+                        statuses.push(format!(
+                            "{:.1}s {state:?}/{} {}",
+                            since.elapsed().as_secs_f32(),
+                            status.phase,
+                            status.error
+                        ));
+                        if state == EmulatorSessionState::EmulatorFailed {
+                            failed = Some(since.elapsed());
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if booted_at.is_none() {
+                let booted =
+                    trial_shell(serial, &["shell", "getprop", "sys.boot_completed"]).trim() == "1";
+                went_down |= !booted;
+                if went_down && booted {
+                    statuses.push(format!("{:.1}s Android booted", since.elapsed().as_secs_f32()));
+                    booted_at = Some(Instant::now());
+                }
+            }
+        }
+        (frames, statuses, failed)
+    }
+
+    /// Whether a tap through `session` at the stream centre changes the
+    /// Settings screen.
+    fn tap_lands(
+        runtime: &TestRuntime,
+        events: &mut Events,
+        session: &GuestSession,
+        serial: &str,
+        size: (u32, u32),
+    ) -> bool {
+        trial_open_settings(serial);
+        let size = force_rotation(runtime, events, serial, size, 0);
+        let before = trial_screen_texts(serial);
+        tap(session, size);
+        pump(runtime, events, Duration::from_millis(1500));
+        before != trial_screen_texts(serial)
+    }
+
+    #[test]
+    #[ignore = "Reboots Android in the running Aperture_Trial_Play35 emulator while streaming it"]
+    fn real_trial_stream_recovers_after_reboot() {
+        let serial = trial_serial();
+        capture_log();
+        let runtime = test_runtime();
+        let (sender, mut events) =
+            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
+        let session = GuestSession::start(trial_select(), sender).unwrap();
+        let size = wait_stream_ready(&runtime, &mut events, Duration::from_secs(15), None)
+            .expect("no stream_ready before the reboot");
+        let (frames, _) = pump(&runtime, &mut events, Duration::from_secs(2));
+        eprintln!("RESULT before reboot: stream {size:?}, {frames} frames in 2 s");
+
+        let rebooted = Instant::now();
+        let message = super::super::emulator_power::reboot(&format!("avd:{TRIAL_AVD}")).unwrap();
+        eprintln!("RESULT reboot answered in {:?}: {message}", rebooted.elapsed());
+        let (frames, statuses, failed) = watch_reboot(&runtime, &mut events, &serial, rebooted);
+        eprintln!("RESULT during reboot: {frames} frames, failed at {failed:?}");
+        for status in &statuses {
+            eprintln!("RESULT   status {status}");
+        }
+        let qemu_alive = running_avd_names_now().contains(TRIAL_AVD);
+        eprintln!("RESULT emulator process kept running: {qemu_alive}");
+        assert!(qemu_alive, "a reboot must not end the emulator");
+
+        if failed.is_none() {
+            // The same session: frames again, and input.
+            thread::sleep(Duration::from_secs(5));
+            let (frames, keys) = pump(&runtime, &mut events, Duration::from_secs(3));
+            let landed = tap_lands(&runtime, &mut events, &session, &serial, size);
+            eprintln!("RESULT same session after boot: {frames} frames ({keys} key) in 3 s, tap landed={landed}");
+            close(&runtime, session, events);
+            assert!(frames > 0 && landed, "the session did not recover");
+            return;
+        }
+        drop(session);
+        // The phone reopens the emulator when its session fails: a new select.
+        let reopened = Instant::now();
+        let (sender, mut events) =
+            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
+        let session = GuestSession::start(trial_select(), sender).unwrap();
+        let size = wait_stream_ready(&runtime, &mut events, Duration::from_secs(120), None)
+            .expect("no stream_ready after the reboot");
+        let ready_after = reopened.elapsed();
+        let (frames, keys) = pump(&runtime, &mut events, Duration::from_secs(3));
+        // Android is still busy for a minute or two after a boot (load
+        // average above 15), so a first tap can go unanswered.
+        let landed = (1..=3).any(|attempt| {
+            let landed = tap_lands(&runtime, &mut events, &session, &serial, size);
+            eprintln!("RESULT reopened session tap {attempt} landed={landed}");
+            landed || {
+                pump(&runtime, &mut events, Duration::from_secs(10));
+                false
+            }
+        });
+        eprintln!(
+            "RESULT reopened session: stream_ready after {ready_after:?} ({:?} after the reboot), {frames} frames ({keys} key) in 3 s, tap landed={landed}",
+            rebooted.elapsed()
+        );
+        close(&runtime, session, events);
+        assert!(frames > 0 && landed, "the reopened session did not stream");
+    }
+
+    fn running_avd_names_now() -> std::collections::BTreeSet<String> {
+        let mut system = hbb_common::sysinfo::System::new();
+        system.refresh_processes();
+        system
+            .processes()
+            .values()
+            .filter_map(|process| super::super::avd::launched_avd(process.name(), process.cmd()))
+            .collect()
     }
 
     #[test]

@@ -120,7 +120,7 @@ async fn run<E>(
 fn is_read_only(action: &str) -> bool {
     matches!(
         action,
-        "status" | "windows_list" | "phone_workspace_support" | "gateway_status"
+        "status" | "windows_list" | "phone_workspace_support" | "gateway_status" | "avd_settings_get"
     )
 }
 

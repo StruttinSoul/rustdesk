@@ -4,6 +4,7 @@
 //! This module only touches that folder: no processes, ADB or network. Callers
 //! check that an emulator is not running before they clone, rename or delete.
 
+use super::avd_settings::{self, AvdSettings};
 use hbb_common::{anyhow::Context, bail, config::Config, log, ResultType};
 use std::{
     collections::BTreeSet,
@@ -243,17 +244,35 @@ fn set_key(text: &str, key: &str, value: &str) -> String {
 /// area above the in-game bar (384x784 dp) without black bars.
 pub const MANAGED_SCREEN: (u32, u32) = (1080, 2208);
 
-/// `config` with `MANAGED_SCREEN` as its LCD size, or None if it has it already.
-fn with_managed_screen(config: &str) -> Option<String> {
-    let width = MANAGED_SCREEN.0.to_string();
-    let height = MANAGED_SCREEN.1.to_string();
-    if get_key(config, "hw.lcd.width") == Some(width.as_str())
-        && get_key(config, "hw.lcd.height") == Some(height.as_str())
-    {
+/// The memory, CPU cores and screen a `config.ini` gives the emulator.
+fn settings_in(config: &str) -> AvdSettings {
+    let number = |key: &str| Some(leading_number(get_key(config, key))).filter(|n| *n > 0);
+    AvdSettings {
+        ram_mb: number("hw.ramSize"),
+        cores: number("hw.cpu.ncore"),
+        screen: number("hw.lcd.width").zip(number("hw.lcd.height")),
+    }
+}
+
+/// `config` with `settings` written in, or None if it has them already. Other
+/// lines and the line endings are kept.
+fn with_settings(config: &str, settings: &AvdSettings) -> Option<String> {
+    let change = settings.unapplied(&settings_in(config));
+    if change.is_empty() {
         return None;
     }
-    let config = set_key(config, "hw.lcd.width", &width);
-    Some(set_key(&config, "hw.lcd.height", &height))
+    let mut config = config.to_owned();
+    if let Some(ram) = change.ram_mb {
+        config = set_key(&config, "hw.ramSize", &ram.to_string());
+    }
+    if let Some(cores) = change.cores {
+        config = set_key(&config, "hw.cpu.ncore", &cores.to_string());
+    }
+    if let Some((width, height)) = change.screen {
+        config = set_key(&config, "hw.lcd.width", &width.to_string());
+        config = set_key(&config, "hw.lcd.height", &height.to_string());
+    }
+    Some(config)
 }
 
 /// `text` without any `key=` line; other lines and the line endings are kept.
@@ -497,30 +516,66 @@ impl AvdHome {
         Ok(dir)
     }
 
-    /// Gives a stopped emulator's `config.ini` the managed screen size. Returns
-    /// the size it had when it was changed. Callers check it is not running.
-    pub fn ensure_managed_screen(&self, name: &str) -> ResultType<Option<String>> {
+    /// The settings chosen for `name` on the phone; a damaged choice is
+    /// logged once and left out.
+    fn chosen_in(&self, dir: &Path, name: &str) -> AvdSettings {
+        avd_settings::load(dir).unwrap_or_else(|error| {
+            if self.warn_once(format!("settings:{name}")) {
+                log::warn!("Ignoring the saved settings of {name}: {error}");
+            }
+            AvdSettings::default()
+        })
+    }
+
+    /// The settings in `name`'s `config.ini`, and the ones chosen for it.
+    pub fn settings(&self, name: &str) -> ResultType<(AvdSettings, AvdSettings)> {
+        let dir = self.managed_dir(name)?;
+        let config = fs::read_to_string(dir.join("config.ini"))
+            .with_context(|| format!("Cannot read the configuration of {name}"))?;
+        Ok((settings_in(&config), self.chosen_in(&dir, name)))
+    }
+
+    /// Adds `change` to the settings chosen for `name` and returns them all.
+    /// Its `config.ini` is not touched here.
+    pub fn choose_settings(&self, name: &str, change: AvdSettings) -> ResultType<AvdSettings> {
+        let dir = self.managed_dir(name)?;
+        let chosen = self.chosen_in(&dir, name).merged(change);
+        avd_settings::store(&dir, &chosen)?;
+        Ok(chosen)
+    }
+
+    /// Writes the chosen settings into a stopped emulator's `config.ini`, with
+    /// the managed screen when no screen was chosen. Returns what changed.
+    /// Callers check it is not running.
+    pub fn apply_settings(&self, name: &str) -> ResultType<Option<String>> {
         let dir = self.managed_dir(name)?;
         let path = dir.join("config.ini");
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Cannot read the configuration of {name}"))?;
-        let Some(updated) = with_managed_screen(&text) else {
+        let chosen = self.chosen_in(&dir, name);
+        let wanted = AvdSettings {
+            screen: chosen.screen.or(Some(MANAGED_SCREEN)),
+            ..chosen
+        };
+        let before = settings_in(&text);
+        let Some(updated) = with_settings(&text, &wanted) else {
             return Ok(None);
         };
-        let old = format!(
-            "{}x{}",
-            get_key(&text, "hw.lcd.width").unwrap_or("?"),
-            get_key(&text, "hw.lcd.height").unwrap_or("?")
-        );
         // Replaced in one step, so the emulator never reads a half-written file.
         let temp = dir.join("config.ini.aperture-tmp");
         if let Err(e) = fs::write(&temp, updated).and_then(|()| fs::rename(&temp, &path)) {
             if let Err(cleanup) = fs::remove_file(&temp) {
                 log::trace!("Removing {}: {cleanup}", temp.display());
             }
-            return Err(e).with_context(|| format!("Cannot set the screen size of {name}"));
+            return Err(e).with_context(|| format!("Cannot change the settings of {name}"));
         }
-        Ok(Some(old))
+        Ok(Some(avd_settings::describe_change(&before, &wanted.unapplied(&before))))
+    }
+
+    /// The memory `name` starts with: the chosen one, else its `config.ini`'s.
+    pub fn start_ram_mb(&self, name: &str) -> ResultType<Option<u32>> {
+        let dir = self.managed_dir(name)?;
+        Ok(self.chosen_in(&dir, name).ram_mb)
     }
 
     fn exists(&self, name: &str) -> bool {
@@ -960,6 +1015,10 @@ mod tests {
         cleanup(home);
     }
 
+    fn managed_screen_only() -> AvdSettings {
+        AvdSettings { screen: Some(MANAGED_SCREEN), ..Default::default() }
+    }
+
     #[test]
     fn managed_screen_rewrites_only_the_lcd_size() {
         let old = "hw.lcd.density=420
@@ -968,7 +1027,7 @@ hw.lcd.vsync=60
 hw.lcd.width=1080
 ";
         assert_eq!(
-            with_managed_screen(old).as_deref(),
+            with_settings(old, &managed_screen_only()).as_deref(),
             Some("hw.lcd.density=420
 hw.lcd.height=2208
 hw.lcd.vsync=60
@@ -981,7 +1040,7 @@ hw.lcd.height=1280
 b=2
 ";
         assert_eq!(
-            with_managed_screen(wide).as_deref(),
+            with_settings(wide, &managed_screen_only()).as_deref(),
             Some("a=1
 hw.lcd.width=1080
 hw.lcd.height=2208
@@ -989,16 +1048,16 @@ b=2
 ")
         );
         assert_eq!(
-            with_managed_screen("a=1
-").as_deref(),
+            with_settings("a=1
+", &managed_screen_only()).as_deref(),
             Some("a=1
 hw.lcd.width=1080
 hw.lcd.height=2208
 ")
         );
-        assert_eq!(with_managed_screen("hw.lcd.width = 1080
+        assert_eq!(with_settings("hw.lcd.width = 1080
 hw.lcd.height=2208
-"), None);
+", &managed_screen_only()), None);
     }
 
     #[test]
@@ -1008,10 +1067,13 @@ hw.lcd.height=2208
         let config = dir.join("config.ini");
         let old = read(&config).replace("hw.lcd.height=2208", "hw.lcd.height=2400");
         fs::write(&config, &old).unwrap();
-        assert_eq!(home.ensure_managed_screen("Maple_1").unwrap().as_deref(), Some("1080x2400"));
+        assert_eq!(
+            home.apply_settings("Maple_1").unwrap().as_deref(),
+            Some("screen 1080x2400 -> 1080x2208")
+        );
         let new = read(&config);
         assert_eq!(new, old.replace("hw.lcd.height=2400", "hw.lcd.height=2208"));
-        assert_eq!(home.ensure_managed_screen("Maple_1").unwrap(), None);
+        assert_eq!(home.apply_settings("Maple_1").unwrap(), None);
         assert_eq!(read(&config), new);
         let leftovers: Vec<_> = fs::read_dir(&dir)
             .unwrap()
@@ -1020,7 +1082,39 @@ hw.lcd.height=2208
             .filter(|n| n.contains("tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
-        assert!(home.ensure_managed_screen("../x").is_err());
+        assert!(home.apply_settings("../x").is_err());
+        cleanup(home);
+    }
+
+    #[test]
+    fn chosen_settings_are_written_only_when_applied() {
+        let home = temp_home("chosen");
+        let dir = make_source(&home, "Maple_1");
+        let config = dir.join("config.ini");
+        let old = read(&config);
+        let (current, chosen) = home.settings("Maple_1").unwrap();
+        assert_eq!(
+            current,
+            AvdSettings { ram_mb: Some(4096), cores: Some(4), screen: Some((1080, 2208)) }
+        );
+        assert!(chosen.is_empty());
+        let change = AvdSettings::requested(6144, 0, 1080, 2400).unwrap();
+        home.choose_settings("Maple_1", change).unwrap();
+        home.choose_settings("Maple_1", AvdSettings::requested(0, 6, 0, 0).unwrap()).unwrap();
+        assert_eq!(read(&config), old, "choosing never writes config.ini");
+        let (_, chosen) = home.settings("Maple_1").unwrap();
+        assert_eq!(
+            chosen,
+            AvdSettings { ram_mb: Some(6144), cores: Some(6), screen: Some((1080, 2400)) }
+        );
+        assert_eq!(home.start_ram_mb("Maple_1").unwrap(), Some(6144));
+        let applied = home.apply_settings("Maple_1").unwrap().unwrap();
+        assert!(applied.contains("4096 -> 6144 MB"), "{applied}");
+        let expected = set_key(&set_key(&set_key(&old, "hw.ramSize", "6144"), "hw.cpu.ncore", "6"), "hw.lcd.height", "2400");
+        assert_eq!(read(&config), expected, "a chosen screen is kept, other lines too");
+        assert_eq!(home.apply_settings("Maple_1").unwrap(), None);
+        let entry = home.list().unwrap().into_iter().find(|e| e.name == "Maple_1").unwrap();
+        assert_eq!((entry.ram_mb, entry.cores), (6144, 6));
         cleanup(home);
     }
 
@@ -1033,8 +1127,10 @@ hw.lcd.height=2208
         let config = dir.join("config.ini");
         let old = read(&config).replace("hw.lcd.height=2208", "hw.lcd.height=2400");
         fs::write(&config, &old).unwrap();
-        assert!(home.ensure_managed_screen("Dev_1").is_err());
+        assert!(home.apply_settings("Dev_1").is_err());
+        assert!(home.choose_settings("Dev_1", AvdSettings::requested(2048, 0, 0, 0).unwrap()).is_err());
         assert_eq!(read(&config), old);
+        assert!(!dir.join(avd_settings::SETTINGS_FILE).exists());
         cleanup(outer);
     }
 
@@ -1043,7 +1139,7 @@ hw.lcd.height=2208
     #[ignore = "Rewrites the stopped Aperture_Trial_Play35 config.ini"]
     fn real_trial_gets_the_managed_screen() {
         let home = AvdHome::new(AvdHome::default_root());
-        let old = home.ensure_managed_screen("Aperture_Trial_Play35").unwrap();
+        let old = home.apply_settings("Aperture_Trial_Play35").unwrap();
         eprintln!("RESULT trial screen was {old:?}");
         let config = read(home.root().join("Aperture_Trial_Play35.avd").join("config.ini"));
         assert_eq!(get_key(&config, "hw.lcd.width"), Some("1080"));

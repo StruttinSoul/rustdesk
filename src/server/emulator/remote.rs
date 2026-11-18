@@ -45,6 +45,21 @@ pub fn valid_avd_management(host: &base::message_proto::EmulatorHostRequest) -> 
         _ => false,
     }
 }
+/// Memory, CPU cores and screens a managed Android emulator can be given.
+pub const AVD_RAM_CHOICES_MB: [u32; 5] = [2048, 3072, 4096, 6144, 8192];
+pub const AVD_CORE_CHOICES: [u32; 4] = [2, 4, 6, 8];
+pub const AVD_SCREEN_CHOICES: [(u32, u32); 2] = [(1080, 2208), (1080, 2400)];
+/// Whether an `avd_settings_set` names a valid emulator and changes at least
+/// one setting to an allowed value (0 leaves a setting as it is).
+pub fn valid_avd_settings(host: &base::message_proto::EmulatorHostRequest) -> bool {
+    let named = host.component.strip_prefix("avd:").map_or(false, valid_avd_name);
+    let ram = host.avd_ram_mb == 0 || AVD_RAM_CHOICES_MB.contains(&host.avd_ram_mb);
+    let cores = host.avd_cpu_cores == 0 || AVD_CORE_CHOICES.contains(&host.avd_cpu_cores);
+    let screen = (host.avd_screen_width, host.avd_screen_height);
+    let screen_ok = screen == (0, 0) || AVD_SCREEN_CHOICES.contains(&screen);
+    let changes = host.avd_ram_mb != 0 || host.avd_cpu_cores != 0 || screen != (0, 0);
+    named && ram && cores && screen_ok && changes
+}
 /// Dashboard previews: a BlueStacks instance, or a running Google Android
 /// Emulator (`avd:<AVD name>`).
 pub fn valid_preview_target(id: &str) -> bool {
@@ -190,6 +205,11 @@ pub fn authorize_request(
         Some(Union::RefreshVideo(_)) if request.session_id != 0 => Ok(()),
         Some(Union::Host(host)) => match host.action.as_str() {
             "status" | "windows_list" | "phone_workspace_support" | "gateway_status" => Ok(()),
+            "avd_settings_get"
+                if control && host.component.strip_prefix("avd:").map_or(false, valid_avd_name) =>
+            {
+                Ok(())
+            }
             "process_end"
                 if control
                     && host.pid > 0
@@ -201,6 +221,8 @@ pub fn authorize_request(
             "emulator_shutdown" if control && valid_shutdown_target(&host.component) => Ok(()),
             "avd_create" | "avd_clone" | "avd_rename" | "avd_delete" | "avd_window"
                 if control && valid_avd_management(host) => Ok(()),
+            "emulator_reboot" if control && valid_shutdown_target(&host.component) => Ok(()),
+            "avd_settings_set" if control && valid_avd_settings(host) => Ok(()),
             "recover" if control && host.component == "bluestacks_adb" => Ok(()),
             "window_focus"
                 if control
@@ -240,6 +262,9 @@ pub fn authorize_request(
             | "avd_rename"
             | "avd_delete"
             | "avd_window"
+            | "avd_settings_get"
+            | "avd_settings_set"
+            | "emulator_reboot"
             | "recover"
             | "window_focus"
             | "phone_workspace_begin"
@@ -331,7 +356,7 @@ pub fn authorize_host_operation(
     };
     if matches!(
         host.action.as_str(),
-        "status" | "windows_list" | "phone_workspace_support" | "gateway_status"
+        "status" | "windows_list" | "phone_workspace_support" | "gateway_status" | "avd_settings_get"
     ) {
         return Ok(());
     }
@@ -344,6 +369,8 @@ pub fn authorize_host_operation(
             | "avd_rename"
             | "avd_delete"
             | "avd_window"
+            | "avd_settings_set"
+            | "emulator_reboot"
             | "recover"
             | "window_focus"
             | "phone_workspace_begin"
@@ -375,6 +402,10 @@ pub fn authorize_host_operation(
         "avd_clone" | "avd_rename" | "avd_delete" | "avd_window" if valid_avd_management(host) => {
             format!("emulator:{}", host.component)
         }
+        "emulator_reboot" if valid_shutdown_target(&host.component) => {
+            format!("emulator:{}", host.component)
+        }
+        "avd_settings_set" if valid_avd_settings(host) => format!("emulator:{}", host.component),
         "recover" => format!("component:{}", host.component),
         "window_focus" => format!("window:{}:{}", host.window_id, host.desktop_generation),
         "phone_workspace_begin" => format!(
@@ -763,6 +794,88 @@ mod tests {
         assert!(authorize_host_operation(&window, "scope-a", 4).is_ok());
         let bad = avd_host_request("avd_window", "avd:../x", "", "emulator:avd:../x");
         assert!(authorize_request(&bad, true, true, None).is_err());
+    }
+
+    #[test]
+    fn reboot_needs_control_and_a_bound_emulator_target() {
+        for component in ["avd:Maple_1", "bluestacks:Tiramisu64"] {
+            let target = format!("emulator:{component}");
+            let reboot = avd_host_request("emulator_reboot", component, "", &target);
+            assert!(authorize_request(&reboot, true, true, None).is_ok(), "{component}");
+            assert!(authorize_request(&reboot, true, false, None).is_err(), "{component}");
+            assert!(authorize_host_operation(&reboot, "scope-a", 4).is_ok(), "{component}");
+            let forged = avd_host_request("emulator_reboot", component, "", "emulator:avd:Other");
+            assert!(authorize_host_operation(&forged, "scope-a", 4).is_err(), "{component}");
+        }
+        for bad in ["avd:../x", "ldplayer:0", "windows:0", "bluestacks:"] {
+            let reboot = avd_host_request("emulator_reboot", bad, "", &format!("emulator:{bad}"));
+            assert!(authorize_request(&reboot, true, true, None).is_err(), "{bad}");
+        }
+    }
+
+    fn settings_request(ram: u32, cores: u32, screen: (u32, u32)) -> EmulatorRequest {
+        let mut request = avd_host_request("avd_settings_set", "avd:Maple_1", "", "emulator:avd:Maple_1");
+        if let Some(emulator_request::Union::Host(host)) = request.union.as_mut() {
+            host.avd_ram_mb = ram;
+            host.avd_cpu_cores = cores;
+            host.avd_screen_width = screen.0;
+            host.avd_screen_height = screen.1;
+        }
+        request
+    }
+
+    #[test]
+    fn avd_settings_accept_only_the_offered_values() {
+        for (ram, cores, screen) in [
+            (6144, 0, (0, 0)),
+            (0, 8, (0, 0)),
+            (0, 0, (1080, 2400)),
+            (2048, 2, (1080, 2208)),
+            (8192, 6, (0, 0)),
+        ] {
+            let request = settings_request(ram, cores, screen);
+            assert!(authorize_request(&request, true, true, None).is_ok(), "{ram} {cores} {screen:?}");
+            assert!(authorize_request(&request, true, false, None).is_err());
+            assert!(authorize_host_operation(&request, "scope-a", 4).is_ok());
+        }
+        for (ram, cores, screen) in [
+            (0, 0, (0, 0)),
+            (5000, 0, (0, 0)),
+            (16384, 0, (0, 0)),
+            (0, 3, (0, 0)),
+            (0, 16, (0, 0)),
+            (0, 0, (1080, 0)),
+            (0, 0, (720, 1280)),
+            (0, 0, (2208, 1080)),
+        ] {
+            let request = settings_request(ram, cores, screen);
+            assert!(authorize_request(&request, true, true, None).is_err(), "{ram} {cores} {screen:?}");
+        }
+        let mut other = settings_request(4096, 0, (0, 0));
+        if let Some(emulator_request::Union::Host(host)) = other.union.as_mut() {
+            host.component = "bluestacks:Tiramisu64".into();
+            host.target_identity = "emulator:bluestacks:Tiramisu64".into();
+        }
+        assert!(authorize_request(&other, true, true, None).is_err());
+    }
+
+    #[test]
+    fn avd_settings_can_be_read_with_control_without_an_operation() {
+        let mut request = EmulatorRequest { protocol_version: PROTOCOL_VERSION, ..Default::default() };
+        request.set_host(EmulatorHostRequest {
+            action: "avd_settings_get".into(),
+            component: "avd:Maple_1".into(),
+            ..Default::default()
+        });
+        assert!(authorize_request(&request, true, true, None).is_ok());
+        assert!(authorize_request(&request, true, false, None).is_err());
+        assert!(authorize_host_operation(&request, "scope-a", 4).is_ok());
+        request.set_host(EmulatorHostRequest {
+            action: "avd_settings_get".into(),
+            component: "avd:../x".into(),
+            ..Default::default()
+        });
+        assert!(authorize_request(&request, true, true, None).is_err());
     }
 
     #[test]
