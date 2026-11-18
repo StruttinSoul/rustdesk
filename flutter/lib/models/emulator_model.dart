@@ -321,8 +321,8 @@ class EmulatorModel extends ChangeNotifier {
   Timer? _rebootRefreshTimer;
   static const _rebootTick = Duration(milliseconds: 2500);
 
-  /// 120 s of list ticks.
-  static const _rebootTicks = 48;
+  /// 240 s of list ticks: a cold Android boot plus reopen measured 1.5–2.5 min.
+  static const _rebootTicks = 96;
 
   /// The list request whose answer keeps a failed game's error.
   int _guestErrorKeptFor = 0;

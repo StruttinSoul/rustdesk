@@ -117,11 +117,11 @@ void main() {
     model.dispose();
   });
 
-  testWidgets('the reboot watch ends after 120 s', (tester) async {
+  testWidgets('the reboot watch lasts 240 s, then ends', (tester) async {
     final sent = <Map<String, dynamic>>[];
     final model = EmulatorModel(Uuid().v4obj(),
         commandSender: (_, value) async => sent.add(jsonDecode(value)),
-        hostOperationTimeout: const Duration(seconds: 200));
+        hostOperationTimeout: const Duration(seconds: 400));
     List<Map<String, dynamic>> lists() =>
         sent.where((m) => m['action'] == 'list').toList();
     await model.refresh();
@@ -138,11 +138,16 @@ void main() {
       },
     });
     await result;
-    for (var i = 0; i < 50; i++) {
-      await tester.pump(const Duration(milliseconds: 2500));
-      final last = lists().last['request_id'];
-      model.handleResponse(_list(last, 'booting'));
+    Future<void> ticks(int n) async {
+      for (var i = 0; i < n; i++) {
+        await tester.pump(const Duration(milliseconds: 2500));
+        final last = lists().last['request_id'];
+        model.handleResponse(_list(last, 'booting'));
+      }
     }
+    await ticks(72); // 180 s: a slow boot is still being watched.
+    expect(model.isRebooting(_id), isTrue);
+    await ticks(26); // past 240 s.
     expect(model.isRebooting(_id), isFalse);
     final count = lists().length;
     await tester.pump(const Duration(seconds: 10));
