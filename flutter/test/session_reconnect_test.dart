@@ -177,9 +177,9 @@ void main() {
 
   group('reconnectRestoreFor', () {
     test('an open emulator is reopened, never started', () {
-      final restore = reconnectRestoreFor(guestId: 'avd:Play35');
+      final restore = reconnectRestoreFor(guestId: 'bluestacks:Pie64');
       expect(restore.kind, ReconnectRestoreKind.guest);
-      expect(restore.guestId, 'avd:Play35');
+      expect(restore.guestId, 'bluestacks:Pie64');
     });
     test('an open monitor is reopened', () {
       final restore = reconnectRestoreFor(display: 1);

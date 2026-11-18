@@ -5,7 +5,7 @@ import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:uuid/uuid.dart';
 
-const _id = 'avd:Maple_1';
+const _id = 'bluestacks:Pie64';
 
 void main() {
   test('a game opened on another device fails without an automatic reopen',
@@ -19,7 +19,7 @@ void main() {
       'type': 'inventory', 'request_id': list['request_id'],
       'protocol_version': 1,
       'instances': [
-        {'target_id': _id, 'provider': 'avd', 'name': 'Maple 1', 'state': 'ready'},
+        {'target_id': _id, 'provider': 'bluestacks', 'name': 'Pie64', 'state': 'ready'},
       ],
       'provider_errors': const [],
     });

@@ -40,7 +40,6 @@ void main() {
       EmulatorUiWord.starting: MirpgStatusTone.warning,
       EmulatorUiWord.stopped: MirpgStatusTone.neutral,
       EmulatorUiWord.stopping: MirpgStatusTone.neutral,
-      EmulatorUiWord.copying: MirpgStatusTone.neutral,
       EmulatorUiWord.problem: MirpgStatusTone.error
     });
   });
@@ -161,22 +160,6 @@ void main() {
     expect(find.text('Stream stopped'), findsNothing);
   });
 
-  testWidgets('copying tile shows the percentage and no Start', (tester) async {
-    await pumpIn(
-        tester,
-        tile(const EmulatorTileData(
-            id: 'a',
-            title: 'Main',
-            state: EmulatorUiState(EmulatorUiWord.copying, 'Copying {42}%'))));
-    expect(find.text('Copying 42%'), findsOneWidget);
-    expect(find.text('Start'), findsNothing);
-    expect(
-        tester
-            .widget<LinearProgressIndicator>(find.byType(LinearProgressIndicator))
-            .value,
-        0.42);
-  });
-
   testWidgets('PC flag only when the window is shown', (tester) async {
     await pumpIn(tester,
         tile(const EmulatorTileData(id: 'a', title: 'Main', state: live)));
@@ -237,23 +220,6 @@ void main() {
     expect(find.byTooltip('Open'), findsOneWidget);
   });
 
-  testWidgets('placeholder tile has no actions', (tester) async {
-    var opens = 0;
-    await pumpIn(
-        tester,
-        tile(
-            const EmulatorTileData(
-                id: 'a', title: 'New', state: stopped, placeholder: true),
-            onOpen: () => opens++));
-    expect(find.text('Setting up…'), findsOneWidget);
-    expect(
-        find.byWidgetPredicate(
-            (w) => w is IconButton && (w.tooltip ?? '').endsWith('actions')),
-        findsNothing);
-    await tester.tap(find.byType(EmulatorTile));
-    expect(opens, 0);
-  });
-
   for (final base in [ThemeData.light(), ThemeData.dark()]) {
     testWidgets('tiles fit at 1.3 text scale in ${base.brightness.name}',
         (tester) async {
@@ -261,7 +227,7 @@ void main() {
         live,
         stopped,
         problem,
-        EmulatorUiState(EmulatorUiWord.copying, 'Copying {42}%')
+        EmulatorUiState(EmulatorUiWord.stopping, 'Stopping')
       ];
       await pumpIn(
           tester,

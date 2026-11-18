@@ -5,42 +5,6 @@ import '../../models/emulator_model.dart';
 import 'emulator_tile.dart';
 import 'mirpg_remote_theme.dart';
 
-/// Managed Android emulator actions (clone, rename, delete, window, stop,
-/// settings).
-class AvdCardActions {
-  const AvdCardActions({
-    this.cloningLabel,
-    this.running = false,
-    this.windowVisible = false,
-    this.blocker,
-    this.onToggleWindow,
-    this.onStop,
-    this.onClone,
-    this.onRename,
-    this.onDelete,
-    this.onSettings,
-  });
-
-  /// Set while the emulator is being copied; the card then has no menu.
-  final String? cloningLabel;
-  final bool running;
-  final bool windowVisible;
-
-  /// Why clone, rename and delete are unavailable right now, if they are.
-  final String? blocker;
-  final VoidCallback? onToggleWindow;
-  final VoidCallback? onStop;
-  final VoidCallback? onClone;
-  final VoidCallback? onRename;
-  final VoidCallback? onDelete;
-
-  /// Memory, CPU cores and screen; usable while running (saved for the next
-  /// start), blocked only while a copy is in progress.
-  final VoidCallback? onSettings;
-
-  bool get hasMenu => cloningLabel == null;
-}
-
 /// Bottom sheet listing everything that can be done with one emulator.
 /// Each row closes the sheet first, then runs its action, so dialogs open
 /// from the page rather than from the closing sheet.
@@ -56,8 +20,9 @@ class EmulatorActionSheet extends StatelessWidget {
     this.onLaunchGame,
     this.onStop,
     this.onReboot,
+    this.windowVisible = false,
+    this.onToggleWindow,
     required this.onLabel,
-    this.avd,
     this.shuttingDown = false,
     this.tr = translate,
   });
@@ -73,8 +38,13 @@ class EmulatorActionSheet extends StatelessWidget {
 
   /// Restarts Android inside the running emulator; the emulator stays on.
   final VoidCallback? onReboot;
+
+  /// The emulator's window is shown on the PC.
+  final bool windowVisible;
+
+  /// Shows or hides the emulator's window on the PC; null when not offered.
+  final VoidCallback? onToggleWindow;
   final VoidCallback onLabel;
-  final AvdCardActions? avd;
   final bool shuttingDown;
   final EmulatorTr tr;
 
@@ -89,14 +59,13 @@ class EmulatorActionSheet extends StatelessWidget {
       required String label,
       required VoidCallback? action,
       String? subtitle,
-      Color? color,
     }) {
       final enabled = action != null;
       return ListTile(
         minTileHeight: 56,
         enabled: enabled,
-        leading: Icon(icon, color: color),
-        title: Text(label, style: color == null ? null : TextStyle(color: color)),
+        leading: Icon(icon),
+        title: Text(label),
         subtitle: subtitle == null ? null : Text(subtitle),
         onTap: !enabled
             ? null
@@ -107,15 +76,9 @@ class EmulatorActionSheet extends StatelessWidget {
       );
     }
 
-    final stop = avd?.onStop ?? onStop;
-    final managed = avd;
     // While the emulator shuts down only the phone-side label stays editable.
     VoidCallback? unlessShuttingDown(VoidCallback? action) =>
         shuttingDown ? null : action;
-    final copying = managed?.cloningLabel != null;
-    final manageBlocker = copying
-        ? tr('Copy in progress')
-        : (managed?.blocker == null ? null : tr(managed!.blocker!));
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -156,59 +119,26 @@ class EmulatorActionSheet extends StatelessWidget {
                     icon: Icons.sports_esports_outlined,
                     label: tr('Open and launch game'),
                     action: unlessShuttingDown(onLaunchGame)),
-              if (managed != null &&
-                  managed.running &&
-                  managed.onToggleWindow != null)
+              if (!stopped && onToggleWindow != null)
                 row(rowContext,
-                    icon: managed.windowVisible
+                    icon: windowVisible
                         ? Icons.desktop_access_disabled_outlined
                         : Icons.desktop_windows_outlined,
-                    label: tr(managed.windowVisible ? 'Hide on PC' : 'Show on PC'),
-                    action: unlessShuttingDown(managed.onToggleWindow)),
-              if (!stopped && stop != null)
+                    label: tr(windowVisible ? 'Hide on PC' : 'Show on PC'),
+                    action: unlessShuttingDown(onToggleWindow)),
+              if (!stopped && onStop != null)
                 row(rowContext,
                     icon: Icons.stop_circle_outlined,
                     label: tr('Stop'),
-                    action: unlessShuttingDown(stop)),
+                    action: unlessShuttingDown(onStop)),
               if (!stopped && onReboot != null)
                 row(rowContext,
                     icon: Icons.restart_alt,
                     label: tr('Reboot'),
                     action: unlessShuttingDown(onReboot)),
-              if (managed?.onSettings != null)
-                row(rowContext,
-                    icon: Icons.tune,
-                    label: tr('Settings'),
-                    action:
-                        copying ? null : unlessShuttingDown(managed!.onSettings),
-                    subtitle: copying ? tr('Copy in progress') : null),
               const Divider(height: 1),
               row(rowContext,
                   icon: Icons.label_outline, label: tr('Label'), action: onLabel),
-              if (managed != null) ...[
-                row(rowContext,
-                    icon: Icons.copy_outlined,
-                    label: tr('Clone'),
-                    action: manageBlocker != null
-                        ? null
-                        : unlessShuttingDown(managed.onClone),
-                    subtitle: manageBlocker),
-                row(rowContext,
-                    icon: Icons.drive_file_rename_outline,
-                    label: tr('Rename'),
-                    action: manageBlocker != null
-                        ? null
-                        : unlessShuttingDown(managed.onRename),
-                    subtitle: manageBlocker),
-                row(rowContext,
-                    icon: Icons.delete_outline,
-                    label: tr('Delete'),
-                    action: manageBlocker != null
-                        ? null
-                        : unlessShuttingDown(managed.onDelete),
-                    subtitle: manageBlocker,
-                    color: palette.error),
-              ],
               const SizedBox(height: 8),
             ],
           ),

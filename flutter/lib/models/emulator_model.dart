@@ -66,14 +66,15 @@ typedef EmulatorCommandSender = Future<void> Function(String key, String value);
   return (x: x, y: y);
 }
 
-/// Emulators the phone dashboard can stream: BlueStacks and Google's
-/// Android Emulator (`avd`, listed by the PC while it is running).
-bool isDashboardGuestProvider(String provider) =>
-    provider == 'bluestacks' || provider == 'avd';
+/// Emulators the phone dashboard can stream: BlueStacks.
+bool isDashboardGuestProvider(String provider) => provider == 'bluestacks';
+
+/// Providers whose window the PC can show or hide (`emulator_window`); none
+/// until the BlueStacks host-capture work adds it.
+bool providerShowsOnPc(String provider) => false;
 
 String emulatorProviderLabel(String provider) => switch (provider) {
       'bluestacks' => 'BlueStacks',
-      'avd' => 'Android Emulator',
       _ => provider,
     };
 
@@ -86,7 +87,6 @@ class RemoteEmulator {
       this.androidVersion = '',
       this.defaultPackage = '',
       this.error = '',
-      this.progressPercent = 0,
       this.windowVisible = false});
   final String id;
   final String name;
@@ -95,7 +95,8 @@ class RemoteEmulator {
   final String androidVersion;
   final String defaultPackage;
   final String error;
-  final int progressPercent;
+
+  /// The emulator's window is shown on the PC.
   final bool windowVisible;
 
   /// A ready guest can be reselected without requesting that BlueStacks boot.
@@ -106,13 +107,12 @@ class RemoteEmulator {
         'booting' || 'starting' => 'Starting',
         'adb_offline' => 'ADB offline',
         'stopped' => 'Stopped',
-        'cloning' => 'Cloning $progressPercent%',
         _ => 'Unknown',
       };
 }
 
 /// The one-word status every emulator surface shows.
-enum EmulatorUiWord { live, starting, stopped, stopping, copying, problem }
+enum EmulatorUiWord { live, starting, stopped, stopping, problem }
 
 /// `label` and `causeKey` are translate keys (label may carry one `{value}`).
 /// `pcMessage` is the PC's own text, shown verbatim and preferred over
@@ -125,8 +125,7 @@ class EmulatorUiState {
   final String causeKey;
   final String pcMessage;
 
-  bool get canOpen =>
-      word != EmulatorUiWord.stopping && word != EmulatorUiWord.copying;
+  bool get canOpen => word != EmulatorUiWord.stopping;
   bool get hasCause => causeKey.isNotEmpty || pcMessage.isNotEmpty;
 }
 
@@ -161,10 +160,6 @@ EmulatorUiState emulatorUiState(RemoteEmulator instance,
             pcMessage: instance.error)
         : const EmulatorUiState(EmulatorUiWord.problem, 'Problem',
             causeKey: "Couldn't stop");
-  }
-  if (state == 'cloning') {
-    final p = instance.progressPercent.clamp(0, 100);
-    return EmulatorUiState(EmulatorUiWord.copying, 'Copying {$p}%');
   }
   if (flags.guestFailure.isNotEmpty || preview?.state == 'failed') {
     final previewError = preview?.error ?? '';
@@ -288,12 +283,12 @@ class EmulatorModel extends ChangeNotifier {
   final Map<int, Completer<HostWindowInfo?>> _hostWindowFocusCompletions = {};
   final Map<int, Completer<HostShellRestartResult>> _shellRestartCompletions =
       {};
-  final Map<int, Completer<AvdActionResult>> _avdActionCompletions = {};
+  final Map<int, Completer<EmulatorActionResult>> _emulatorActionCompletions =
+      {};
   final Set<int> _pendingHostOperations = {};
   final Set<String> _shutdownPending = {};
   final Map<int, String> _shutdownRequests = {};
   Timer? _shutdownRefreshTimer;
-  Timer? _avdRefreshTimer;
 
   CapabilityStatus get emulatorShutdownCapability => _capabilities.status('host.emulator_shutdown.v1');
   bool isEmulatorShuttingDown(String id) => _shutdownPending.contains(id) ||
@@ -303,10 +298,8 @@ class EmulatorModel extends ChangeNotifier {
   bool canShutdownEmulator(String id, {bool runningAsKnown = false}) =>
       _canMutateHost('host.emulator_shutdown.v1') &&
       !isEmulatorShuttingDown(id) && instances.any((item) => item.id == id &&
-          (item.provider == 'bluestacks' || item.provider == 'avd') &&
+          item.provider == 'bluestacks' &&
           (item.state != 'stopped' || runningAsKnown));
-
-  bool get canManageAvds => _canMutateHost('host.avd_manage.v1');
 
   /// Whether [id] can be rebooted from the phone: Android restarts inside the
   /// running emulator, which keeps running.
@@ -316,8 +309,7 @@ class EmulatorModel extends ChangeNotifier {
       instances.any((item) =>
           item.id == id &&
           isDashboardGuestProvider(item.provider) &&
-          (item.state != 'stopped' || runningAsKnown) &&
-          item.state != 'cloning');
+          (item.state != 'stopped' || runningAsKnown));
 
   /// Emulators rebooted from this phone whose Android is not back yet, with
   /// when the reboot was acknowledged and whether a list has shown it down.
@@ -366,183 +358,83 @@ class EmulatorModel extends ChangeNotifier {
     }
   }
 
-  /// Memory, cores and screen are offered for managed emulators only.
-  bool canChangeAvdSettings(String id) =>
-      _canMutateHost('host.avd_settings.v1') &&
-      instances.any((item) => item.id == id && item.provider == 'avd');
-
-  /// Why a managed-emulator action is unavailable right now, or null.
-  String? avdActionBlocker(String id, String action) {
-    final matches = instances.where((item) => item.id == id);
-    if (matches.isEmpty) return null;
-    final item = matches.first;
-    if (item.state == 'cloning') return 'Copy in progress';
-    if (action == 'avd_window' ||
-        action == 'avd_settings_set' ||
-        action == 'emulator_reboot') {
-      return null;
-    }
-    if (item.state != 'stopped') return 'Stop it first';
-    return null;
-  }
-
-  String suggestAvdName(String base) {
-    final taken = instances.where((item) => item.provider == 'avd')
-        .map((item) => item.id.replaceFirst('avd:', '').toLowerCase()).toSet();
-    var clean = base.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_').replaceFirst(RegExp(r'^\.+'), '');
-    if (clean.isEmpty) clean = 'Emulator';
-    if (clean.length > 64) clean = clean.substring(0, 64);
-    final reserved = RegExp(r'^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\..*)?$', caseSensitive: false);
-    var candidate = clean;
-    for (var n = 2; taken.contains(candidate.toLowerCase()) || reserved.hasMatch(candidate); n++) {
-      final suffix = '_$n';
-      candidate = '${clean.substring(0, math.min(clean.length, 64 - suffix.length))}$suffix';
-    }
-    return candidate;
-  }
-
-  Future<AvdActionResult> createAvd(String name) =>
-      _sendAvdAction('avd_create', 'emulator:avd:$name', {'new_name': name});
-  Future<AvdActionResult> cloneAvd(String id, String name) => _sendAvdAction(
-      'avd_clone', 'emulator:$id', {'component': id, 'new_name': name}, id: id);
-  Future<AvdActionResult> renameAvd(String id, String name) => _sendAvdAction(
-      'avd_rename', 'emulator:$id', {'component': id, 'new_name': name}, id: id);
-  Future<AvdActionResult> deleteAvd(String id) =>
-      _sendAvdAction('avd_delete', 'emulator:$id', {'component': id}, id: id);
-  Future<AvdActionResult> setAvdWindowVisible(String id, bool visible) => _sendAvdAction(
-      'avd_window', 'emulator:$id', {'component': id, 'window_visible': visible}, id: id);
-
-  Future<AvdActionResult> rebootEmulator(String id,
+  Future<EmulatorActionResult> rebootEmulator(String id,
       {bool runningAsKnown = false}) {
     if (!canRebootEmulator(id, runningAsKnown: runningAsKnown)) {
-      return Future.value(const AvdActionResult(
+      return Future.value(const EmulatorActionResult(
           false, 'This PC can’t manage emulators from the phone right now.'));
     }
-    return _sendAvdAction('emulator_reboot', 'emulator:$id', {'component': id},
-        id: id, capability: 'host.emulator_power.v1');
+    return _sendEmulatorAction(
+        'emulator_reboot', id, 'host.emulator_power.v1');
   }
 
-  /// Saves [change] for the next start; with [restart] a running emulator
-  /// is stopped and started again with it.
-  Future<AvdActionResult> saveAvdSettings(String id, AvdSettings change,
-      {bool restart = false}) {
-    if (!canChangeAvdSettings(id) || change.isEmpty) {
-      return Future.value(const AvdActionResult(
+  /// Whether [id]'s window can be shown or hidden on the PC.
+  bool canShowOnPc(String id) =>
+      _canMutateHost('host.emulator_window.v1') &&
+      !isEmulatorShuttingDown(id) &&
+      instances.any((item) =>
+          item.id == id &&
+          providerShowsOnPc(item.provider) &&
+          item.state != 'stopped');
+
+  Future<EmulatorActionResult> setEmulatorWindowVisible(
+      String id, bool visible) {
+    if (!canShowOnPc(id)) {
+      return Future.value(const EmulatorActionResult(
           false, 'This PC can’t manage emulators from the phone right now.'));
     }
-    return _sendAvdAction(
-        'avd_settings_set',
-        'emulator:$id',
-        {
-          'component': id,
-          'ram_mb': change.ramMb ?? 0,
-          'cpu_cores': change.cores ?? 0,
-          'screen_width': change.screen?.$1 ?? 0,
-          'screen_height': change.screen?.$2 ?? 0,
-          'restart': restart,
-        },
-        id: id,
-        capability: 'host.avd_settings.v1');
-  }
-
-  final Map<int, Completer<AvdSettingsLoad>> _avdSettingsReads = {};
-  final Map<int, Timer> _avdSettingsReadTimeouts = {};
-
-  /// The PC's current and saved settings of managed emulator [id].
-  Future<AvdSettingsLoad> loadAvdSettings(String id) {
-    if (!canChangeAvdSettings(id)) {
-      return Future.value((
-        info: null,
-        error: 'This PC can’t manage emulators from the phone right now.'
-      ));
-    }
-    final requestId = ++_sequence;
-    final completion = Completer<AvdSettingsLoad>();
-    _avdSettingsReads[requestId] = completion;
-    _avdSettingsReadTimeouts[requestId] = Timer(_hostOperationTimeout,
-        () => _finishAvdSettingsRead(requestId, null, 'The PC did not answer. Try again.'));
-    unawaited(_send(
-        {'action': 'avd_settings_get', 'request_id': requestId, 'component': id}));
-    return completion.future;
-  }
-
-  void _finishAvdSettingsRead(int requestId, AvdSettingsInfo? info, String error) {
-    _avdSettingsReadTimeouts.remove(requestId)?.cancel();
-    final completion = _avdSettingsReads.remove(requestId);
-    if (completion != null && !completion.isCompleted) {
-      completion.complete((info: info, error: error));
-    }
+    return _sendEmulatorAction(
+        'emulator_window', id, 'host.emulator_window.v1',
+        fields: {'window_visible': visible});
   }
 
   /// Resolves with the PC's answer (or why there is none), not when sent.
-  Future<AvdActionResult> _sendAvdAction(
-      String action, String targetIdentity, Map<String, dynamic> fields,
-      {String? id, String capability = 'host.avd_manage.v1'}) {
+  Future<EmulatorActionResult> _sendEmulatorAction(
+      String action, String id, String capability,
+      {Map<String, dynamic> fields = const {}}) {
     if (!_canMutateHost(capability)) {
-      return Future.value(const AvdActionResult(
+      return Future.value(const EmulatorActionResult(
           false, 'This PC can’t manage emulators from the phone right now.'));
     }
-    if (id != null) {
-      if (!instances.any((item) =>
-          item.id == id &&
-          (item.provider == 'avd' ||
-              (action == 'emulator_reboot' &&
-                  isDashboardGuestProvider(item.provider))))) {
-        return Future.value(
-            const AvdActionResult(false, 'This emulator is no longer listed.'));
-      }
-      final blocker = avdActionBlocker(id, action);
-      if (blocker != null) {
-        hostError = blocker;
-        if (!_disposed) notifyListeners();
-        return Future.value(AvdActionResult(false, blocker));
-      }
+    if (!instances.any(
+        (item) => item.id == id && isDashboardGuestProvider(item.provider))) {
+      return Future.value(const EmulatorActionResult(
+          false, 'This emulator is no longer listed.'));
     }
     final requestId = ++_sequence;
     final operationId = const Uuid().v4();
+    final targetIdentity = 'emulator:$id';
     hostError = hostMessage = '';
     _beginHostOperation(requestId: requestId, operationId: operationId,
         targetIdentity: targetIdentity, action: action);
-    _avdRefreshTimer ??= Timer.periodic(const Duration(seconds: 2), (timer) {
-      if (_disposed || !hostConnectionCurrent) { timer.cancel(); _avdRefreshTimer = null; return; }
-      final busy = instances.any((item) => item.state == 'cloning') ||
-          _pendingHostOperations.any((request) =>
-              _hostOperations.operationForRequest(request)?.action.startsWith('avd_') ?? false);
-      if (!busy) { timer.cancel(); _avdRefreshTimer = null; return; }
-      if (!loading && !connecting) unawaited(refresh());
-    });
-    final completion = Completer<AvdActionResult>();
-    _avdActionCompletions[requestId] = completion;
+    final completion = Completer<EmulatorActionResult>();
+    _emulatorActionCompletions[requestId] = completion;
     notifyListeners();
     unawaited(_sendHostOperation({
-      'action': action, 'request_id': requestId, ...fields,
+      'action': action, 'request_id': requestId, 'component': id, ...fields,
       'operation_id': operationId, 'session_identity': _operationSessionIdentity,
       'target_identity': targetIdentity, 'session_generation': _operationGeneration,
     }, requestId: requestId, capability: capability,
       stillValid: () => hostConnectionCurrent &&
-          (id == null || instances.any((item) => item.id == id))));
+          instances.any((item) => item.id == id)));
     return completion.future;
   }
 
-  void _finishAvdAction(int requestId, bool ok, String message) {
-    final completion = _avdActionCompletions.remove(requestId);
+  void _finishEmulatorAction(int requestId, bool ok, String message) {
+    final completion = _emulatorActionCompletions.remove(requestId);
     if (completion != null && !completion.isCompleted) {
-      completion.complete(AvdActionResult(ok, message));
+      completion.complete(EmulatorActionResult(ok, message));
     }
   }
 
-  void _abandonAvdActions() {
-    for (final requestId in _avdSettingsReads.keys.toList()) {
-      _finishAvdSettingsRead(requestId, null,
-          'The connection changed before the PC answered. Refresh to see the result.');
-    }
-    for (final completion in _avdActionCompletions.values) {
+  void _abandonEmulatorActions() {
+    for (final completion in _emulatorActionCompletions.values) {
       if (!completion.isCompleted) {
-        completion.complete(const AvdActionResult(false,
+        completion.complete(const EmulatorActionResult(false,
             'The connection changed before the PC answered. Refresh to see the result.'));
       }
     }
-    _avdActionCompletions.clear();
+    _emulatorActionCompletions.clear();
   }
 
   Future<void> shutdownEmulator(String id, {bool runningAsKnown = false}) async {
@@ -581,7 +473,6 @@ class EmulatorModel extends ChangeNotifier {
     _rebootRefreshTimer?.cancel(); _rebootRefreshTimer = null;
     _rebooting.clear();
     _shutdownRefreshTimer?.cancel(); _shutdownRefreshTimer = null;
-    _avdRefreshTimer?.cancel(); _avdRefreshTimer = null;
     _shutdownPending.clear(); _shutdownRequests.clear();
   }
 
@@ -1549,7 +1440,7 @@ class EmulatorModel extends ChangeNotifier {
       _finishShellRestart(requestId, false, _shellRestartUnfinished);
       hostMessage =
           'The PC may have applied the request. Refresh before retrying.';
-      _finishAvdAction(requestId, false, hostMessage);
+      _finishEmulatorAction(requestId, false, hostMessage);
       if (action.startsWith('phone_workspace_')) {
         _phoneWorkspaceLoading = false;
         _phoneWorkspaceNeedsReconcile = true;
@@ -1609,7 +1500,7 @@ class EmulatorModel extends ChangeNotifier {
           _finishShellRestart(requestId, false, _shellRestartUnfinished);
           hostMessage = '';
           hostError = operation.error;
-          _finishAvdAction(requestId, false, operation.error);
+          _finishEmulatorAction(requestId, false, operation.error);
           if (operation.action.startsWith('phone_workspace_')) {
             _phoneWorkspaceLoading = false;
             phoneWorkspaceMessage = '';
@@ -1646,7 +1537,7 @@ class EmulatorModel extends ChangeNotifier {
           _finishShellRestart(requestId, false, _shellRestartUnfinished);
           hostMessage = '';
           hostError = failure.toString();
-          _finishAvdAction(requestId, false, hostError);
+          _finishEmulatorAction(requestId, false, hostError);
           if (operation.action.startsWith('phone_workspace_')) {
             _phoneWorkspaceLoading = false;
             _phoneWorkspaceNeedsReconcile = true;
@@ -1840,18 +1731,6 @@ class EmulatorModel extends ChangeNotifier {
         }
         gatewayError = '';
       }
-    } else if (response['type'] == 'host' && _avdSettingsReads.containsKey(id)) {
-      final host = response['host'];
-      if (host is Map && host['ok'] == true && host['avd_settings'] is Map) {
-        _finishAvdSettingsRead(id as int,
-            AvdSettingsInfo.fromMap(host['avd_settings'] as Map), '');
-      } else {
-        _finishAvdSettingsRead(
-            id as int,
-            null,
-            (host is Map ? host['error']?.toString() : null) ??
-                'Host management request failed');
-      }
     } else if (response['type'] == 'host' && id is int) {
       final operation = _hostOperations.operationForRequest(id);
       final host = response['host'];
@@ -1895,7 +1774,7 @@ class EmulatorModel extends ChangeNotifier {
           _watchReboot(operation.targetIdentity.replaceFirst('emulator:', ''));
         }
         if (hostConnectionCurrent) unawaited(refresh(keepGuestError: true));
-      } else if (operation.action.startsWith('avd_') && hostConnectionCurrent) {
+      } else if (operation.action == 'emulator_window' && hostConnectionCurrent) {
         unawaited(refresh());
       }
       _pendingHostOperations.remove(id);
@@ -1936,7 +1815,7 @@ class EmulatorModel extends ChangeNotifier {
         _hostWindowFocusCompletions.remove(id)?.complete(observedWindow);
         hostMessage = host['message']?.toString() ?? '';
         _finishShellRestart(id, true, hostMessage);
-        _finishAvdAction(id, true, hostMessage);
+        _finishEmulatorAction(id, true, hostMessage);
         if (operation.action.startsWith('phone_workspace_')) {
           phoneWorkspaceMessage = host['message']?.toString() ?? '';
           phoneWorkspaceError = '';
@@ -1964,7 +1843,7 @@ class EmulatorModel extends ChangeNotifier {
         hostError =
             host['error']?.toString() ?? 'Host management request failed';
         _finishShellRestart(id, false, hostError);
-        _finishAvdAction(id, false, hostError);
+        _finishEmulatorAction(id, false, hostError);
         if (operation.action.startsWith('phone_workspace_')) {
           phoneWorkspaceMessage = '';
           phoneWorkspaceError =
@@ -2054,7 +1933,7 @@ class EmulatorModel extends ChangeNotifier {
         }
         _hostWindowFocusCompletions.clear();
         _abandonShellRestarts();
-        _abandonAvdActions();
+        _abandonEmulatorActions();
         _clearShutdownState();
       }
       _operationSessionIdentity = operationIdentity;
@@ -2076,7 +1955,6 @@ class EmulatorModel extends ChangeNotifier {
               androidVersion: item['android_version']?.toString() ?? '',
               defaultPackage: item['default_package']?.toString() ?? '',
               error: item['last_error']?.toString() ?? '',
-              progressPercent: (item['progress_percent'] as num?)?.toInt() ?? 0,
               windowVisible: item['window_visible'] == true))
           .toList();
       _trackReboots();
@@ -2187,7 +2065,6 @@ class EmulatorModel extends ChangeNotifier {
           _phoneWorkspaceRequest,
           _gatewayStatusRequest,
           ..._pendingHostOperations,
-          ..._avdSettingsReads.keys,
         ].contains(id)) {
       final requestError =
           response['error']?.toString() ?? 'Remote request failed';
@@ -2223,8 +2100,6 @@ class EmulatorModel extends ChangeNotifier {
         if (_gatewayRestartExpectedIdentity != null && _gatewayNeedsReconcile) {
           _scheduleGatewayReconcileRefresh();
         }
-      } else if (_avdSettingsReads.containsKey(id)) {
-        _finishAvdSettingsRead(id, null, requestError);
       } else if (_pendingHostOperations.contains(id)) {
         final operation = _hostOperations.operationForRequest(id);
         if (operation != null) {
@@ -2246,7 +2121,7 @@ class EmulatorModel extends ChangeNotifier {
         _hostWindowFocusCompletions.remove(id)?.complete(null);
         _finishShellRestart(id, false, _shellRestartUnfinished);
         hostError = requestError;
-        _finishAvdAction(id, false, requestError);
+        _finishEmulatorAction(id, false, requestError);
         if (operation?.action.startsWith('gateway_') == true) {
           _gatewayMutationLoading = false;
           gatewayMessage = '';
@@ -2337,7 +2212,7 @@ class EmulatorModel extends ChangeNotifier {
     }
     _hostWindowFocusCompletions.clear();
     _abandonShellRestarts();
-    _abandonAvdActions();
+    _abandonEmulatorActions();
     _hostOperations.advanceGeneration();
     _operationGeneration = _hostOperations.generation;
     _operationSessionIdentity = '';
@@ -2440,7 +2315,7 @@ class EmulatorModel extends ChangeNotifier {
     }
     _hostWindowFocusCompletions.clear();
     _abandonShellRestarts();
-    _abandonAvdActions();
+    _abandonEmulatorActions();
     previews.clear();
     guestFailures.clear();
     _previewTargets.clear();
@@ -2477,7 +2352,7 @@ class EmulatorModel extends ChangeNotifier {
     }
     _hostWindowFocusCompletions.clear();
     _abandonShellRestarts();
-    _abandonAvdActions();
+    _abandonEmulatorActions();
     super.dispose();
   }
 }
@@ -2503,75 +2378,10 @@ class HostShellRestartResult {
   final String message;
 }
 
-/// The PC's answer to a managed-emulator action, or why there is none.
-class AvdActionResult {
-  const AvdActionResult(this.ok, this.message);
+/// The PC's answer to an emulator action (reboot, show on PC), or why there
+/// is none.
+class EmulatorActionResult {
+  const EmulatorActionResult(this.ok, this.message);
   final bool ok;
   final String message;
 }
-
-/// Memory, CPU cores and screen of a managed emulator; a null value is left
-/// as it is.
-class AvdSettings {
-  const AvdSettings({this.ramMb, this.cores, this.screen});
-  final int? ramMb;
-  final int? cores;
-  final (int, int)? screen;
-
-  /// What the PC accepts; the same lists as the host's.
-  static const ramChoicesMb = [2048, 3072, 4096, 6144, 8192];
-  static const coreChoices = [2, 4, 6, 8];
-  static const screenChoices = [(1080, 2208), (1080, 2400)];
-
-  bool get isEmpty => ramMb == null && cores == null && screen == null;
-
-  factory AvdSettings.fromMap(Object? map) {
-    if (map is! Map) return const AvdSettings();
-    int? number(String key) {
-      final value = map[key];
-      return value is num && value > 0 ? value.toInt() : null;
-    }
-
-    final width = number('screen_width');
-    final height = number('screen_height');
-    return AvdSettings(
-        ramMb: number('ram_mb'),
-        cores: number('cpu_cores'),
-        screen: width != null && height != null ? (width, height) : null);
-  }
-
-  /// These settings with [newer]'s values where it has one.
-  AvdSettings merged(AvdSettings newer) => AvdSettings(
-      ramMb: newer.ramMb ?? ramMb,
-      cores: newer.cores ?? cores,
-      screen: newer.screen ?? screen);
-
-  /// The values that differ from [other].
-  AvdSettings changedFrom(AvdSettings other) => AvdSettings(
-      ramMb: ramMb == other.ramMb ? null : ramMb,
-      cores: cores == other.cores ? null : cores,
-      screen: screen == other.screen ? null : screen);
-}
-
-/// A managed emulator's settings as the PC reports them.
-class AvdSettingsInfo {
-  const AvdSettingsInfo(
-      {required this.current, required this.pending, required this.running});
-
-  /// What its configuration has now.
-  final AvdSettings current;
-
-  /// Saved on the phone, applied at its next start.
-  final AvdSettings pending;
-  final bool running;
-
-  /// What it has from its next start.
-  AvdSettings get next => current.merged(pending);
-
-  factory AvdSettingsInfo.fromMap(Map map) => AvdSettingsInfo(
-      current: AvdSettings.fromMap(map['current']),
-      pending: AvdSettings.fromMap(map['pending']),
-      running: map['running'] == true);
-}
-
-typedef AvdSettingsLoad = ({AvdSettingsInfo? info, String error});

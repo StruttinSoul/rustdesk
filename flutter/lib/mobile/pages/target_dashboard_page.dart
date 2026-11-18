@@ -23,12 +23,9 @@ import 'settings_page.dart';
 import 'terminal_page.dart';
 import '../widgets/mirpg_remote_theme.dart';
 import '../../common/widgets/aperture_brand.dart';
-import '../widgets/avd_manage_sheets.dart';
-import '../widgets/avd_settings_sheet.dart';
 import '../widgets/clipboard_transfer_sheet.dart';
 import '../widgets/computers_hero.dart' show hostDisplayName;
 import '../widgets/emulator_action_sheet.dart';
-export '../widgets/emulator_action_sheet.dart' show AvdCardActions;
 import '../widgets/emulator_tile.dart';
 import '../widgets/monitor_control_view.dart';
 import '../widgets/monitor_key_sender.dart';
@@ -116,9 +113,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   /// The list is not refreshed during a game, so this keeps an emulator
   /// started from the phone running until a newer list says otherwise.
   final Map<String, DateTime> _seenLive = {};
-
-  /// New emulators the PC is creating (id -> name shown), until it lists them.
-  final Map<String, String> _settingUp = {};
 
   /// Whether the first emulator list after opening the dashboard has ended.
   bool _listSeen = false;
@@ -594,8 +588,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     if (model.streaming && model.guestFrameFresh && model.targetId.isNotEmpty) {
       noteSeenLive(_seenLive, model.targetId, now);
     }
-    _settingUp
-        .removeWhere((id, _) => model.instances.any((item) => item.id == id));
     if (!widget.ffi.ffiModel.keyboard || widget.ffi.ffiModel.viewOnly) {
       unawaited(_releaseMonitorInput());
     }
@@ -782,19 +774,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     }
   }
 
-  String _avdRawName(String id) => id.replaceFirst('avd:', '');
-
-  bool _avdNameTaken(String name, {String? except}) {
-    final lower = name.toLowerCase();
-    return model.instances.any((item) =>
-        item.provider == 'avd' &&
-        item.id != except &&
-        _avdRawName(item.id).toLowerCase() == lower);
-  }
-
   /// Shows the PC's refusal or failure as is; on success a short [success]
   /// confirmation (already translated) replaces whatever snackbar is showing.
-  void _reportAvdResult(AvdActionResult result, {required String success}) {
+  void _reportResult(EmulatorActionResult result, {required String success}) {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     if (!result.ok) {
@@ -812,69 +794,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   /// The label when set, else the emulator name, for confirmations.
   String _shownName(String id, String name) => _labels.displayName(id, name);
 
-  Future<void> _newAvd() async {
-    final created = await showAvdCreateSheet(context,
-        title: 'New emulator',
-        initialName: model.suggestAvdName('Emulator'),
-        note: 'Android 15 · 4 GB · 4 cores · about 12 GB on D after setup',
-        isTaken: _avdNameTaken);
-    if (created == null || !mounted) return;
-    final shown = created.label.isEmpty ? created.name : created.label;
-    final id = 'avd:${created.name}';
-    setState(() => _settingUp[id] = shown);
-    ScaffoldMessenger.of(context)
-      ..clearSnackBars()
-      ..showSnackBar(SnackBar(
-          content: Text(translate('Setting up {$shown} on the PC')),
-          duration: const Duration(seconds: 2)));
-    final result = await model.createAvd(created.name);
-    if (!result.ok && mounted) setState(() => _settingUp.remove(id));
-    if (result.ok) await _labels.setLabel(id, created.label);
-    _reportAvdResult(result, success: translate('Created {$shown}'));
-  }
-
-  Future<void> _cloneAvd(_Target target) async {
-    final raw = _avdRawName(target.id);
-    final created = await showAvdCreateSheet(context,
-        title: 'Clone ${target.name}',
-        initialName: model.suggestAvdName('${raw}_copy'),
-        note: 'Exact copy, including Google and game sign-ins. The game will see it as the same device.',
-        isTaken: _avdNameTaken,
-        confirmLabel: 'Clone');
-    if (created == null || !mounted) return;
-    final shown = created.label.isEmpty ? created.name : created.label;
-    final result = await model.cloneAvd(target.id, created.name);
-    if (result.ok) await _labels.setLabel('avd:${created.name}', created.label);
-    _reportAvdResult(result, success: translate('Copied to {$shown}'));
-  }
-
-  Future<void> _renameAvd(_Target target) async {
-    final raw = _avdRawName(target.id);
-    final name = await showAvdNameSheet(context,
-        title: 'Rename ${target.name}',
-        initialName: raw,
-        note: 'Only the name changes. The emulator keeps everything in it.',
-        isTaken: (candidate) => _avdNameTaken(candidate, except: target.id),
-        confirmLabel: 'Rename',
-        tr: translate);
-    if (name == null || name == raw || !mounted) return;
-    final result = await model.renameAvd(target.id, name);
-    final newId = 'avd:$name';
-    if (result.ok) await _labels.moveLabel(target.id, newId);
-    // The label moved with it, so name what the PC now calls it.
-    _reportAvdResult(result, success: translate('Renamed to {$name}'));
-  }
-
-  Future<void> _deleteAvd(_Target target) async {
-    final shown = _shownName(target.id, target.name);
-    if (!await confirmAvdDelete(context, _confirmationName(target)) || !mounted) {
-      return;
-    }
-    final result = await model.deleteAvd(target.id);
-    if (result.ok) await _labels.clearLabel(target.id);
-    _reportAvdResult(result, success: translate('Deleted {$shown}'));
-  }
-
   /// Restarts Android inside [target]; the game stays open and reconnects
   /// once Android is back.
   Future<void> _rebootEmulator(_Target target) async {
@@ -885,49 +804,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       return;
     }
     final instance = target.instance;
-    _reportAvdResult(
+    _reportResult(
         await model.rebootEmulator(target.id,
             runningAsKnown: instance != null && _runningAsKnown(instance)),
         success: translate('Rebooting {$shown}'));
   }
 
-  /// Memory, CPU cores and screen of managed emulator [target].
-  Future<void> _openAvdSettings(_Target target) async {
-    final shown = _shownName(target.id, target.name);
-    final loaded = await waitWithProgress(
-        context, model.loadAvdSettings(target.id),
-        label: translate('Loading settings…'));
-    if (!mounted) return;
-    final info = loaded.info;
-    if (info == null) {
-      if (loaded.error.isNotEmpty) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(loaded.error)));
-      }
-      return;
-    }
-    final choice = await showAvdSettingsSheet(context, name: shown, info: info);
-    if (choice == null || !mounted) return;
-    if (choice.restart) {
-      if (!await showEmulatorRestartConfirmation(
-              context, _confirmationName(target)) ||
-          !mounted) {
-        return;
-      }
-      if (_fullscreen?.id == target.id) await _dashboard();
-    }
-    final result = await model.saveAvdSettings(target.id, choice.change,
-        restart: choice.restart);
-    _reportAvdResult(result,
-        success: choice.restart
-            ? translate('Restarting {$shown}')
-            : translate(
-                info.running ? 'Saved for the next start' : 'Settings saved'));
-  }
-
-  Future<void> _toggleAvdWindow(_Target target) async {
+  Future<void> _toggleWindow(_Target target) async {
     final show = !(target.instance?.windowVisible ?? false);
-    _reportAvdResult(await model.setAvdWindowVisible(target.id, show),
+    _reportResult(await model.setEmulatorWindowVisible(target.id, show),
         success: translate(show ? 'Shown on the PC' : 'Hidden on the PC'));
   }
 
@@ -1023,27 +908,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     );
   }
 
-  /// Every listed emulator in the PC's order, then emulators being set up.
-  List<EmulatorTileData> _playTiles() {
-    final guests = [
-      for (final target in targets)
-        if (target.instance != null) target,
-    ];
-    return [
-      for (final target in guests) _guestTile(target),
-      for (final entry in _settingUp.entries)
-        if (!guests.any((target) => target.id == entry.key))
-          EmulatorTileData(
-            id: entry.key,
-            title: entry.value,
-            secondary: entry.value == _avdRawName(entry.key)
-                ? ''
-                : _avdRawName(entry.key),
-            state: const EmulatorUiState(EmulatorUiWord.starting, 'Starting'),
-            placeholder: true,
-          ),
-    ];
-  }
+  /// Every listed emulator in the PC's order.
+  List<EmulatorTileData> _playTiles() => [
+        for (final target in targets)
+          if (target.instance != null) _guestTile(target),
+      ];
 
   /// Tile tap: opens (and starts, if stopped) the emulator, or says why not.
   void _openGuest(String id) {
@@ -1064,36 +933,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     if (target != null) unawaited(_showEmulatorActions(target));
   }
 
-  AvdCardActions? _avdActions(_Target target) {
-    final instance = target.instance;
-    if (instance == null ||
-        instance.provider != 'avd' ||
-        !model.canManageAvds ||
-        !_canControl) {
-      return null;
-    }
-    final cloning = instance.state == 'cloning';
-    // The list may still say stopped for the emulator being played.
-    final running = _runningAsKnown(instance);
-    return AvdCardActions(
-      cloningLabel: cloning ? instance.runtimeLabel : null,
-      running: running,
-      windowVisible: instance.windowVisible,
-      blocker: model.avdActionBlocker(target.id, 'avd_delete') ??
-          (running ? 'Stop it first' : null),
-      onToggleWindow: () => unawaited(_toggleAvdWindow(target)),
-      onStop: model.canShutdownEmulator(target.id, runningAsKnown: running)
-          ? () => unawaited(_shutdownEmulator(target))
-          : null,
-      onClone: () => unawaited(_cloneAvd(target)),
-      onRename: () => unawaited(_renameAvd(target)),
-      onDelete: () => unawaited(_deleteAvd(target)),
-      onSettings: model.canChangeAvdSettings(target.id)
-          ? () => unawaited(_openAvdSettings(target))
-          : null,
-    );
-  }
-
   Future<void> _showEmulatorActions(_Target target) async {
     final instance = target.instance;
     if (instance == null) return;
@@ -1101,7 +940,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final state = _guestState(target, frame.preview, frame.frameCurrent);
     final control = _canControl;
     final stopped = instance.state == 'stopped';
-    final cloning = instance.state == 'cloning';
     // Open on the game being played would only reconnect its stream.
     final playing = target.id == _fullscreen?.id && model.streaming;
     final label = _labels.labelFor(target.id);
@@ -1121,11 +959,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         onOpen: control && state.canOpen && !model.connecting && !playing
             ? () => unawaited(_open(target))
             : null,
-        openBlocker: !control
-            ? translate("{$_hostName} hasn't granted control")
-            : cloning
-                ? translate('Copy in progress')
-                : null,
+        openBlocker:
+            !control ? translate("{$_hostName} hasn't granted control") : null,
         onLaunchGame: instance.defaultPackage.isNotEmpty &&
                 !model.connecting &&
                 control
@@ -1143,8 +978,11 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                     runningAsKnown: _runningAsKnown(instance))
             ? () => unawaited(_rebootEmulator(target))
             : null,
+        windowVisible: instance.windowVisible,
+        onToggleWindow: control && model.canShowOnPc(target.id)
+            ? () => unawaited(_toggleWindow(target))
+            : null,
         onLabel: () => unawaited(_editLabel(target)),
-        avd: _avdActions(target),
         shuttingDown: model.isEmulatorShuttingDown(target.id),
       ),
     );
@@ -1475,9 +1313,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       // The list refreshes, so read the emulator's current window state.
       final current = _targetById(active!.id) ?? active;
       final instance = current.instance!;
-      final offerShowOnPc = instance.provider == 'avd' &&
-          model.canManageAvds &&
-          !instance.windowVisible;
+      final offerShowOnPc =
+          model.canShowOnPc(instance.id) && !instance.windowVisible;
       return EmulatorPage(
           ffi: widget.ffi,
           dashboardMode: true,
@@ -1486,8 +1323,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           nameFor: (id) =>
               _labels.displayName(id, _targetById(id)?.name ?? ''),
           switchFrame: _switchFrame,
-          onShowOnPc:
-              offerShowOnPc ? () => _toggleAvdWindow(current) : null,
+          onShowOnPc: offerShowOnPc ? () => _toggleWindow(current) : null,
           accounts: _playAccounts(),
           onSelectTarget: _switchTo,
           onCurrentActions: () => unawaited(_showEmulatorActions(current)),
@@ -1749,7 +1585,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
 
   /// Play: every emulator as a tile.
   Widget _homeBody(String hostName) {
-    final canCreate = model.canManageAvds && _canControl;
     return LayoutBuilder(builder: (context, constraints) {
       final rowExtent = playTabRowExtent(
           constraints.maxWidth, MediaQuery.textScalerOf(context));
@@ -1774,7 +1609,6 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             },
             onOpen: _openGuest,
             onMore: _showGuestActions,
-            onNew: canCreate ? () => unawaited(_newAvd()) : null,
           );
         },
       );
@@ -2411,6 +2245,35 @@ class _Target {
   String get name => instance?.name ?? 'Monitor ${display! + 1}';
 }
 
+/// A two-button confirmation whose confirming button is the destructive red.
+Future<bool> showDestructiveConfirmation(
+  BuildContext context, {
+  required String title,
+  required String body,
+  required String confirmLabel,
+  required String cancelLabel,
+}) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: Text(cancelLabel)),
+          FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: MirpgRemoteTheme.destructiveFill,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: Text(confirmLabel)),
+        ],
+      ),
+    ) ??
+    false;
+
 Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name,
         {String Function(String) tr = translate}) =>
     showDestructiveConfirmation(
@@ -2429,17 +2292,6 @@ Future<bool> showEmulatorRebootConfirmation(BuildContext context, String name,
       body: tr(
           'Android restarts and apps running in it close. The emulator stays on.'),
       confirmLabel: tr('Reboot'),
-      cancelLabel: tr('Cancel'),
-    );
-
-Future<bool> showEmulatorRestartConfirmation(BuildContext context, String name,
-        {String Function(String) tr = translate}) =>
-    showDestructiveConfirmation(
-      context,
-      title: tr('Restart {$name}?'),
-      body: tr(
-          'Apps running in it will close. It starts again with the new settings.'),
-      confirmLabel: tr('Save and restart'),
       cancelLabel: tr('Cancel'),
     );
 

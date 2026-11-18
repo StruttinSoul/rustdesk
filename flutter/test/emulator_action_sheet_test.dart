@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/mobile/widgets/emulator_action_sheet.dart';
-import 'package:flutter_hbb/mobile/widgets/mirpg_remote_theme.dart';
 import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -35,21 +34,25 @@ void main() {
     String? openBlocker,
     VoidCallback? onLaunchGame,
     VoidCallback? onStop,
+    VoidCallback? onReboot,
     VoidCallback? onLabel,
-    AvdCardActions? avd,
+    bool windowVisible = false,
+    VoidCallback? onToggleWindow,
     bool shuttingDown = false,
   }) =>
       EmulatorActionSheet(
-        title: 'Maple_1',
-        subtitle: 'Maple_1 · Android Emulator · Android 15',
+        title: 'Pie64',
+        subtitle: 'Pie64 · BlueStacks · Android 9',
         state: stopped ? off : live,
         stopped: stopped,
         onOpen: onOpen,
         openBlocker: openBlocker,
         onLaunchGame: onLaunchGame,
         onStop: onStop,
+        onReboot: onReboot,
+        windowVisible: windowVisible,
+        onToggleWindow: onToggleWindow,
         onLabel: onLabel ?? () {},
-        avd: avd,
         shuttingDown: shuttingDown,
         tr: fakeTr,
       );
@@ -57,7 +60,7 @@ void main() {
   ListTile tile(WidgetTester tester, String text) =>
       tester.widget<ListTile>(find.widgetWithText(ListTile, text));
 
-  testWidgets('running avd sheet offers Stop and a blocked Delete',
+  testWidgets('a running emulator whose window the PC can show offers it',
       (tester) async {
     var stops = 0;
     var toggles = 0;
@@ -65,21 +68,11 @@ void main() {
         tester,
         () => sheet(
               onOpen: () {},
-              avd: AvdCardActions(
-                running: true,
-                blocker: 'Stop it first',
-                onStop: () => stops++,
-                onToggleWindow: () => toggles++,
-                onClone: () {},
-                onRename: () {},
-                onDelete: () {},
-              ),
+              onStop: () => stops++,
+              onToggleWindow: () => toggles++,
             ));
     expect(find.text('Show on PC'), findsOneWidget);
     expect(find.text('Hide on PC'), findsNothing);
-    expect(find.text('Stop it first'), findsNWidgets(3));
-    expect(tile(tester, 'Stop').enabled, isTrue);
-    expect(tile(tester, 'Delete').enabled, isFalse);
     await tester.tap(find.text('Show on PC'));
     await tester.pumpAndSettle();
     expect(find.byType(EmulatorActionSheet), findsNothing);
@@ -91,63 +84,18 @@ void main() {
     expect(stops, 1);
   });
 
-  testWidgets('stopped avd sheet can clone, rename and delete', (tester) async {
-    final calls = <String>[];
-    await open(
-        tester,
-        () => sheet(
-              stopped: true,
-              onOpen: () {},
-              avd: AvdCardActions(
-                onClone: () => calls.add('clone'),
-                onRename: () => calls.add('rename'),
-                onDelete: () => calls.add('delete'),
-              ),
-            ));
-    for (final item in ['Clone', 'Rename', 'Delete']) {
-      if (find.byType(EmulatorActionSheet).evaluate().isEmpty) {
-        await tester.tap(find.text('go'));
-        await tester.pumpAndSettle();
-      }
-      expect(find.text('Start'), findsOneWidget);
-      expect(find.text('Stop'), findsNothing);
-      expect(find.text('Show on PC'), findsNothing);
-      expect(find.text('Hide on PC'), findsNothing);
-      await tester.tap(find.text(item));
-      await tester.pumpAndSettle();
-    }
-    expect(calls, ['clone', 'rename', 'delete']);
-  });
-
-  testWidgets('visible window avd sheet offers Hide on PC', (tester) async {
-    await open(
-        tester,
-        () => sheet(
-              onOpen: () {},
-              avd: AvdCardActions(
-                  running: true, windowVisible: true, onToggleWindow: () {}),
-            ));
+  testWidgets('a visible window offers Hide on PC; a stopped emulator neither',
+      (tester) async {
+    await open(tester,
+        () => sheet(onOpen: () {}, windowVisible: true, onToggleWindow: () {}));
     expect(find.text('Hide on PC'), findsOneWidget);
     expect(find.text('Show on PC'), findsNothing);
-  });
-
-  testWidgets('copying avd sheet blocks management and keeps Label',
-      (tester) async {
-    await open(
-        tester,
-        () => sheet(
-              stopped: true,
-              onOpen: () {},
-              avd: AvdCardActions(
-                cloningLabel: 'Cloning 42%',
-                onClone: () {},
-                onRename: () {},
-                onDelete: () {},
-              ),
-            ));
-    expect(find.text('Copy in progress'), findsNWidgets(3));
-    expect(tile(tester, 'Clone').enabled, isFalse);
-    expect(tile(tester, 'Label').enabled, isTrue);
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+    await open(tester,
+        () => sheet(stopped: true, onOpen: () {}, onToggleWindow: () {}));
+    expect(find.text('Show on PC'), findsNothing);
+    expect(find.text('Hide on PC'), findsNothing);
   });
 
   testWidgets('bluestacks sheet shows Open, Launch game, Stop and Label only',
@@ -157,22 +105,9 @@ void main() {
     for (final t in ['Open', 'Open and launch game', 'Stop', 'Label']) {
       expect(find.widgetWithText(ListTile, t), findsOneWidget, reason: t);
     }
-    for (final t in ['Clone', 'Rename', 'Delete', 'Show on PC']) {
+    for (final t in ['Clone', 'Rename', 'Delete', 'Settings', 'Show on PC']) {
       expect(find.text(t), findsNothing, reason: t);
     }
-  });
-
-  testWidgets('Delete is the last row and red', (tester) async {
-    await open(
-        tester,
-        () => sheet(
-            onOpen: () {},
-            avd: AvdCardActions(
-                onClone: () {}, onRename: () {}, onDelete: () {})));
-    final last = find.byType(ListTile).last;
-    final text = tester.widget<Text>(
-        find.descendant(of: last, matching: find.text('Delete')));
-    expect(text.style?.color, MirpgStudioPalette.dark.error);
   });
 
   testWidgets('view-only sheet disables Open with the reason but keeps Label',
@@ -196,12 +131,9 @@ void main() {
         tester,
         () => sheet(
             onOpen: () {},
-            avd: AvdCardActions(
-                running: true,
-                onStop: () => stops++,
-                onClone: () {},
-                onRename: () {},
-                onDelete: () {})),
+            onStop: () => stops++,
+            onReboot: () {},
+            onToggleWindow: () {}),
         scale: 1.75);
     expect(tester.takeException(), isNull);
     await tester.ensureVisible(find.text('Stop'));
@@ -220,23 +152,16 @@ void main() {
               onOpen: () => calls++,
               onLaunchGame: () => calls++,
               onLabel: () => labels++,
-              avd: AvdCardActions(
-                running: true,
-                onToggleWindow: () => calls++,
-                onStop: () => calls++,
-                onClone: () => calls++,
-                onRename: () => calls++,
-                onDelete: () => calls++,
-              ),
+              onToggleWindow: () => calls++,
+              onStop: () => calls++,
+              onReboot: () => calls++,
             ));
     for (final row in [
       'Open',
       'Open and launch game',
       'Show on PC',
       'Stop',
-      'Clone',
-      'Rename',
-      'Delete'
+      'Reboot',
     ]) {
       expect(tile(tester, row).enabled, isFalse, reason: row);
     }

@@ -9,9 +9,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'support/fake_translate.dart';
 
 const _accounts = [
-  PlayAccount(id: 'avd:Main', label: 'Main', word: EmulatorUiWord.live),
-  PlayAccount(id: 'avd:Alt-1', label: 'Alt-1', word: EmulatorUiWord.live),
-  PlayAccount(id: 'avd:Alt-2', label: 'Alt-2', word: EmulatorUiWord.starting),
+  PlayAccount(id: 'bluestacks:Main', label: 'Main', word: EmulatorUiWord.live),
+  PlayAccount(id: 'bluestacks:Alt-1', label: 'Alt-1', word: EmulatorUiWord.live),
+  PlayAccount(id: 'bluestacks:Alt-2', label: 'Alt-2', word: EmulatorUiWord.starting),
 ];
 
 Future<void> _pumpBar(
@@ -71,7 +71,7 @@ Future<void> _openMenu(
           onPressed: () => showPlayMenu(
             context,
             accounts: accounts,
-            currentId: 'avd:Main',
+            currentId: 'bluestacks:Main',
             switching: switching,
             onSelect: (id) => selected?.add(id),
             onShowAll: onAll,
@@ -96,7 +96,7 @@ void main() {
       PlayAccount(id: 'b', label: 'B', word: EmulatorUiWord.stopped),
       PlayAccount(id: 'c', label: 'C', word: EmulatorUiWord.starting),
       PlayAccount(id: 'd', label: 'D', word: EmulatorUiWord.problem),
-      PlayAccount(id: 'e', label: 'E', word: EmulatorUiWord.copying),
+      PlayAccount(id: 'e', label: 'E', word: EmulatorUiWord.stopping),
     ];
     expect(playRailAccounts(all, currentId: 'd').map((a) => a.id),
         ['a', 'c', 'd']);
@@ -281,7 +281,7 @@ void main() {
       // Another chip switches and closes the menu.
       await tester.tap(find.text('Alt-1'));
       await tester.pumpAndSettle();
-      expect(selected, ['avd:Alt-1']);
+      expect(selected, ['bluestacks:Alt-1']);
       expect(find.text('Alt-2'), findsNothing);
     });
 

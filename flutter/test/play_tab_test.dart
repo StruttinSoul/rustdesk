@@ -7,16 +7,16 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'support/fake_translate.dart';
 
-RemoteEmulator g(int i, String state) =>
-    RemoteEmulator(id: 'avd:E$i', name: 'E$i', provider: 'avd', state: state);
+RemoteEmulator g(int i, String state) => RemoteEmulator(
+    id: 'bluestacks:E$i', name: 'E$i', provider: 'bluestacks', state: state);
 
 const live = EmulatorUiState(EmulatorUiWord.live, 'Live');
 const stopped = EmulatorUiState(EmulatorUiWord.stopped, 'Stopped');
 const starting = EmulatorUiState(EmulatorUiWord.starting, 'Starting');
-const copying = EmulatorUiState(EmulatorUiWord.copying, 'Copying {42}%');
+const stopping = EmulatorUiState(EmulatorUiWord.stopping, 'Stopping');
 
 EmulatorTileData t(String name, EmulatorUiState state) =>
-    EmulatorTileData(id: 'avd:$name', title: name, state: state);
+    EmulatorTileData(id: 'bluestacks:$name', title: name, state: state);
 
 void main() {
   group('playTabPreviewIds', () {
@@ -24,34 +24,33 @@ void main() {
       expect(
           playTabPreviewIds([for (var i = 0; i < 4; i++) g(i, 'running')],
               firstVisibleIndex: 0),
-          ['avd:E0', 'avd:E1', 'avd:E2', 'avd:E3']);
+          ['bluestacks:E0', 'bluestacks:E1', 'bluestacks:E2', 'bluestacks:E3']);
     });
-    test('stopped, stopping, copying and shutting-down emulators never take a slot',
+    test('stopped, stopping and shutting-down emulators never take a slot',
         () {
       final guests = [
         g(0, 'stopped'),
         g(1, 'running'),
-        g(2, 'cloning'),
         g(3, 'stopping'),
         g(4, 'running')
       ];
       expect(
           playTabPreviewIds(guests,
-              firstVisibleIndex: 0, shuttingDown: (id) => id == 'avd:E4'),
-          ['avd:E1']);
+              firstVisibleIndex: 0, shuttingDown: (id) => id == 'bluestacks:E4'),
+          ['bluestacks:E1']);
     });
     test('with more than four running the ones nearest the viewport top win',
         () {
       final six = [for (var i = 0; i < 6; i++) g(i, 'running')];
       expect(playTabPreviewIds(six, firstVisibleIndex: 2),
-          ['avd:E2', 'avd:E3', 'avd:E4', 'avd:E5']);
+          ['bluestacks:E2', 'bluestacks:E3', 'bluestacks:E4', 'bluestacks:E5']);
       expect(playTabPreviewIds(six, firstVisibleIndex: 4),
-          ['avd:E4', 'avd:E5', 'avd:E3', 'avd:E2']);
+          ['bluestacks:E4', 'bluestacks:E5', 'bluestacks:E3', 'bluestacks:E2']);
     });
     test('the open emulator does not take a preview slot', () {
       final five = [for (var i = 0; i < 5; i++) g(i, 'running')];
-      expect(playTabPreviewIds(five, firstVisibleIndex: 0, activeId: 'avd:E1'),
-          ['avd:E0', 'avd:E2', 'avd:E3', 'avd:E4']);
+      expect(playTabPreviewIds(five, firstVisibleIndex: 0, activeId: 'bluestacks:E1'),
+          ['bluestacks:E0', 'bluestacks:E2', 'bluestacks:E3', 'bluestacks:E4']);
     });
   });
 
@@ -87,7 +86,7 @@ void main() {
       final requests = <String, DateTime>{};
       noteStartRequest(requests, g(0, 'stopped'), t0);
       final late = t0.add(const Duration(seconds: 120));
-      expect(startRequestPending(requests, 'avd:E0', late), isFalse);
+      expect(startRequestPending(requests, 'bluestacks:E0', late), isFalse);
       pruneStartRequests(requests, [g(0, 'stopped')], late);
       expect(requests, isEmpty);
     });
@@ -130,26 +129,26 @@ void main() {
       final seen = <String, DateTime>{};
       // The list the cache came from was asked for before the game went live.
       final listAt = t0.subtract(const Duration(seconds: 30));
-      noteSeenLive(seen, 'avd:E0', t0);
+      noteSeenLive(seen, 'bluestacks:E0', t0);
       // Long after the 120 s start request would have expired.
       final later = t0.add(const Duration(minutes: 10));
       expect(
           running(g(0, 'stopped'),
               seen: seen, listRequestedAt: listAt, now: later),
           isTrue);
-      expect(seenLiveSinceList(seen, 'avd:E0', listAt), isTrue);
-      expect(seenLiveSinceList(seen, 'avd:E0', null), isTrue);
-      expect(seenLiveSinceList(seen, 'avd:E1', listAt), isFalse);
+      expect(seenLiveSinceList(seen, 'bluestacks:E0', listAt), isTrue);
+      expect(seenLiveSinceList(seen, 'bluestacks:E0', null), isTrue);
+      expect(seenLiveSinceList(seen, 'bluestacks:E1', listAt), isFalse);
     });
     test('a list asked for after the sighting that says stopped wins', () {
       final seen = <String, DateTime>{};
-      noteSeenLive(seen, 'avd:E0', t0);
+      noteSeenLive(seen, 'bluestacks:E0', t0);
       final listAt = t0.add(const Duration(seconds: 5));
       expect(running(g(0, 'stopped'), seen: seen, listRequestedAt: listAt),
           isFalse);
-      expect(seenLiveSinceList(seen, 'avd:E0', listAt), isFalse);
+      expect(seenLiveSinceList(seen, 'bluestacks:E0', listAt), isFalse);
       // Seen live again after that list: running again.
-      noteSeenLive(seen, 'avd:E0', t0.add(const Duration(seconds: 9)));
+      noteSeenLive(seen, 'bluestacks:E0', t0.add(const Duration(seconds: 9)));
       expect(running(g(0, 'stopped'), seen: seen, listRequestedAt: listAt),
           isTrue);
     });
@@ -169,19 +168,17 @@ void main() {
       for (final state in ['running', 'ready', 'booting', 'stopping']) {
         expect(running(g(0, state)), isTrue, reason: state);
       }
-      expect(running(g(0, 'cloning')), isFalse);
     });
   });
 
   group('PlayTabBody', () {
     late int refreshes;
     late int retries;
-    late int news;
     late List<String> opens;
     late List<String> mores;
 
     setUp(() {
-      refreshes = retries = news = 0;
+      refreshes = retries = 0;
       opens = [];
       mores = [];
     });
@@ -191,7 +188,6 @@ void main() {
       List<EmulatorTileData> tiles = const [],
       bool firstLoad = false,
       String listError = '',
-      bool withNew = true,
       double scale = 1.0,
       Size size = const Size(360, 800),
     }) async {
@@ -214,7 +210,6 @@ void main() {
             onRetryList: () => retries++,
             onOpen: opens.add,
             onMore: mores.add,
-            onNew: withNew ? () => news++ : null,
             tr: fakeTr,
           ),
         ),
@@ -230,18 +225,14 @@ void main() {
       expect(find.textContaining('running'), findsNothing);
     });
 
-    testWidgets('empty list offers New emulator and names the PC',
+    testWidgets('the empty list names the PC and offers no New emulator',
         (tester) async {
       await pump(tester);
       expect(find.text('No emulators on atlas yet'), findsOneWidget);
       expect(find.text('BlueStacks instances appear here when BlueStacks is installed.'),
           findsOneWidget);
-      await tester.tap(find.text('New emulator'));
-      expect(news, 1);
-
-      await pump(tester, withNew: false);
-      expect(find.text('No emulators on atlas yet'), findsOneWidget);
       expect(find.text('New emulator'), findsNothing);
+      expect(find.text('New'), findsNothing);
     });
 
     testWidgets('list error is an inline card with Try again', (tester) async {
@@ -270,14 +261,14 @@ void main() {
           lessThan(tester.getTopLeft(find.text('B')).dx));
     });
 
-    testWidgets('copying tile is not openable from the grid', (tester) async {
-      await pump(tester, tiles: [t('A', live), t('B', copying)]);
+    testWidgets('a stopping tile is not openable from the grid', (tester) async {
+      await pump(tester, tiles: [t('A', live), t('B', stopping)]);
       await tester.tap(find.text('B'));
       await tester.pump();
       expect(opens, isEmpty);
       await tester.tap(find.text('A'));
       await tester.pump();
-      expect(opens, ['avd:A']);
+      expect(opens, ['bluestacks:A']);
     });
 
     testWidgets('the more button and long-press open actions for that tile',
@@ -285,21 +276,7 @@ void main() {
       await pump(tester, tiles: [t('A', live), t('B', stopped)]);
       await tester.tap(find.byTooltip('More B actions'));
       await tester.longPress(find.text('A'));
-      expect(mores, ['avd:B', 'avd:A']);
-    });
-
-    testWidgets('a placeholder tile is not openable and has no actions',
-        (tester) async {
-      await pump(tester, tiles: [
-        t('A', live),
-        const EmulatorTileData(
-            id: 'avd:Fresh', title: 'Fresh', state: starting, placeholder: true),
-      ]);
-      expect(find.text('Setting up…'), findsOneWidget);
-      await tester.tap(find.text('Fresh'));
-      await tester.longPress(find.text('Fresh'));
-      expect(opens, isEmpty);
-      expect(mores, isEmpty);
+      expect(mores, ['bluestacks:B', 'bluestacks:A']);
     });
 
     testWidgets('a start-requested stopped emulator reads Starting on its tile',
@@ -309,7 +286,7 @@ void main() {
       noteStartRequest(requests, g(0, 'stopped'), now);
       final state = emulatorUiState(g(0, 'stopped'),
           flags: EmulatorUiFlags(
-              startRequested: startRequestPending(requests, 'avd:E0', now)));
+              startRequested: startRequestPending(requests, 'bluestacks:E0', now)));
       await pump(tester, tiles: [t('E0', state)]);
       expect(find.text('Starting'), findsOneWidget);
       expect(find.text('Stopped'), findsNothing);
@@ -353,9 +330,9 @@ void main() {
         tester,
         scale: 1.3,
         tiles: [
-          for (final s in [live, stopped, starting, copying])
+          for (final s in [live, stopped, starting, stopping])
             EmulatorTileData(
-                id: 'avd:$long${s.label}',
+                id: 'bluestacks:$long${s.label}',
                 title: '$long ${s.label}',
                 secondary: long,
                 state: s),
@@ -365,44 +342,11 @@ void main() {
       expect(find.byType(EmulatorTile), findsNWidgets(4));
     });
 
-    testWidgets('New sits in the header row, calls onNew, and there is no FAB',
+    testWidgets('the header has the counts and no New, and there is no FAB',
         (tester) async {
       await pump(tester, tiles: [t('A', live), t('B', stopped)]);
       expect(find.byType(FloatingActionButton), findsNothing);
-      final header = tester.getRect(find.text('Emulators · 1/2 running'));
-      final newButton = find.ancestor(
-          of: find.text('New'),
-          matching: find.byWidgetPredicate((w) => w is TextButton));
-      expect(newButton, findsOneWidget);
-      final rect = tester.getRect(newButton);
-      expect(rect.center.dy, closeTo(header.center.dy, 2));
-      expect(rect.right, greaterThan(360 - 32));
-      expect(rect.height, greaterThanOrEqualTo(48));
-      await tester.tap(newButton);
-      expect(news, 1);
-    });
-
-    testWidgets('New stays reachable on first load and on a list error',
-        (tester) async {
-      await pump(tester, firstLoad: true);
-      await tester.tap(find.text('New'));
-      expect(news, 1);
-
-      await pump(tester, listError: 'The PC did not return its emulator list.');
-      await tester.tap(find.text('New'));
-      expect(news, 2);
-      expect(find.text('Try again'), findsOneWidget);
-    });
-
-    testWidgets('the empty state keeps its single New emulator button',
-        (tester) async {
-      await pump(tester);
-      expect(find.text('New emulator'), findsOneWidget);
-      expect(find.text('New'), findsNothing);
-    });
-
-    testWidgets('no New in the header when onNew is null', (tester) async {
-      await pump(tester, tiles: [t('A', live)], withNew: false);
+      expect(find.text('Emulators · 1/2 running'), findsOneWidget);
       expect(find.text('New'), findsNothing);
     });
 

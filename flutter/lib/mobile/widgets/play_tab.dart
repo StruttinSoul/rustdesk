@@ -61,7 +61,7 @@ int playTabFirstVisibleIndex(double scrollOffset, double rowExtent) {
 
 /// Which guests get one of the four preview streams on Play.
 ///
-/// Stopped, stopping, copying and shutting-down emulators never take a slot,
+/// Stopped, stopping and shutting-down emulators never take a slot,
 /// nor does the one already open. Tiles at or below [firstVisibleIndex] come
 /// first, top down; then the ones above it, nearest first.
 List<String> playTabPreviewIds(
@@ -73,7 +73,6 @@ List<String> playTabPreviewIds(
   bool candidate(RemoteEmulator guest) =>
       guest.state != 'stopped' &&
       guest.state != 'stopping' &&
-      guest.state != 'cloning' &&
       !(shuttingDown?.call(guest.id) ?? false) &&
       guest.id != activeId;
   final first = firstVisibleIndex.clamp(0, guests.length);
@@ -123,7 +122,7 @@ bool seenLiveSinceList(
 /// Whether [instance] is running as far as this phone knows. The PC's list
 /// is not refreshed while a game streams, so a "stopped" in it may be stale:
 /// a start request within [kPlayStartRequestHold] or a live sighting since
-/// that list was asked for overrides it. Copying never counts as running.
+/// that list was asked for overrides it.
 bool emulatorRunningAsKnown(
   RemoteEmulator instance, {
   required Map<String, DateTime> startRequests,
@@ -131,7 +130,7 @@ bool emulatorRunningAsKnown(
   required DateTime? listRequestedAt,
   required DateTime now,
 }) {
-  if (instance.state != 'stopped') return instance.state != 'cloning';
+  if (instance.state != 'stopped') return true;
   return startRequestPending(startRequests, instance.id, now) ||
       seenLiveSinceList(seenLive, instance.id, listRequestedAt);
 }
@@ -149,7 +148,6 @@ class PlayTabBody extends StatelessWidget {
     required this.onRetryList,
     required this.onOpen,
     required this.onMore,
-    this.onNew,
     this.scrollController,
     this.tr = translate,
   });
@@ -162,7 +160,6 @@ class PlayTabBody extends StatelessWidget {
   final VoidCallback onRetryList;
   final void Function(String id) onOpen;
   final void Function(String id) onMore;
-  final VoidCallback? onNew;
   final ScrollController? scrollController;
   final String Function(String) tr;
 
@@ -278,14 +275,6 @@ class PlayTabBody extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(tr('No emulators on {$hostName} yet'), style: text.titleMedium),
-          if (onNew != null) ...[
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: onNew,
-              icon: const Icon(Icons.add),
-              label: Text(tr('New emulator')),
-            ),
-          ],
           const SizedBox(height: 12),
           Text(
               tr('BlueStacks instances appear here when BlueStacks is installed.'),
@@ -298,8 +287,7 @@ class PlayTabBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    final listed = tiles.where((tile) => !tile.placeholder);
-    final running = listed
+    final running = tiles
         .where((tile) =>
             tile.state.word == EmulatorUiWord.live ||
             tile.state.word == EmulatorUiWord.starting)
@@ -311,11 +299,7 @@ class PlayTabBody extends StatelessWidget {
             child: child,
           ),
         );
-    // New is always reachable: on the header row, except where the empty
-    // state shows its own New emulator button.
     final showCounts = !firstLoad && tiles.isNotEmpty;
-    final emptyState = !firstLoad && tiles.isEmpty && listError.isEmpty;
-    final showHeader = showCounts || (onNew != null && !emptyState);
     return LayoutBuilder(builder: (context, constraints) {
       final bodyHeight = constraints.maxHeight;
       return RefreshIndicator(
@@ -324,29 +308,17 @@ class PlayTabBody extends StatelessWidget {
           controller: scrollController,
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
-            if (showHeader)
+            if (showCounts)
               box(
                 SizedBox(
                   height: _headerExtent,
                   child: Row(children: [
                     Expanded(
                       child: Text(
-                        showCounts
-                            ? '${tr('Emulators')} · ${tr('{$running/${listed.length}} running')}'
-                            : tr('Emulators'),
+                        '${tr('Emulators')} · ${tr('{$running/${tiles.length}} running')}',
                         style: text.titleSmall,
                       ),
                     ),
-                    if (onNew != null)
-                      TextButton.icon(
-                        style: TextButton.styleFrom(
-                          minimumSize: const Size(0, kMinInteractiveDimension),
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                        ),
-                        onPressed: onNew,
-                        icon: const Icon(Icons.add, size: 20),
-                        label: Text(tr('New')),
-                      ),
                   ]),
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: _margin),
@@ -363,10 +335,8 @@ class PlayTabBody extends StatelessWidget {
                   key: ValueKey(data.id),
                   data: data,
                   tr: tr,
-                  onOpen: data.state.canOpen && !data.placeholder
-                      ? () => onOpen(data.id)
-                      : null,
-                  onMore: data.placeholder ? null : () => onMore(data.id),
+                  onOpen: data.state.canOpen ? () => onOpen(data.id) : null,
+                  onMore: () => onMore(data.id),
                 );
               }),
             const SliverToBoxAdapter(

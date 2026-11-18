@@ -1,9 +1,6 @@
-import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_hbb/mobile/pages/emulator_page.dart';
-import 'package:flutter_hbb/mobile/widgets/avd_settings_sheet.dart';
 import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:uuid/uuid.dart';
@@ -12,18 +9,16 @@ const _caps = [
   'operation.identity.v1',
   'operation.ack.v1',
   'host.emulator_shutdown.v1',
-  'host.avd_manage.v1',
   'host.emulator_power.v1',
-  'host.avd_settings.v1',
 ];
-const _id = 'avd:Maple_1';
+const _id = 'bluestacks:Pie64';
 
 Map<String, dynamic> _list(int requestId, String state) => {
       'type': 'inventory',
       'request_id': requestId,
       'protocol_version': 1,
       'instances': [
-        {'target_id': _id, 'provider': 'avd', 'name': 'Maple 1', 'state': state},
+        {'target_id': _id, 'provider': 'bluestacks', 'name': 'Pie64', 'state': state},
       ],
       'provider_errors': const [],
       'capabilities': _caps,
@@ -166,45 +161,5 @@ void main() {
     expect(model.canRebootEmulator(_id, runningAsKnown: true), isTrue);
     expect(model.canShutdownEmulator(_id, runningAsKnown: true), isTrue);
     model.dispose();
-  });
-
-  test('an error reply to a settings read completes it', () async {
-    final sent = <Map<String, dynamic>>[];
-    final model = EmulatorModel(Uuid().v4obj(),
-        commandSender: (_, value) async => sent.add(jsonDecode(value)));
-    await model.refresh();
-    model.handleResponse(_list(sent.last['request_id'], 'ready'));
-    final load = model.loadAvdSettings(_id);
-    await Future<void>.delayed(Duration.zero);
-    final read = sent.lastWhere((m) => m['action'] == 'avd_settings_get');
-    model.handleResponse({
-      'type': 'error', 'request_id': read['request_id'], 'protocol_version': 1,
-      'error': 'Host management action requires control permission',
-    });
-    final loaded = await load;
-    expect(loaded.info, isNull);
-    expect(loaded.error, contains('control permission'));
-    model.dispose();
-  });
-
-  testWidgets('settings show a spinner while they load', (tester) async {
-    final pending = Completer<int>();
-    int? got;
-    await tester.pumpWidget(MaterialApp(
-        home: Builder(
-            builder: (context) => Scaffold(
-                body: TextButton(
-                    onPressed: () async => got = await waitWithProgress(
-                        context, pending.future,
-                        label: 'Loading settings…'),
-                    child: const Text('go'))))));
-    await tester.tap(find.text('go'));
-    await tester.pump();
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(find.text('Loading settings…'), findsOneWidget);
-    pending.complete(5);
-    await tester.pumpAndSettle();
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(got, 5);
   });
 }

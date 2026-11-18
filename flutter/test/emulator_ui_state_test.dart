@@ -1,16 +1,12 @@
 import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'support/fake_translate.dart';
-
-RemoteEmulator emu(String state, {String error = '', int progress = 0}) =>
-    RemoteEmulator(
-        id: 'avd:Main',
-        name: 'Main',
-        provider: 'avd',
-        state: state,
-        error: error,
-        progressPercent: progress);
+RemoteEmulator emu(String state, {String error = ''}) => RemoteEmulator(
+    id: 'bluestacks:Main',
+    name: 'Main',
+    provider: 'bluestacks',
+    state: state,
+    error: error);
 
 void main() {
   test('a stopped emulator the phone has seen live since the list reads Live',
@@ -42,23 +38,12 @@ void main() {
     expect((t.causeKey, t.pcMessage), ("Couldn't stop", ''));
     expect(t.hasCause, isTrue);
   });
-  test('copying clamps the percentage', () {
-    expect(emulatorUiState(emu('cloning', progress: 140)).label,
-        'Copying {100}%');
-    expect(emulatorUiState(emu('cloning', progress: -5)).label,
-        'Copying {0}%');
-    expect(fakeTr(emulatorUiState(emu('cloning', progress: 42)).label),
-        'Copying 42%');
-    final s = emulatorUiState(emu('cloning', progress: 42));
-    expect(s.word, EmulatorUiWord.copying);
-    expect(s.canOpen, isFalse);
-  });
   test('guest failure or failed preview is a Problem', () {
-    const failed = RemotePreview('avd:Main', 7, 'failed', 0, 0, 'Encoder died');
+    const failed = RemotePreview('bluestacks:Main', 7, 'failed', 0, 0, 'Encoder died');
     final s = emulatorUiState(emu('running'), preview: failed);
     expect((s.word, s.pcMessage, s.causeKey),
         (EmulatorUiWord.problem, 'Encoder died', 'Stream stopped'));
-    const noErr = RemotePreview('avd:Main', 7, 'failed', 0, 0, '');
+    const noErr = RemotePreview('bluestacks:Main', 7, 'failed', 0, 0, '');
     final t = emulatorUiState(emu('running'),
         preview: noErr, flags: const EmulatorUiFlags(guestFailure: 'Lost'));
     expect(t.pcMessage, 'Lost');
@@ -100,7 +85,7 @@ void main() {
     expect(s.hasCause, isFalse);
   });
   test('stalled preview is a Problem, current frame is Live', () {
-    const p = RemotePreview('avd:Main', 7, 'streaming', 1080, 1920, '');
+    const p = RemotePreview('bluestacks:Main', 7, 'streaming', 1080, 1920, '');
     final s = emulatorUiState(emu('running'), preview: p);
     expect((s.word, s.causeKey), (EmulatorUiWord.problem, 'Stream stopped'));
     expect(

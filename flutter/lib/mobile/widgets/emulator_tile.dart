@@ -15,8 +15,7 @@ MirpgStatusTone emulatorStateTone(EmulatorUiWord word) => switch (word) {
       EmulatorUiWord.starting => MirpgStatusTone.warning,
       EmulatorUiWord.problem => MirpgStatusTone.error,
       EmulatorUiWord.stopped ||
-      EmulatorUiWord.stopping ||
-      EmulatorUiWord.copying =>
+      EmulatorUiWord.stopping =>
         MirpgStatusTone.neutral,
     };
 
@@ -49,7 +48,6 @@ class EmulatorTileData {
     required this.state,
     this.image,
     this.windowVisible = false,
-    this.placeholder = false,
   });
 
   final String id;
@@ -62,7 +60,6 @@ class EmulatorTileData {
   final EmulatorUiState state;
   final ui.Image? image;
   final bool windowVisible;
-  final bool placeholder;
 }
 
 String _causeText(EmulatorUiState state, EmulatorTr tr) {
@@ -79,30 +76,6 @@ Color _toneColor(BuildContext context, MirpgStatusTone tone) {
     MirpgStatusTone.error => p.error,
     MirpgStatusTone.neutral => p.textSecondary,
   };
-}
-
-class _DashedBorderPainter extends CustomPainter {
-  _DashedBorderPainter(this.color);
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5;
-    final path = Path()
-      ..addRRect(RRect.fromRectAndRadius(
-          Offset.zero & size, const Radius.circular(12)));
-    for (final metric in path.computeMetrics()) {
-      for (double d = 0; d < metric.length; d += 10) {
-        canvas.drawPath(metric.extractPath(d, d + 5), paint);
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(_DashedBorderPainter old) => old.color != color;
 }
 
 class _PcFlag extends StatelessWidget {
@@ -211,18 +184,7 @@ class EmulatorTile extends StatelessWidget {
   Widget _centre(BuildContext context) {
     final state = data.state;
     final text = Theme.of(context).textTheme;
-    final palette = MirpgStudioPalette.of(context);
     const onVideo = Color(0xFFE6EDF3);
-    if (data.placeholder) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Text(tr('Setting up…'),
-              textAlign: TextAlign.center,
-              style: text.bodyMedium?.copyWith(color: onVideo)),
-        ),
-      );
-    }
     final cause = _causeText(state, tr);
     switch (state.word) {
       case EmulatorUiWord.stopped:
@@ -259,18 +221,6 @@ class EmulatorTile extends StatelessWidget {
                   onPressed: onOpen,
                   child: Text(tr('Reconnect'))),
             ]));
-      case EmulatorUiWord.copying:
-        final match = RegExp(r'\{(\d+)\}').firstMatch(state.label);
-        final percent = int.tryParse(match?.group(1) ?? '');
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 40),
-            child: LinearProgressIndicator(
-              value: percent == null ? null : percent.clamp(0, 100) / 100,
-              color: palette.accent,
-            ),
-          ),
-        );
       case EmulatorUiWord.starting:
         return const Center(
           child: Padding(
@@ -288,25 +238,18 @@ class EmulatorTile extends StatelessWidget {
   }
 
   Widget _preview(BuildContext context) {
-    final palette = MirpgStudioPalette.of(context);
     final image = data.image;
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: LayoutBuilder(builder: (context, constraints) {
         // A stopped or failed tile's action is also its status, so it keeps
         // the room when the preview is squeezed.
-        final overlays = !data.placeholder &&
-            !(constraints.maxHeight < _kTightPreview &&
+        final overlays = !(constraints.maxHeight < _kTightPreview &&
                 (data.state.word == EmulatorUiWord.stopped ||
                     data.state.word == EmulatorUiWord.problem));
         return Stack(fit: StackFit.expand, children: [
           const ColoredBox(color: Colors.black),
-          if (image != null && !data.placeholder)
-            RawImage(image: image, fit: BoxFit.contain),
-          if (data.placeholder)
-            Positioned.fill(
-                child: CustomPaint(
-                    painter: _DashedBorderPainter(palette.outline))),
+          if (image != null) RawImage(image: image, fit: BoxFit.contain),
           _centre(context),
           if (overlays)
             Positioned(
@@ -348,8 +291,7 @@ class EmulatorTile extends StatelessWidget {
             ),
           ),
         ),
-        if (!data.placeholder)
-          _MoreButton(title: data.title, onMore: onMore, tr: tr),
+        _MoreButton(title: data.title, onMore: onMore, tr: tr),
       ]),
     );
   }
@@ -358,8 +300,8 @@ class EmulatorTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return InkWell(
       borderRadius: BorderRadius.circular(12),
-      onTap: data.placeholder ? null : onOpen,
-      onLongPress: data.placeholder ? null : onMore,
+      onTap: onOpen,
+      onLongPress: onMore,
       child: LayoutBuilder(builder: (context, constraints) {
         final preview = _preview(context);
         return Column(
@@ -401,20 +343,16 @@ class EmulatorRow extends StatelessWidget {
     final statusLine = state.word == EmulatorUiWord.problem && cause.isNotEmpty
         ? '${tr(state.label)} · $cause'
         : tr(state.label);
-    final (IconData, String)? action = data.placeholder
-        ? null
-        : switch (state.word) {
-            EmulatorUiWord.stopped => (Icons.play_arrow, 'Start'),
-            EmulatorUiWord.problem => (Icons.refresh, 'Reconnect'),
-            EmulatorUiWord.live ||
-            EmulatorUiWord.starting =>
-              (Icons.open_in_new, 'Open'),
-            _ => null,
-          };
+    final (IconData, String)? action = switch (state.word) {
+      EmulatorUiWord.stopped => (Icons.play_arrow, 'Start'),
+      EmulatorUiWord.problem => (Icons.refresh, 'Reconnect'),
+      EmulatorUiWord.live || EmulatorUiWord.starting => (Icons.open_in_new, 'Open'),
+      _ => null,
+    };
     final image = data.image;
     return InkWell(
-      onTap: data.placeholder ? null : onOpen,
-      onLongPress: data.placeholder ? null : onMore,
+      onTap: onOpen,
+      onLongPress: onMore,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         child: Row(children: [
@@ -425,8 +363,7 @@ class EmulatorRow extends StatelessWidget {
               height: 62,
               child: Stack(fit: StackFit.expand, children: [
                 const ColoredBox(color: Colors.black),
-                if (image != null && !data.placeholder)
-                  RawImage(image: image, fit: BoxFit.contain),
+                if (image != null) RawImage(image: image, fit: BoxFit.contain),
               ]),
             ),
           ),
@@ -446,7 +383,7 @@ class EmulatorRow extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: text.bodySmall
                           ?.copyWith(color: palette.textSecondary)),
-                Text(data.placeholder ? tr('Setting up…') : statusLine,
+                Text(statusLine,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: text.bodySmall?.copyWith(
@@ -455,8 +392,7 @@ class EmulatorRow extends StatelessWidget {
               ],
             ),
           ),
-          if (!data.placeholder)
-            _MoreButton(title: data.title, onMore: onMore, tr: tr),
+          _MoreButton(title: data.title, onMore: onMore, tr: tr),
           if (action != null)
             IconButton(
               icon: Icon(action.$1),
