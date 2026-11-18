@@ -20,6 +20,14 @@ bool shouldCancelGuestComposition({
     (currentSessionId != previousSessionId ||
         currentTargetId != previousTargetId);
 
+/// Whether a failed game of [target] may reconnect now: the PC lists it
+/// ready, and after a Reboot from the phone Android is back (a reconnect
+/// while it restarts would wait out the PC's boot timeout).
+bool guestReadyForReconnect(EmulatorModel model, String target) =>
+    !model.isRebooting(target) &&
+    model.instances
+        .any((instance) => instance.id == target && instance.readyForReconnect);
+
 /// Retry only an unexpectedly failed, previously usable guest. Never boot an
 /// instance in the background or loop indefinitely against a broken runtime.
 Duration? guestAutoReconnectDelay({
@@ -486,8 +494,7 @@ class _EmulatorPageState extends State<EmulatorPage>
     _guestStableTimer?.cancel();
     _guestStableTimer = null;
     final target = model.targetId;
-    final running = model.instances
-        .any((instance) => instance.id == target && instance.readyForReconnect);
+    final running = guestReadyForReconnect(model, target);
     final delay = guestAutoReconnectDelay(
       sessionFailed: model.selected &&
           !model.connecting &&
@@ -520,8 +527,7 @@ class _EmulatorPageState extends State<EmulatorPage>
           model.targetId != target ||
           model.guestSessionId != failedSession ||
           model.error != failedError ||
-          !model.instances.any((instance) =>
-              instance.id == target && instance.readyForReconnect)) {
+          !guestReadyForReconnect(model, target)) {
         return;
       }
       _guestReconnectAttempts++;

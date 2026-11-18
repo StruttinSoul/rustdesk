@@ -86,14 +86,19 @@ void main() {
               model.startupPhase == 'failed' &&
               model.error.isNotEmpty,
           guestWasLive: true,
-          emulatorRunning: model.instances
-              .any((item) => item.id == _id && item.readyForReconnect),
+          emulatorRunning: guestReadyForReconnect(model, _id),
           foreground: true,
           canControl: true,
           attempts: 0,
         );
 
+    // The list at the acknowledgement may still say ready: no retry while
+    // Android restarts.
+    model.handleResponse(_list(lists().last['request_id'], 'ready'));
+    expect(model.isRebooting(_id), isTrue);
+    expect(retry(), isNull);
     // Android is down: no retry yet.
+    await tester.pump(const Duration(milliseconds: 2600));
     model.handleResponse(_list(lists().last['request_id'], 'booting'));
     expect(retry(), isNull);
     // The phone keeps listing on its own.
