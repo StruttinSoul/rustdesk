@@ -24,6 +24,7 @@ import 'terminal_page.dart';
 import '../widgets/mirpg_remote_theme.dart';
 import '../../common/widgets/aperture_brand.dart';
 import '../widgets/avd_manage_sheets.dart';
+import '../widgets/avd_settings_sheet.dart';
 import '../widgets/clipboard_transfer_sheet.dart';
 import '../widgets/computers_hero.dart' show hostDisplayName;
 import '../widgets/emulator_action_sheet.dart';
@@ -872,6 +873,51 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     _reportAvdResult(result, success: translate('Deleted {$shown}'));
   }
 
+  /// Restarts Android inside [target]; the game stays open and reconnects
+  /// once Android is back.
+  Future<void> _rebootEmulator(_Target target) async {
+    final shown = _shownName(target.id, target.name);
+    if (!await showEmulatorRebootConfirmation(
+            context, _confirmationName(target)) ||
+        !mounted) {
+      return;
+    }
+    _reportAvdResult(await model.rebootEmulator(target.id),
+        success: translate('Rebooting {$shown}'));
+  }
+
+  /// Memory, CPU cores and screen of managed emulator [target].
+  Future<void> _openAvdSettings(_Target target) async {
+    final shown = _shownName(target.id, target.name);
+    final loaded = await model.loadAvdSettings(target.id);
+    if (!mounted) return;
+    final info = loaded.info;
+    if (info == null) {
+      if (loaded.error.isNotEmpty) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(loaded.error)));
+      }
+      return;
+    }
+    final choice = await showAvdSettingsSheet(context, name: shown, info: info);
+    if (choice == null || !mounted) return;
+    if (choice.restart) {
+      if (!await showEmulatorRestartConfirmation(
+              context, _confirmationName(target)) ||
+          !mounted) {
+        return;
+      }
+      if (_fullscreen?.id == target.id) await _dashboard();
+    }
+    final result = await model.saveAvdSettings(target.id, choice.change,
+        restart: choice.restart);
+    _reportAvdResult(result,
+        success: choice.restart
+            ? translate('Restarting {$shown}')
+            : translate(
+                info.running ? 'Saved for the next start' : 'Settings saved'));
+  }
+
   Future<void> _toggleAvdWindow(_Target target) async {
     final show = !(target.instance?.windowVisible ?? false);
     _reportAvdResult(await model.setAvdWindowVisible(target.id, show),
@@ -1035,6 +1081,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       onClone: () => unawaited(_cloneAvd(target)),
       onRename: () => unawaited(_renameAvd(target)),
       onDelete: () => unawaited(_deleteAvd(target)),
+      onSettings: model.canChangeAvdSettings(target.id)
+          ? () => unawaited(_openAvdSettings(target))
+          : null,
     );
   }
 
@@ -1081,6 +1130,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
                     CapabilityStatus.supported &&
                 control
             ? () => unawaited(_shutdownEmulator(target))
+            : null,
+        onReboot: control && model.canRebootEmulator(target.id)
+            ? () => unawaited(_rebootEmulator(target))
             : null,
         onLabel: () => unawaited(_editLabel(target)),
         avd: _avdActions(target),
@@ -2357,6 +2409,28 @@ Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name,
       title: tr('Stop {$name}?'),
       body: tr('Apps running in it will close.'),
       confirmLabel: tr('Stop'),
+      cancelLabel: tr('Cancel'),
+    );
+
+Future<bool> showEmulatorRebootConfirmation(BuildContext context, String name,
+        {String Function(String) tr = translate}) =>
+    showDestructiveConfirmation(
+      context,
+      title: tr('Reboot {$name}?'),
+      body: tr(
+          'Android restarts and apps running in it close. The emulator stays on.'),
+      confirmLabel: tr('Reboot'),
+      cancelLabel: tr('Cancel'),
+    );
+
+Future<bool> showEmulatorRestartConfirmation(BuildContext context, String name,
+        {String Function(String) tr = translate}) =>
+    showDestructiveConfirmation(
+      context,
+      title: tr('Restart {$name}?'),
+      body: tr(
+          'Apps running in it will close. It starts again with the new settings.'),
+      confirmLabel: tr('Save and restart'),
       cancelLabel: tr('Cancel'),
     );
 

@@ -67,6 +67,62 @@ pub fn emulator_request_from_json(payload: &str) -> Option<EmulatorRequest> {
             action: "gateway_status".to_owned(),
             ..Default::default()
         }),
+        "avd_settings_get" => {
+            let component = value["component"].as_str()?.to_owned();
+            if !component
+                .strip_prefix("avd:")
+                .map_or(false, crate::server::emulator::remote::valid_avd_name)
+            {
+                return None;
+            }
+            request.set_host(EmulatorHostRequest {
+                action: "avd_settings_get".to_owned(),
+                component,
+                ..Default::default()
+            });
+        }
+        "avd_settings_set" => {
+            let number = |key: &str| u32::try_from(value[key].as_u64().unwrap_or_default()).ok();
+            let candidate = EmulatorHostRequest {
+                action: "avd_settings_set".to_owned(),
+                component: value["component"].as_str()?.to_owned(),
+                avd_ram_mb: number("ram_mb")?,
+                avd_cpu_cores: number("cpu_cores")?,
+                avd_screen_width: number("screen_width")?,
+                avd_screen_height: number("screen_height")?,
+                avd_restart: value["restart"].as_bool().unwrap_or(false),
+                ..Default::default()
+            };
+            if !crate::server::emulator::remote::valid_avd_settings(&candidate) {
+                return None;
+            }
+            let (operation_id, session_identity, target_identity, session_generation) =
+                host_operation_identity(&value, &format!("emulator:{}", candidate.component))?;
+            request.set_host(EmulatorHostRequest {
+                operation_id,
+                session_identity,
+                target_identity,
+                session_generation,
+                ..candidate
+            });
+        }
+        "emulator_reboot" => {
+            let component = value["component"].as_str()?.to_owned();
+            if !crate::server::emulator::remote::valid_shutdown_target(&component) {
+                return None;
+            }
+            let (operation_id, session_identity, target_identity, session_generation) =
+                host_operation_identity(&value, &format!("emulator:{component}"))?;
+            request.set_host(EmulatorHostRequest {
+                action: "emulator_reboot".to_owned(),
+                component,
+                operation_id,
+                session_identity,
+                target_identity,
+                session_generation,
+                ..Default::default()
+            });
+        }
         "gateway_setup_open" => {
             let target = "gateway:setup";
             let (operation_id, session_identity, target_identity, session_generation) =
@@ -669,6 +725,51 @@ mod tests {
         assert!(host(&base("avd_clone", Some("bluestacks:Tiramisu64"), Some("Maple_2"), "emulator:bluestacks:Tiramisu64")).is_none());
         assert!(host(&base("avd_create", None, Some("Maple_2"), "emulator:avd:Maple_1")).is_none());
         assert!(host(&base("avd_delete", Some("avd:Maple_1"), None, "emulator:avd:Other")).is_none());
+    }
+
+    #[test]
+    fn parses_emulator_power_and_avd_settings_requests() {
+        use base::message_proto::emulator_request::Union;
+        let host = |value: serde_json::Value| match emulator_request_from_json(&value.to_string())?.union {
+            Some(Union::Host(host)) => Some(host),
+            _ => None,
+        };
+        let identity = |action: &str, component: &str| serde_json::json!({"protocol_version":1,"request_id":51,
+            "action":action,"component":component,"operation_id":"op-51","session_identity":"scope-a",
+            "target_identity":format!("emulator:{component}"),"session_generation":4});
+        let reboot = host(identity("emulator_reboot", "bluestacks:Tiramisu64")).unwrap();
+        assert_eq!((reboot.action.as_str(), reboot.component.as_str()), ("emulator_reboot", "bluestacks:Tiramisu64"));
+        assert_eq!(reboot.operation_id, "op-51");
+        assert!(host(identity("emulator_reboot", "avd:Maple_1")).is_some());
+        assert!(host(identity("emulator_reboot", "ldplayer:0")).is_none());
+        let mut forged = identity("emulator_reboot", "avd:Maple_1");
+        forged["target_identity"] = "emulator:avd:Other".into();
+        assert!(host(forged).is_none());
+
+        let mut set = identity("avd_settings_set", "avd:Maple_1");
+        set["ram_mb"] = 6144.into();
+        set["screen_width"] = 1080.into();
+        set["screen_height"] = 2400.into();
+        set["restart"] = true.into();
+        let parsed = host(set.clone()).unwrap();
+        assert_eq!((parsed.avd_ram_mb, parsed.avd_cpu_cores), (6144, 0));
+        assert_eq!((parsed.avd_screen_width, parsed.avd_screen_height), (1080, 2400));
+        assert!(parsed.avd_restart);
+        assert_eq!(parsed.target_identity, "emulator:avd:Maple_1");
+        let mut odd = set.clone();
+        odd["ram_mb"] = 5000.into();
+        assert!(host(odd).is_none());
+        let mut unscoped = set.clone();
+        unscoped.as_object_mut().unwrap().remove("operation_id");
+        assert!(host(unscoped).is_none());
+        let empty = identity("avd_settings_set", "avd:Maple_1");
+        assert!(host(empty).is_none(), "a save must change something");
+
+        let get = host(serde_json::json!({"protocol_version":1,"request_id":52,
+            "action":"avd_settings_get","component":"avd:Maple_1"})).unwrap();
+        assert_eq!((get.action.as_str(), get.component.as_str()), ("avd_settings_get", "avd:Maple_1"));
+        assert!(host(serde_json::json!({"protocol_version":1,"request_id":53,
+            "action":"avd_settings_get","component":"bluestacks:Tiramisu64"})).is_none());
     }
 
     #[test]

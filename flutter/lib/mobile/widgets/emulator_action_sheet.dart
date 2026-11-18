@@ -5,7 +5,8 @@ import '../../models/emulator_model.dart';
 import 'emulator_tile.dart';
 import 'mirpg_remote_theme.dart';
 
-/// Managed Android emulator actions (clone, rename, delete, window, stop).
+/// Managed Android emulator actions (clone, rename, delete, window, stop,
+/// settings).
 class AvdCardActions {
   const AvdCardActions({
     this.cloningLabel,
@@ -17,6 +18,7 @@ class AvdCardActions {
     this.onClone,
     this.onRename,
     this.onDelete,
+    this.onSettings,
   });
 
   /// Set while the emulator is being copied; the card then has no menu.
@@ -31,6 +33,10 @@ class AvdCardActions {
   final VoidCallback? onClone;
   final VoidCallback? onRename;
   final VoidCallback? onDelete;
+
+  /// Memory, CPU cores and screen; usable while running (saved for the next
+  /// start), blocked only while a copy is in progress.
+  final VoidCallback? onSettings;
 
   bool get hasMenu => cloningLabel == null;
 }
@@ -49,6 +55,7 @@ class EmulatorActionSheet extends StatelessWidget {
     this.openBlocker,
     this.onLaunchGame,
     this.onStop,
+    this.onReboot,
     required this.onLabel,
     this.avd,
     this.shuttingDown = false,
@@ -63,6 +70,9 @@ class EmulatorActionSheet extends StatelessWidget {
   final String? openBlocker;
   final VoidCallback? onLaunchGame;
   final VoidCallback? onStop;
+
+  /// Restarts Android inside the running emulator; the emulator stays on.
+  final VoidCallback? onReboot;
   final VoidCallback onLabel;
   final AvdCardActions? avd;
   final bool shuttingDown;
@@ -160,6 +170,18 @@ class EmulatorActionSheet extends StatelessWidget {
                     icon: Icons.stop_circle_outlined,
                     label: tr('Stop'),
                     action: unlessShuttingDown(stop)),
+              if (!stopped && onReboot != null)
+                row(rowContext,
+                    icon: Icons.restart_alt,
+                    label: tr('Reboot'),
+                    action: unlessShuttingDown(onReboot)),
+              if (managed?.onSettings != null)
+                row(rowContext,
+                    icon: Icons.tune,
+                    label: tr('Settings'),
+                    action:
+                        copying ? null : unlessShuttingDown(managed!.onSettings),
+                    subtitle: copying ? tr('Copy in progress') : null),
               const Divider(height: 1),
               row(rowContext,
                   icon: Icons.label_outline, label: tr('Label'), action: onLabel),
