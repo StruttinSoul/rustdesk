@@ -43,18 +43,29 @@ impl fmt::Debug for FeedToken {
 pub struct FeedEndpoint {
     pub port: u16,
     pub token: FeedToken,
+    /// `emulator-<port.serial>`: the guest's ADB serial, when the file names it.
+    pub serial: Option<String>,
 }
 
 /// Reads `grpc.port` and `grpc.token` from an emulator `pid_<pid>.ini`.
 pub fn parse_running_ini(text: &str) -> ResultType<FeedEndpoint> {
     let mut port = None;
     let mut token = None;
+    let mut serial = None;
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         match key.trim() {
             "grpc.port" => port = value.trim().parse::<u16>().ok().filter(|p| *p != 0),
+            "port.serial" => {
+                serial = value
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port >= 5554 && port % 2 == 0)
+                    .map(|port| format!("emulator-{port}"))
+            }
             "grpc.token" => {
                 let value = value.trim();
                 if !value.is_empty() {
@@ -68,6 +79,7 @@ pub fn parse_running_ini(text: &str) -> ResultType<FeedEndpoint> {
         (Some(port), Some(token)) => Ok(FeedEndpoint {
             port,
             token: FeedToken(token),
+            serial,
         }),
         (None, _) => bail!("the emulator discovery file has no valid grpc.port"),
         (_, None) => bail!("the emulator discovery file has no grpc.token"),
@@ -471,6 +483,141 @@ impl Drop for ScreenFeed {
     }
 }
 
+const STATUS_PATH: &str = "/android.emulation.control.EmulatorController/getStatus";
+/// The controller answers from the emulator process, not from Android, so it
+/// stays quick while Android or its ADB transport is stuck.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// What the emulator's controller says about Android (`EmulatorStatus`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GuestStatus {
+    pub booted: bool,
+    pub uptime_ms: u64,
+    pub heartbeat: u64,
+}
+
+/// Decodes `EmulatorStatus`, skipping the fields it does not need.
+pub fn decode_status(bytes: &[u8]) -> ResultType<GuestStatus> {
+    let mut input = CodedInputStream::from_bytes(bytes);
+    let mut status = GuestStatus::default();
+    while let Some(tag) = input.read_raw_tag_or_eof()? {
+        match tag {
+            16 => status.uptime_ms = input.read_uint64()?,
+            24 => status.booted = input.read_bool()?,
+            48 => status.heartbeat = input.read_uint64()?,
+            _ => skip(&mut input, tag)?,
+        }
+    }
+    Ok(status)
+}
+
+async fn request_status(endpoint: &FeedEndpoint) -> ResultType<GuestStatus> {
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", endpoint.port))
+        .await
+        .map_err(|e| hbb_common::anyhow::anyhow!("cannot connect to the emulator controller: {e}"))?;
+    let _ = tcp.set_nodelay(true);
+    let (sender, connection) =
+        h2::client::Builder::new().handshake::<_, hbb_common::bytes::Bytes>(tcp).await?;
+    let driver = tokio::spawn(connection);
+    let result = async {
+        let mut auth = http::HeaderValue::from_str(&endpoint.token.bearer())
+            .map_err(|_| hbb_common::anyhow::anyhow!("the emulator gRPC token is not valid"))?;
+        auth.set_sensitive(true);
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{}{STATUS_PATH}", endpoint.port))
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .header("authorization", auth)
+            .body(())?;
+        let mut sender = sender.ready().await?;
+        let (response, mut send_body) = sender.send_request(request, false)?;
+        send_body.send_data(hbb_common::bytes::Bytes::from(grpc_frame(&[])), true)?;
+        let response = response.await?;
+        if let Some(error) = grpc_status_error(response.headers()) {
+            return Err(error);
+        }
+        if response.status() != http::StatusCode::OK {
+            bail!("the emulator controller answered HTTP {}", response.status().as_u16());
+        }
+        let mut body = response.into_body();
+        let mut deframer = GrpcDeframer::default();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk?;
+            let _ = body.flow_control().release_capacity(chunk.len());
+            if let Some(message) = deframer.push(&chunk)?.first() {
+                return decode_status(message);
+            }
+        }
+        if let Some(error) = body.trailers().await?.as_ref().and_then(grpc_status_error) {
+            return Err(error);
+        }
+        bail!("the emulator controller sent no status")
+    }
+    .await;
+    driver.abort();
+    result
+}
+
+/// Asks the emulator's controller for Android's state, within
+/// `STATUS_TIMEOUT`. Blocking: runs its own runtime on a scoped thread, so it
+/// never nests in a caller's runtime.
+pub fn guest_status(endpoint: &FeedEndpoint) -> ResultType<GuestStatus> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| -> ResultType<GuestStatus> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                runtime.block_on(async {
+                    tokio::time::timeout(STATUS_TIMEOUT, request_status(endpoint))
+                        .await
+                        .map_err(|_| {
+                            hbb_common::anyhow::anyhow!(
+                                "the emulator controller did not answer within {} s",
+                                STATUS_TIMEOUT.as_secs()
+                            )
+                        })?
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| bail!("the emulator status check panicked"))
+    })
+}
+
+/// Whether an AVD can be opened, by its emulator controller rather than ADB.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Readiness {
+    /// Android has booted: its ADB serial.
+    Ready(String),
+    /// The emulator runs and Android is still booting.
+    Booting,
+    /// The controller cannot tell (no discovery file, no serial, no answer).
+    Unknown(String),
+}
+
+fn readiness_of(serial: Option<String>, status: ResultType<GuestStatus>) -> Readiness {
+    match (serial, status) {
+        (_, Err(error)) => Readiness::Unknown(error.to_string()),
+        (Some(serial), Ok(status)) if status.booted => Readiness::Ready(serial),
+        (None, Ok(status)) if status.booted => {
+            Readiness::Unknown("the discovery file names no ADB serial".to_owned())
+        }
+        (_, Ok(_)) => Readiness::Booting,
+    }
+}
+
+/// The running AVD's readiness from its emulator controller.
+pub fn readiness(avd: &str) -> Readiness {
+    match discover(avd) {
+        Ok(endpoint) => {
+            let status = guest_status(&endpoint);
+            readiness_of(endpoint.serial, status)
+        }
+        Err(error) => Readiness::Unknown(error.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,6 +628,56 @@ mod tests {
         assert_eq!(endpoint.port, 8554);
         assert_eq!(endpoint.token.bearer(), "Bearer abc");
         assert!(!format!("{:?}", endpoint).contains("abc"));
+    }
+
+    #[test]
+    fn the_discovery_file_names_the_guest_serial() {
+        let text = "port.serial=5554\nport.adb=5555\ngrpc.port=8554\ngrpc.token=abc\n";
+        let endpoint = parse_running_ini(text).unwrap();
+        assert_eq!(endpoint.serial.as_deref(), Some("emulator-5554"));
+        // Not an emulator console port: no serial, the endpoint still works.
+        let odd = parse_running_ini("port.serial=5555\ngrpc.port=8554\ngrpc.token=abc\n").unwrap();
+        assert_eq!(odd.serial, None);
+        assert_eq!(parse_running_ini("grpc.port=8554\ngrpc.token=abc\n").unwrap().serial, None);
+    }
+
+    #[test]
+    fn decodes_the_emulator_status() {
+        // version "37", uptime 70000, booted, vmConfig {hypervisor 2}, heartbeat 42.
+        let bytes = [
+            0x0a, 0x02, b'3', b'7', 0x10, 0xf0, 0xa2, 0x04, 0x18, 0x01, 0x22, 0x02, 0x08, 0x02,
+            0x30, 0x2a,
+        ];
+        assert_eq!(
+            decode_status(&bytes).unwrap(),
+            GuestStatus {
+                booted: true,
+                uptime_ms: 70_000,
+                heartbeat: 42,
+            }
+        );
+        assert_eq!(decode_status(&[]).unwrap(), GuestStatus::default());
+    }
+
+    #[test]
+    fn readiness_needs_a_booted_guest_with_a_serial() {
+        let booted = GuestStatus {
+            booted: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            readiness_of(Some("emulator-5554".to_owned()), Ok(booted)),
+            Readiness::Ready("emulator-5554".to_owned())
+        );
+        assert_eq!(
+            readiness_of(Some("emulator-5554".to_owned()), Ok(GuestStatus::default())),
+            Readiness::Booting
+        );
+        assert!(matches!(readiness_of(None, Ok(booted)), Readiness::Unknown(_)));
+        assert!(matches!(
+            readiness_of(Some("emulator-5554".to_owned()), Err(hbb_common::anyhow::anyhow!("x"))),
+            Readiness::Unknown(_)
+        ));
     }
 
     #[test]
@@ -707,11 +904,27 @@ mod tests {
 
     #[test]
     #[ignore = "needs the running Aperture_Trial_Play35 emulator"]
+    fn real_controller_reports_the_booted_guest_without_adb() {
+        let serial = trial_serial();
+        for _ in 0..5 {
+            let asked = std::time::Instant::now();
+            let readiness = readiness(TRIAL_AVD);
+            let took = asked.elapsed();
+            println!("RESULT readiness {readiness:?} in {took:?}");
+            assert_eq!(readiness, Readiness::Ready(serial.clone()));
+            assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+        }
+        assert!(matches!(readiness("Aperture_No_Such_Avd"), Readiness::Unknown(_)));
+    }
+
+    #[test]
+    #[ignore = "needs the running Aperture_Trial_Play35 emulator"]
     fn unauthenticated_feed_is_an_error() {
         let real = discover(TRIAL_AVD).unwrap();
         let wrong = FeedEndpoint {
             port: real.port,
             token: FeedToken("wrong".to_owned()),
+            serial: None,
         };
         let (_feed, rx) = ScreenFeed::start(wrong, 1280, 1280).unwrap();
         let first = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();

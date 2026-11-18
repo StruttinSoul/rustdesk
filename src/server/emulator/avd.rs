@@ -10,7 +10,7 @@ use super::{
     avd_files::{valid_avd_name, AvdEntry, AvdHome, CLONE_HEADROOM_BYTES},
     avd_launch_windows,
     avd_settings::AvdSettings,
-    guest_runtime::{adb_command, adb_devices},
+    guest_runtime::{adb_command, adb_command_within, adb_devices},
     AdbEndpoint, EmulatorCapabilities, EmulatorProvider, EmulatorRuntimeState, EmulatorState,
     EmulatorTarget, ProviderId,
 };
@@ -115,6 +115,9 @@ fn parse_emulator_serials(output: &str) -> Vec<String> {
 /// token that the SYSTEM service does not have.
 const PROBE_COMMAND: &str =
     "getprop ro.boot.qemu.avd_name; getprop sys.boot_completed; getprop ro.build.version.release";
+/// A getprop answers in well under a second; a guest slower than this is not
+/// answering, and the list must not wait on it.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub(crate) struct Probe {
@@ -216,7 +219,7 @@ impl AvdSystem for HostSystem {
         };
         let mut found = Vec::new();
         for serial in parse_emulator_serials(&adb_devices(&adb)?) {
-            match adb_command(&adb, &serial, &["shell", PROBE_COMMAND]) {
+            match adb_command_within(&adb, &serial, &["shell", PROBE_COMMAND], PROBE_TIMEOUT) {
                 Ok(output) => {
                     if let Some(probe) = parse_probe(&output) {
                         found.push((serial, probe));

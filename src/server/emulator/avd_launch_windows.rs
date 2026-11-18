@@ -258,7 +258,8 @@ fn start_here(name: &str, root: &Path) -> ResultType<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .spawn()
+        .and_then(|child| wait_or_kill(child, START_SERVER_WAIT))
     {
         Ok(status) if status.success() => {}
         Ok(status) => log::warn!("adb start-server exited with {status}"),
@@ -276,6 +277,29 @@ fn start_here(name: &str, root: &Path) -> ResultType<()> {
         .spawn()?;
     log::info!("Started the Android Emulator for {name}");
     hide_new_windows(name, &mut child)
+}
+
+/// `adb start-server` replies within seconds; a stuck ADB server must not
+/// hold the emulator's start.
+const START_SERVER_WAIT: Duration = Duration::from_secs(10);
+
+/// Waits up to `limit` for `child` to exit, killing it after that.
+fn wait_or_kill(mut child: Child, limit: Duration) -> std::io::Result<std::process::ExitStatus> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("no reply within {} s", limit.as_secs()),
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Hides the emulator's windows as they appear: the main window, then for a
@@ -410,6 +434,26 @@ fn emulator_windows(name: &str) -> ResultType<Vec<(isize, String)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stuck_adb_start_server_is_killed_at_its_limit() {
+        let child = Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let error = wait_or_kill(child, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let quick = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        assert!(wait_or_kill(quick, Duration::from_secs(10)).unwrap().success());
+    }
 
     #[test]
     fn helpers_claim_only_their_own_flags() {
