@@ -903,6 +903,23 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Server, proxy and connection options", ""),
         ("About Aperture", ""),
         ("Built on RustDesk", ""),
+        ("Reboot", ""),
+        ("Memory", ""),
+        ("CPU cores", ""),
+        ("Screen", ""),
+        ("{} GB", ""),
+        ("1080 × 2208 fits the phone without black bars.", ""),
+        ("Changes apply the next time it starts.", ""),
+        ("Saved changes apply the next time it starts.", ""),
+        ("Save and restart", ""),
+        ("Reboot {}?", ""),
+        ("Android restarts and apps running in it close. The emulator stays on.", ""),
+        ("Restart {}?", ""),
+        ("Apps running in it will close. It starts again with the new settings.", ""),
+        ("Rebooting {}", ""),
+        ("Restarting {}", ""),
+        ("Settings saved", ""),
+        ("Saved for the next start", ""),
     ].iter().cloned().collect();
 }
 
