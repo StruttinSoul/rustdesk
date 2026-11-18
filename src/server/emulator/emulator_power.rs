@@ -4,6 +4,30 @@
 
 use super::{EmulatorProvider, EmulatorState, EmulatorTarget};
 use hbb_common::{bail, log, ResultType};
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
+/// Recent reboots by ADB serial, so a stream of that emulator ends at once
+/// (its input helper dies with Android) even without a rotation watcher.
+static REBOOTS: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+const REBOOT_KEPT: Duration = Duration::from_secs(300);
+
+fn note_reboot(serial: &str) {
+    let mut reboots = REBOOTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    reboots.retain(|(noted, at)| noted != serial && at.elapsed() < REBOOT_KEPT);
+    reboots.push((serial.to_owned(), Instant::now()));
+}
+
+/// Whether Aperture rebooted Android behind `serial` after `since`.
+pub(super) fn rebooted_after(serial: &str, since: Instant) -> bool {
+    REBOOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .any(|(noted, at)| noted == serial && *at > since)
+}
 
 /// Reboots Android in the running emulator `component` (`avd:<name>` or
 /// `bluestacks:<instance>`).
@@ -38,6 +62,7 @@ fn reboot_target(
         }
     }
     adb(&serial, &["reboot"])?;
+    note_reboot(&serial);
     log::info!("Rebooting Android in {name} ({}) on request", target.stable_id);
     Ok(format!("Restarting Android in {name}\u{2026}"))
 }
@@ -105,6 +130,16 @@ mod tests {
         .unwrap();
         assert_eq!(calls, ["127.0.0.1:5555 connect 127.0.0.1:5555", "127.0.0.1:5555 reboot"]);
         assert!(message.contains("Pie64"), "{message}");
+    }
+
+    #[test]
+    fn sessions_of_the_rebooted_serial_are_told() {
+        let before = std::time::Instant::now();
+        let provider = bluestacks(EmulatorState::Ready);
+        reboot_target(&provider, &provider.0, |_, _| Ok(String::new())).unwrap();
+        assert!(rebooted_after("127.0.0.1:5555", before));
+        assert!(!rebooted_after("emulator-5554", before));
+        assert!(!rebooted_after("127.0.0.1:5555", std::time::Instant::now()));
     }
 
     #[test]

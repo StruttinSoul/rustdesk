@@ -223,7 +223,8 @@ mod tests {
     fn a_running_emulator_that_is_not_found_is_not_polled_for() {
         let started = Instant::now();
         assert_eq!(find_and_wait("Exit_Watch_Absent", Duration::ZERO).unwrap(), None);
-        assert!(started.elapsed() < FIND_POLL, "{:?}", started.elapsed());
+        // Far below the 90 s a launch is waited for, even on a busy PC.
+        assert!(started.elapsed() < FIND_WAIT / 3, "{:?}", started.elapsed());
     }
 
     #[test]

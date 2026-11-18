@@ -388,6 +388,9 @@ impl AvdProvider {
         if instance.running {
             bail!("{name} is running; stop it first")
         }
+        if restarting().contains(name) {
+            bail!("{name} is restarting; wait for it to start again")
+        }
         if starts
             .iter()
             .any(|(at, started, _)| started == name && at.elapsed() < START_RESERVATION)
@@ -513,6 +516,22 @@ impl AvdProvider {
         let (instance, _) = self.instance(name)?;
         if !instance.running {
             bail!("{name} is not running")
+        }
+        let ram = |mb: u32| if mb == 0 { DEFAULT_RAM_MB } else { mb };
+        let chosen_mb = ram(self.home.start_ram_mb(name)?.unwrap_or(instance.entry.ram_mb));
+        let reserved: u64 = self
+            .reservations()
+            .iter()
+            .filter(|(at, started, _)| started != name && at.elapsed() < START_RESERVATION)
+            .map(|(_, _, mb)| u64::from(*mb))
+            .sum();
+        // Checked before anything is stopped; the stop frees its current memory.
+        let available = self
+            .system
+            .available_memory_mb()
+            .saturating_add(u64::from(ram(instance.entry.ram_mb)));
+        if !memory_allows(available, chosen_mb, reserved) {
+            bail!("Not enough free memory on atlas to restart {name} with {chosen_mb} MB")
         }
         if !restarting().insert(name.to_owned()) {
             bail!("{name} is already restarting")
@@ -1223,17 +1242,17 @@ pub(crate) mod tests {
     #[test]
     fn save_and_restart_stops_and_starts_with_the_new_settings() {
         let root = temp_root("settings-restart");
-        create(&root, "Maple_1");
+        create(&root, "Maple_Rs");
         let system = FakeSystem::new(64_000);
-        system.run("Maple_1", Some("emulator-5560"));
+        system.run("Maple_Rs", Some("emulator-5560"));
         let provider = provider(&root, &system);
-        assert!(provider.save_settings("Maple_1", settings_change(0, 2, (0, 0))).unwrap());
-        provider.restart_in_background("Maple_1").unwrap().join().unwrap();
+        assert!(provider.save_settings("Maple_Rs", settings_change(0, 2, (0, 0))).unwrap());
+        provider.restart_in_background("Maple_Rs").unwrap().join().unwrap();
         assert_eq!(*system.killed.lock().unwrap(), vec!["emulator-5560"]);
-        assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_1"]);
-        assert!(config_of(&root, "Maple_1").lines().any(|l| l == "hw.cpu.ncore=2"));
+        assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_Rs"]);
+        assert!(config_of(&root, "Maple_Rs").lines().any(|l| l == "hw.cpu.ncore=2"));
         // Not running any more in the fake: a second restart is refused.
-        assert!(provider.restart_in_background("Maple_1").is_err());
+        assert!(provider.restart_in_background("Maple_Rs").is_err());
     }
 
     /// Saves `APERTURE_TRIAL_SETTINGS` (`ram,cores,widthxheight`) for the
@@ -1271,6 +1290,51 @@ pub(crate) mod tests {
         eprintln!("RESULT stopped and applied: {applied:?}; config {now:?}, pending {pending:?}, running {running}");
         assert!(!running && pending.is_empty());
         assert_eq!(now, current.merged(change));
+    }
+
+    #[test]
+    fn a_start_under_dot_android_skips_the_settings_and_starts() {
+        let outer = temp_root("studio");
+        let root = TempRoot(outer.0.join(".android").join("avd"));
+        std::fs::create_dir_all(&root.0).unwrap();
+        create(&root, "Dev_1");
+        let config = root.0.join("Dev_1.avd").join("config.ini");
+        let old = std::fs::read_to_string(&config).unwrap().replace("hw.lcd.height=2208", "hw.lcd.height=2400");
+        std::fs::write(&config, &old).unwrap();
+        let system = FakeSystem::new(64_000);
+        provider(&root, &system).start(&target("Dev_1")).unwrap();
+        assert_eq!(*system.launched.lock().unwrap(), vec!["Dev_1"]);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), old);
+        drop(root);
+    }
+
+    #[test]
+    fn save_and_restart_is_refused_when_the_chosen_memory_does_not_fit() {
+        let root = temp_root("restart-memory");
+        create(&root, "Maple_Mem");
+        // 3000 MB free plus the 4096 MB the stop frees < 8192 MB + margin.
+        let system = FakeSystem::new(3_000);
+        system.run("Maple_Mem", Some("emulator-5562"));
+        let provider = provider(&root, &system);
+        assert!(provider.save_settings("Maple_Mem", settings_change(8192, 0, (0, 0))).unwrap());
+        let error = provider.restart_in_background("Maple_Mem").unwrap_err().to_string();
+        assert!(error.contains("memory"), "{error}");
+        assert!(system.killed.lock().unwrap().is_empty(), "nothing is stopped");
+        assert!(!restarting().contains("Maple_Mem"));
+    }
+
+    #[test]
+    fn management_waits_for_a_restart_in_progress() {
+        let root = temp_root("restarting");
+        create(&root, "Maple_R");
+        let system = FakeSystem::new(64_000);
+        let provider = provider(&root, &system);
+        restarting().insert("Maple_R".to_owned());
+        let refused = provider.exclusive(Some("Maple_R"), None, || Ok(()));
+        restarting().remove("Maple_R");
+        let error = refused.unwrap_err().to_string();
+        assert!(error.contains("restarting"), "{error}");
+        assert!(provider.exclusive(Some("Maple_R"), None, || Ok(())).is_ok());
     }
 
     #[test]

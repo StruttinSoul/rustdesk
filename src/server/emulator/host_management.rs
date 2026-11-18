@@ -377,7 +377,9 @@ fn avd_settings_set(
     if !request.avd_restart {
         return Ok(format!("Saved; {name} uses them from its next start"));
     }
-    provider.restart_in_background(name)?;
+    if let Err(error) = provider.restart_in_background(name) {
+        bail!("Saved the settings of {name} for its next start, but did not restart it: {error}")
+    }
     Ok(format!("Restarting {name} with the new settings"))
 }
 
@@ -958,6 +960,26 @@ mod tests {
         assert_eq!(value["error_code"], "avd_settings_failed");
         let value = avd_value(&avd_request("avd_settings_get", "avd:Missing", ""), &provider);
         assert_eq!(value["ok"], false, "{value}");
+    }
+
+    #[test]
+    fn a_restart_that_cannot_run_says_the_settings_were_saved() {
+        use super::super::avd::tests::{create, temp_root, FakeSystem};
+        let root = temp_root("host-restart-refused");
+        create(&root, "Maple_Hr");
+        let system = FakeSystem::new(3_000);
+        system.run("Maple_Hr", Some("emulator-5564"));
+        let provider = avd_provider(&root, &system);
+        let mut set = avd_request("avd_settings_set", "avd:Maple_Hr", "");
+        set.avd_ram_mb = 8192;
+        set.avd_restart = true;
+        let value = avd_value(&set, &provider);
+        assert_eq!(value["ok"], false, "{value}");
+        let error = value["error"].as_str().unwrap();
+        assert!(error.starts_with("Saved the settings of Maple_Hr"), "{error}");
+        assert!(error.contains("memory"), "{error}");
+        let value = avd_value(&avd_request("avd_settings_get", "avd:Maple_Hr", ""), &provider);
+        assert_eq!(value["avd_settings"]["pending"]["ram_mb"], 8192, "{value}");
     }
 
     #[test]

@@ -503,6 +503,15 @@ impl AvdHome {
     /// The folder of `name` when Aperture may rewrite its configuration: inside
     /// this root, and never in a `.android` folder (Android Studio's AVDs).
     fn managed_dir(&self, name: &str) -> ResultType<PathBuf> {
+        match self.start_dir(name)? {
+            Some(dir) => Ok(dir),
+            None => bail!("{name} is an Android Studio emulator; Aperture does not change it"),
+        }
+    }
+
+    /// `managed_dir` for a start: an emulator in a `.android` folder starts
+    /// as it is (logged once), without Aperture's settings.
+    fn start_dir(&self, name: &str) -> ResultType<Option<PathBuf>> {
         let name = Self::checked_name(name)?;
         let dir = self.avd_dir(name);
         self.ensure_inside(&dir)?;
@@ -511,9 +520,12 @@ impl AvdHome {
             .components()
             .any(|part| part.as_os_str().eq_ignore_ascii_case(".android"))
         {
-            bail!("{name} is an Android Studio emulator; Aperture does not change it")
+            if self.warn_once(format!("studio:{name}")) {
+                log::warn!("{name} is in an Android Studio folder; Aperture leaves its settings as they are");
+            }
+            return Ok(None);
         }
-        Ok(dir)
+        Ok(Some(dir))
     }
 
     /// The settings chosen for `name` on the phone; a damaged choice is
@@ -548,7 +560,9 @@ impl AvdHome {
     /// the managed screen when no screen was chosen. Returns what changed.
     /// Callers check it is not running.
     pub fn apply_settings(&self, name: &str) -> ResultType<Option<String>> {
-        let dir = self.managed_dir(name)?;
+        let Some(dir) = self.start_dir(name)? else {
+            return Ok(None);
+        };
         let path = dir.join("config.ini");
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Cannot read the configuration of {name}"))?;
@@ -574,8 +588,9 @@ impl AvdHome {
 
     /// The memory `name` starts with: the chosen one, else its `config.ini`'s.
     pub fn start_ram_mb(&self, name: &str) -> ResultType<Option<u32>> {
-        let dir = self.managed_dir(name)?;
-        Ok(self.chosen_in(&dir, name).ram_mb)
+        Ok(self
+            .start_dir(name)?
+            .and_then(|dir| self.chosen_in(&dir, name).ram_mb))
     }
 
     fn exists(&self, name: &str) -> bool {
@@ -1127,8 +1142,11 @@ hw.lcd.height=2208
         let config = dir.join("config.ini");
         let old = read(&config).replace("hw.lcd.height=2208", "hw.lcd.height=2400");
         fs::write(&config, &old).unwrap();
-        assert!(home.apply_settings("Dev_1").is_err());
+        // A start skips the settings there and goes on as before.
+        assert_eq!(home.apply_settings("Dev_1").unwrap(), None);
+        assert_eq!(home.start_ram_mb("Dev_1").unwrap(), None);
         assert!(home.choose_settings("Dev_1", AvdSettings::requested(2048, 0, 0, 0).unwrap()).is_err());
+        assert!(home.settings("Dev_1").is_err());
         assert_eq!(read(&config), old);
         assert!(!dir.join(avd_settings::SETTINGS_FILE).exists());
         cleanup(outer);

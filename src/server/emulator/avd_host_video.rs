@@ -86,6 +86,9 @@ impl RotationState {
 
     fn apply(&self, line: &str) {
         if let Some(boot) = line.trim().strip_prefix("b=") {
+            if boot.is_empty() {
+                return;
+            }
             let mut first = self.boot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             match first.as_deref() {
                 None => *first = Some(boot.to_owned()),
@@ -657,7 +660,9 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
             bail!("Guest input stopped")
         }
         // Ends the session so the phone reopens it with a new input helper.
-        if video.rotation.map_or(false, RotationWatcher::guest_restarted) {
+        if video.rotation.map_or(false, RotationWatcher::guest_restarted)
+            || super::super::emulator_power::rebooted_after(session.serial, clock)
+        {
             bail!("Android restarted in the emulator")
         }
         if let Some(outcome) = live.check(Instant::now())? {
@@ -873,6 +878,17 @@ mod tests {
         assert!(state.guest_restarted());
         assert_eq!(state.rotation(), Some(1));
         assert!(ROTATION_LOOP.starts_with("echo \"b=$(cat /proc/sys/kernel/random/boot_id)\""));
+    }
+
+    #[test]
+    fn an_empty_boot_id_is_ignored() {
+        let state = RotationState::new();
+        state.apply("b=");
+        state.apply("b=8c1f-first");
+        state.apply("b=");
+        assert!(!state.guest_restarted());
+        state.apply("b=77aa-second");
+        assert!(state.guest_restarted());
     }
 
     #[test]
