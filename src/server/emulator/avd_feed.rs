@@ -608,14 +608,8 @@ fn readiness_of(serial: Option<String>, status: ResultType<GuestStatus>) -> Read
 }
 
 /// The running AVD's readiness from its emulator controller.
-pub fn readiness(avd: &str) -> Readiness {
-    match discover(avd) {
-        Ok(endpoint) => {
-            let status = guest_status(&endpoint);
-            readiness_of(endpoint.serial, status)
-        }
-        Err(error) => Readiness::Unknown(error.to_string()),
-    }
+pub fn readiness(endpoint: &FeedEndpoint) -> Readiness {
+    readiness_of(endpoint.serial.clone(), guest_status(endpoint))
 }
 
 #[cfg(test)]
@@ -906,15 +900,16 @@ mod tests {
     #[ignore = "needs the running Aperture_Trial_Play35 emulator"]
     fn real_controller_reports_the_booted_guest_without_adb() {
         let serial = trial_serial();
+        let endpoint = discover(TRIAL_AVD).unwrap();
         for _ in 0..5 {
             let asked = std::time::Instant::now();
-            let readiness = readiness(TRIAL_AVD);
+            let readiness = readiness(&endpoint);
             let took = asked.elapsed();
             println!("RESULT readiness {readiness:?} in {took:?}");
             assert_eq!(readiness, Readiness::Ready(serial.clone()));
             assert!(took < std::time::Duration::from_secs(1), "{took:?}");
         }
-        assert!(matches!(readiness("Aperture_No_Such_Avd"), Readiness::Unknown(_)));
+        assert!(discover("Aperture_No_Such_Avd").is_err());
     }
 
     #[test]

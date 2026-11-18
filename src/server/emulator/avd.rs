@@ -196,6 +196,11 @@ pub(crate) trait AvdSystem: Send + Sync {
     /// Reports when `name`'s emulator exits without a stop from Aperture;
     /// `launched` when Aperture has just started it.
     fn watch_exit(&self, _name: &str, _launched: bool) {}
+    /// The ADB serial the running emulator of `name` names in its discovery
+    /// file, read without ADB.
+    fn discovered_serial(&self, _name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The real PC: sysinfo processes, the default ADB server, Windows memory.
@@ -264,6 +269,10 @@ impl AvdSystem for HostSystem {
 
     fn watch_exit(&self, name: &str, launched: bool) {
         super::avd_exit_watch::watch(name, launched)
+    }
+
+    fn discovered_serial(&self, name: &str) -> Option<String> {
+        super::avd_feed::discover(name).ok()?.serial
     }
 }
 
@@ -630,7 +639,13 @@ impl AvdProvider {
         }
         match instance.guest {
             Some((serial, _)) => Ok(serial),
-            None if instance.running => bail!("{name} is still starting"),
+            // Android does not answer the probe (stuck, or still booting):
+            // the emulator's discovery file still names its serial, so a
+            // stop or reboot reaches it.
+            None if instance.running => match self.system.discovered_serial(name) {
+                Some(serial) => Ok(serial),
+                None => bail!("{name} is still starting"),
+            },
             None => bail!("{name} is not running"),
         }
     }
@@ -920,6 +935,8 @@ pub(crate) mod tests {
         /// Emulators that left ADB and whose process ends at the given time.
         exits: Mutex<Vec<(String, Instant)>>,
         free_bytes: Mutex<u64>,
+        /// Serials named by discovery files: (AVD, serial).
+        discovered: Mutex<Vec<(String, String)>>,
     }
 
     impl FakeSystem {
@@ -935,6 +952,7 @@ pub(crate) mod tests {
                 kill_linger: None,
                 exits: Mutex::new(Vec::new()),
                 free_bytes: Mutex::new(u64::MAX),
+                discovered: Mutex::new(Vec::new()),
             })
         }
 
@@ -954,13 +972,29 @@ pub(crate) mod tests {
             *self.free_bytes.lock().unwrap() = bytes;
         }
 
+        /// Runs `name` with Android not answering: no probe, only its
+        /// discovery file names `serial`.
+        fn run_stuck(&self, name: &str, serial: &str) {
+            self.run(name, None);
+            self.discovered
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), serial.to_owned()));
+        }
+
         fn end(&self, serial: &str) {
             let mut guests = self.guests.lock().unwrap();
-            let names: Vec<String> = guests
+            let mut names: Vec<String> = guests
                 .iter()
                 .filter(|(s, _)| s == serial)
                 .map(|(_, probe)| probe.name.clone())
                 .collect();
+            self.discovered.lock().unwrap().retain(|(name, s)| {
+                if s == serial {
+                    names.push(name.clone());
+                }
+                s != serial
+            });
             guests.retain(|(s, _)| s != serial);
             self.processes
                 .lock()
@@ -1031,6 +1065,14 @@ pub(crate) mod tests {
             self.powered_off.lock().unwrap().push(serial.to_owned());
             self.end(serial);
             Ok(())
+        }
+        fn discovered_serial(&self, name: &str) -> Option<String> {
+            self.discovered
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(avd, _)| avd == name)
+                .map(|(_, serial)| serial.clone())
         }
     }
 
@@ -1388,6 +1430,27 @@ pub(crate) mod tests {
             vec!["emulator-5554", "emulator-5556"]
         );
         assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_1"]);
+    }
+
+    #[test]
+    fn stop_and_restart_reach_an_emulator_whose_android_does_not_answer() {
+        let root = temp_root("stuck");
+        create(&root, "Maple_1");
+        let system = FakeSystem::new(64_000);
+        system.run_stuck("Maple_1", "emulator-5554");
+        let provider = provider(&root, &system);
+        assert_eq!(provider.resolve_adb(&target("Maple_1")).unwrap().serial, "emulator-5554");
+        provider.stop(&target("Maple_1")).unwrap();
+        assert_eq!(*system.killed.lock().unwrap(), vec!["emulator-5554"]);
+        system.run_stuck("Maple_1", "emulator-5556");
+        provider.restart(&target("Maple_1")).unwrap();
+        assert_eq!(*system.killed.lock().unwrap(), vec!["emulator-5554", "emulator-5556"]);
+        assert_eq!(*system.launched.lock().unwrap(), vec!["Maple_1"]);
+        // Without a discovery file it is still starting, as before.
+        system.run("Maple_2", None);
+        create(&root, "Maple_2");
+        let error = provider.stop(&target("Maple_2")).unwrap_err().to_string();
+        assert!(error.contains("still starting"), "{error}");
     }
 
     #[test]

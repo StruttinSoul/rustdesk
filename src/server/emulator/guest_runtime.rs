@@ -2,13 +2,15 @@ use super::guest_protocol::{read_video_packet, VideoPacket, HELPER_SHA256, HELPE
 use hbb_common::{bail, config::Config, log, ResultType};
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    collections::BTreeMap,
+    fmt, fs,
     io::Read,
     net::{Shutdown, SocketAddr, TcpStream},
     ops::RangeInclusive,
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -465,11 +467,11 @@ const JAM_PROBE_EVERY: Duration = Duration::from_secs(10);
 /// Android behind an ADB serial did not answer in time.
 #[derive(Debug)]
 pub(super) struct GuestNotAnswering {
-    waited: Option<Duration>,
+    pub(super) waited: Option<Duration>,
 }
 
-impl std::fmt::Display for GuestNotAnswering {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for GuestNotAnswering {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Android isn't answering on the PC")?;
         match self.waited {
             Some(waited) => write!(f, " (ADB gave no reply within {} s)", waited.as_secs())?,
@@ -490,6 +492,8 @@ pub(super) fn is_not_answering(error: &hbb_common::anyhow::Error) -> bool {
 struct AdbHealth {
     timeouts: u32,
     last_probe: Option<Instant>,
+    /// A probe admitted while jammed has not finished yet.
+    probing: bool,
 }
 
 impl AdbHealth {
@@ -502,11 +506,13 @@ impl AdbHealth {
         if !self.jammed() {
             return true;
         }
-        if self
-            .last_probe
-            .map_or(true, |probe| now.saturating_duration_since(probe) >= JAM_PROBE_EVERY)
+        if !self.probing
+            && self
+                .last_probe
+                .map_or(true, |probe| now.saturating_duration_since(probe) >= JAM_PROBE_EVERY)
         {
             self.last_probe = Some(now);
+            self.probing = true;
             return true;
         }
         false
@@ -517,16 +523,16 @@ impl AdbHealth {
         if timed_out {
             self.timeouts = self.timeouts.saturating_add(1);
             self.last_probe = Some(now);
+            self.probing = false;
         } else {
             *self = Self::default();
         }
     }
 }
 
-static ADB_HEALTH: std::sync::Mutex<std::collections::BTreeMap<String, AdbHealth>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
+static ADB_HEALTH: Mutex<BTreeMap<String, AdbHealth>> = Mutex::new(BTreeMap::new());
 
-fn adb_health() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<String, AdbHealth>> {
+fn adb_health() -> MutexGuard<'static, BTreeMap<String, AdbHealth>> {
     // Counters only: a panicking holder leaves nothing half-updated.
     ADB_HEALTH.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -539,7 +545,7 @@ pub(super) fn is_jammed(serial: &str) -> bool {
 /// Commands served by Android's adbd (rather than by the ADB server or the
 /// emulator console), which hang when the guest or its transport is stuck.
 fn reaches_guest(args: &[&str]) -> bool {
-    matches!(args.first(), Some(&"shell") | Some(&"push"))
+    matches!(args.first(), Some(&"shell") | Some(&"push") | Some(&"reboot"))
 }
 
 /// `adb_command` with its own time limit.
@@ -690,6 +696,8 @@ mod tests {
         let probe = start + JAM_PROBE_EVERY;
         assert!(health.admit(probe));
         assert!(!health.admit(probe + Duration::from_secs(1)));
+        // Still running a whole period later (its limit is longer): no second probe.
+        assert!(!health.admit(probe + JAM_PROBE_EVERY + Duration::from_secs(1)));
         // The probe timed out too: held for another period.
         let late = probe + Duration::from_secs(8);
         health.record(true, late);
@@ -724,6 +732,8 @@ mod tests {
         let error = adb_command(missing, serial, &["shell", "getprop"]).unwrap_err();
         assert!(is_not_answering(&error), "{error}");
         let error = adb_command(missing, serial, &["push", "a", "b"]).unwrap_err();
+        assert!(is_not_answering(&error), "{error}");
+        let error = adb_command(missing, serial, &["reboot"]).unwrap_err();
         assert!(is_not_answering(&error), "{error}");
         assert!(started.elapsed() < Duration::from_millis(500));
         // The emulator console (stop) is not held.
