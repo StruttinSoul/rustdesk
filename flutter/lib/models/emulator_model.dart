@@ -251,6 +251,10 @@ class EmulatorModel extends ChangeNotifier {
   String listError = '';
   String targetId = '';
   String startupPhase = '';
+
+  /// The PC ended this phone's game because it was opened on another device.
+  /// The game is not reopened by itself, which would take it back.
+  bool guestSuperseded = false;
   bool connecting = false;
   bool dashboardSupported = false;
   bool dashboardActive = false;
@@ -786,6 +790,7 @@ class EmulatorModel extends ChangeNotifier {
     this.targetId = targetId;
     guestFailures.remove(targetId);
     error = '';
+    guestSuperseded = false;
     startupPhase = 'requesting';
     _selectionRequest = ++_sequence;
     _selectionTimeout?.cancel();
@@ -2163,6 +2168,7 @@ class EmulatorModel extends ChangeNotifier {
         if (targetId.isNotEmpty) guestFailures[targetId] = error;
         streaming = false;
         connecting = false;
+        guestSuperseded = response['phase'] == 'superseded';
         startupPhase = 'failed';
         _selectionTimeout?.cancel();
       } else {

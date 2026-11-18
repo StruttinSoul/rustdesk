@@ -29,7 +29,8 @@ bool guestReadyForReconnect(EmulatorModel model, String target) =>
         .any((instance) => instance.id == target && instance.readyForReconnect);
 
 /// Retry only an unexpectedly failed, previously usable guest. Never boot an
-/// instance in the background or loop indefinitely against a broken runtime.
+/// instance in the background or loop indefinitely against a broken runtime,
+/// and never take back a game that was [superseded] by another device.
 Duration? guestAutoReconnectDelay({
   required bool sessionFailed,
   required bool guestWasLive,
@@ -37,8 +38,10 @@ Duration? guestAutoReconnectDelay({
   required bool foreground,
   required bool canControl,
   required int attempts,
+  bool superseded = false,
 }) {
   if (!sessionFailed ||
+      superseded ||
       !guestWasLive ||
       !emulatorRunning ||
       !foreground ||
@@ -506,6 +509,7 @@ class _EmulatorPageState extends State<EmulatorPage>
       foreground: !_background && _viewFocused,
       canControl: _hostCanControl,
       attempts: _guestReconnectAttempts,
+      superseded: model.guestSuperseded,
     );
     if (delay == null) {
       _guestReconnectTimer?.cancel();
@@ -1204,6 +1208,7 @@ class _EmulatorPageState extends State<EmulatorPage>
     // Rebooted from the menu: the stream ended on purpose and reopens once
     // Android is back.
     final rebooting = failed && model.isRebooting(model.targetId);
+    final superseded = failed && model.guestSuperseded;
     final showOnPc = widget.onShowOnPc;
     return StartupChecklist(
       name: name,
@@ -1215,10 +1220,12 @@ class _EmulatorPageState extends State<EmulatorPage>
           ? ''
           : rebooting
               ? 'Rebooting {$name}'
-              : _guestWasLive
+              : superseded
+                  ? 'Opened on another device'
+                  : _guestWasLive
                   ? 'Lost the screen for {$name}'
                   : "Couldn't start {$name}",
-      failureMessage: rebooting ? '' : model.error,
+      failureMessage: rebooting || superseded ? '' : model.error,
       retryNote: !retryArmed
           ? ''
           : _guestReconnectAttempts == 0
@@ -1238,6 +1245,7 @@ class _EmulatorPageState extends State<EmulatorPage>
           ? null
           : _reconnectGuest,
       onShowOnPc: showOnPc == null ? null : () => unawaited(showOnPc()),
+      tryAgainLabel: superseded ? 'Reopen' : 'Try again',
     );
   }
 

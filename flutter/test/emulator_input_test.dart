@@ -28,6 +28,18 @@ void main() {
     expect(attempt(0, ready: false), isNull);
     expect(attempt(0, foreground: false), isNull);
     expect(attempt(0, canControl: false), isNull);
+    // Opened on another device: never taken back by itself.
+    expect(
+        guestAutoReconnectDelay(
+          sessionFailed: true,
+          guestWasLive: true,
+          emulatorRunning: true,
+          foreground: true,
+          canControl: true,
+          attempts: 0,
+          superseded: true,
+        ),
+        isNull);
     expect(
         const RemoteEmulator(
                 id: 'x', name: 'x', provider: 'bluestacks', state: 'stopped')

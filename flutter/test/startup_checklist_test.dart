@@ -29,6 +29,7 @@ StartupChecklist _checklist({
   VoidCallback? onBack,
   VoidCallback? onTryAgain,
   VoidCallback? onShowOnPc,
+  String tryAgainLabel = 'Try again',
 }) =>
     StartupChecklist(
       name: 'Alt-2',
@@ -42,6 +43,7 @@ StartupChecklist _checklist({
       onBack: onBack ?? () {},
       onTryAgain: onTryAgain,
       onShowOnPc: onShowOnPc,
+      tryAgainLabel: tryAgainLabel,
       tr: fakeTr,
     );
 
@@ -199,6 +201,24 @@ void main() {
     expect(retries, 1);
     // Back to emulators stays available on the failure screen.
     expect(find.text('Back to emulators'), findsOneWidget);
+  });
+
+  testWidgets('a game opened on another device offers Reopen, not a retry',
+      (tester) async {
+    var reopened = 0;
+    await _pump(
+        tester,
+        _checklist(
+          currentStep: 3,
+          failedStep: 3,
+          failureTitle: 'Opened on another device',
+          tryAgainLabel: 'Reopen',
+          onTryAgain: () => reopened++,
+        ));
+    expect(find.text('Opened on another device'), findsOneWidget);
+    expect(find.text('Try again'), findsNothing);
+    await tester.tap(find.text('Reopen'));
+    expect(reopened, 1);
   });
 
   testWidgets('retry note shows only while armed', (tester) async {

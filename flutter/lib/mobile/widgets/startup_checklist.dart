@@ -53,6 +53,7 @@ class StartupChecklist extends StatelessWidget {
     this.backIcon = Icons.grid_view_rounded,
     this.onTryAgain,
     this.onShowOnPc,
+    this.tryAgainLabel = 'Try again',
     this.tr = translate,
   });
 
@@ -78,6 +79,9 @@ class StartupChecklist extends StatelessWidget {
   /// back returns to the Windows desktop, passes its own wording.
   final String backLabel;
   final IconData backIcon;
+
+  /// Translate key for [onTryAgain]'s button after a failure.
+  final String tryAgainLabel;
   final VoidCallback? onTryAgain;
   final VoidCallback? onShowOnPc;
   final String Function(String) tr;
@@ -330,7 +334,7 @@ class StartupChecklist extends StatelessWidget {
         FilledButton(
           style: full,
           onPressed: onTryAgain,
-          child: label(Icons.refresh_rounded, 'Try again'),
+          child: label(Icons.refresh_rounded, tryAgainLabel),
         ),
         const SizedBox(height: MirpgRemoteTheme.rhythm),
         TextButton(
