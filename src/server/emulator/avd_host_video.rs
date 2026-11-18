@@ -39,10 +39,10 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest wait for a feed image before re-checking cancel and reset.
 const POLL: Duration = Duration::from_millis(20);
 
-/// One guest shell for the whole session. It prints Android's display
-/// rotation every 250 ms; printing every tick also ends the loop (SIGPIPE)
-/// soon after the adb client is gone.
-const ROTATION_LOOP: &str = "while :; do r=$(dumpsys display 2>/dev/null | grep -m1 -o 'mCurrentOrientation=[0-3]'); echo \"r=$r\" || exit; sleep 0.25; done";
+/// One guest shell for the whole session. It prints Android's boot id once,
+/// then its display rotation every 250 ms; printing every tick also ends the
+/// loop (SIGPIPE) soon after the adb client is gone.
+const ROTATION_LOOP: &str = "echo \"b=$(cat /proc/sys/kernel/random/boot_id)\"; while :; do r=$(dumpsys display 2>/dev/null | grep -m1 -o 'mCurrentOrientation=[0-3]'); echo \"r=$r\" || exit; sleep 0.25; done";
 const ROTATION_UNKNOWN: u8 = u8::MAX;
 /// How long the first encode waits for the watcher's first report.
 const FIRST_ROTATION_WAIT: Duration = Duration::from_secs(1);
@@ -68,6 +68,10 @@ struct RotationReading {
 struct RotationState {
     rotation: AtomicU8,
     reported: AtomicBool,
+    /// Android's boot id when the watcher first started.
+    boot: Mutex<Option<String>>,
+    /// A later shell printed another boot id: Android was restarted.
+    restarted: AtomicBool,
 }
 
 impl RotationState {
@@ -75,10 +79,21 @@ impl RotationState {
         Self {
             rotation: AtomicU8::new(ROTATION_UNKNOWN),
             reported: AtomicBool::new(false),
+            boot: Mutex::new(None),
+            restarted: AtomicBool::new(false),
         }
     }
 
     fn apply(&self, line: &str) {
+        if let Some(boot) = line.trim().strip_prefix("b=") {
+            let mut first = self.boot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            match first.as_deref() {
+                None => *first = Some(boot.to_owned()),
+                Some(first) if first != boot => self.restarted.store(true, Ordering::Release),
+                Some(_) => {}
+            }
+            return;
+        }
         if let Some(rotation) = parse_rotation(line) {
             self.rotation.store(rotation, Ordering::Release);
         }
@@ -88,6 +103,10 @@ impl RotationState {
     fn rotation(&self) -> Option<u32> {
         let rotation = self.rotation.load(Ordering::Acquire);
         (rotation != ROTATION_UNKNOWN).then_some(u32::from(rotation))
+    }
+
+    fn guest_restarted(&self) -> bool {
+        self.restarted.load(Ordering::Acquire)
     }
 
     fn reading(&self) -> RotationReading {
@@ -234,6 +253,12 @@ impl RotationWatcher {
     /// Android's current display rotation (0-3), if known.
     pub(super) fn rotation(&self) -> Option<u32> {
         self.state.rotation()
+    }
+
+    /// Android was restarted (`adb reboot`) since the watcher started: the
+    /// input helper died with it.
+    pub(super) fn guest_restarted(&self) -> bool {
+        self.state.guest_restarted()
     }
 }
 
@@ -631,6 +656,10 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         if video.input_stopped.load(Ordering::Acquire) {
             bail!("Guest input stopped")
         }
+        // Ends the session so the phone reopens it with a new input helper.
+        if video.rotation.map_or(false, RotationWatcher::guest_restarted) {
+            bail!("Android restarted in the emulator")
+        }
         if let Some(outcome) = live.check(Instant::now())? {
             return Ok(outcome);
         }
@@ -828,6 +857,22 @@ mod tests {
         state.apply("garbage");
         state.apply("r=");
         assert_eq!(state.reading(), RotationReading { reported: true, rotation: Some(1) });
+    }
+
+    #[test]
+    fn a_new_android_boot_is_noticed_and_is_not_a_rotation_report() {
+        let state = RotationState::new();
+        state.apply("b=8c1f-first");
+        assert_eq!(state.reading(), RotationReading { reported: false, rotation: None });
+        state.apply("r=mCurrentOrientation=1");
+        // A restarted shell of the same boot (an adb hiccup).
+        state.apply("b=8c1f-first");
+        assert!(!state.guest_restarted());
+        // A shell after `adb reboot`: Android booted again.
+        state.apply("b=77aa-second");
+        assert!(state.guest_restarted());
+        assert_eq!(state.rotation(), Some(1));
+        assert!(ROTATION_LOOP.starts_with("echo \"b=$(cat /proc/sys/kernel/random/boot_id)\""));
     }
 
     #[test]
