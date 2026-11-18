@@ -82,7 +82,11 @@ pub fn emulator_request_from_json(payload: &str) -> Option<EmulatorRequest> {
             });
         }
         "avd_settings_set" => {
-            let number = |key: &str| u32::try_from(value[key].as_u64().unwrap_or_default()).ok();
+            // A missing value is left as it is; anything but a whole number is refused.
+            let number = |key: &str| match value.get(key) {
+                None => Some(0),
+                Some(given) => u32::try_from(given.as_u64()?).ok(),
+            };
             let candidate = EmulatorHostRequest {
                 action: "avd_settings_set".to_owned(),
                 component: value["component"].as_str()?.to_owned(),
@@ -764,6 +768,14 @@ mod tests {
         assert!(host(unscoped).is_none());
         let empty = identity("avd_settings_set", "avd:Maple_1");
         assert!(host(empty).is_none(), "a save must change something");
+        for bad in [serde_json::json!("6144"), serde_json::json!(6144.5), serde_json::json!(-1), serde_json::json!(null)] {
+            let mut odd = set.clone();
+            odd["ram_mb"] = bad.clone();
+            assert!(host(odd).is_none(), "ram_mb {bad}");
+        }
+        let mut unchanged = set.clone();
+        unchanged.as_object_mut().unwrap().remove("cpu_cores");
+        assert_eq!(host(unchanged).unwrap().avd_cpu_cores, 0, "a missing value is left as it is");
 
         let get = host(serde_json::json!({"protocol_version":1,"request_id":52,
             "action":"avd_settings_get","component":"avd:Maple_1"})).unwrap();

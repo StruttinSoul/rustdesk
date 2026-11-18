@@ -294,22 +294,73 @@ class EmulatorModel extends ChangeNotifier {
   CapabilityStatus get emulatorShutdownCapability => _capabilities.status('host.emulator_shutdown.v1');
   bool isEmulatorShuttingDown(String id) => _shutdownPending.contains(id) ||
       instances.any((item) => item.id == id && item.state == 'stopping');
-  bool canShutdownEmulator(String id) => _canMutateHost('host.emulator_shutdown.v1') &&
+  /// [runningAsKnown]: the phone knows it is running although the list
+  /// (older than that) still says stopped.
+  bool canShutdownEmulator(String id, {bool runningAsKnown = false}) =>
+      _canMutateHost('host.emulator_shutdown.v1') &&
       !isEmulatorShuttingDown(id) && instances.any((item) => item.id == id &&
-          (item.provider == 'bluestacks' || item.provider == 'avd') && item.state != 'stopped');
+          (item.provider == 'bluestacks' || item.provider == 'avd') &&
+          (item.state != 'stopped' || runningAsKnown));
 
   bool get canManageAvds => _canMutateHost('host.avd_manage.v1');
 
   /// Whether [id] can be rebooted from the phone: Android restarts inside the
   /// running emulator, which keeps running.
-  bool canRebootEmulator(String id) =>
+  bool canRebootEmulator(String id, {bool runningAsKnown = false}) =>
       _canMutateHost('host.emulator_power.v1') &&
       !isEmulatorShuttingDown(id) &&
       instances.any((item) =>
           item.id == id &&
           isDashboardGuestProvider(item.provider) &&
-          item.state != 'stopped' &&
+          (item.state != 'stopped' || runningAsKnown) &&
           item.state != 'cloning');
+
+  /// Emulators rebooted from this phone whose Android is not back yet, with
+  /// when the reboot was acknowledged and whether a list has shown it down.
+  final Map<String, ({int ticks, bool sawDown})> _rebooting = {};
+  Timer? _rebootRefreshTimer;
+  static const _rebootTick = Duration(milliseconds: 2500);
+
+  /// 120 s of list ticks.
+  static const _rebootTicks = 48;
+
+  /// The list request whose answer keeps a failed game's error.
+  int _guestErrorKeptFor = 0;
+
+  bool isRebooting(String id) => _rebooting.containsKey(id);
+
+  /// Lists the PC every 2.5 s after a reboot until Android is back (a list
+  /// showed it down, then ready) or 120 s passed, so a failed game sees the
+  /// emulator ready and reconnects on its own. The guest's error is kept.
+  void _watchReboot(String id) {
+    _rebooting[id] = (ticks: 0, sawDown: false);
+    _rebootRefreshTimer ??= Timer.periodic(_rebootTick, (timer) {
+      for (final id in _rebooting.keys.toList()) {
+        final watch = _rebooting[id]!;
+        _rebooting[id] = (ticks: watch.ticks + 1, sawDown: watch.sawDown);
+      }
+      _trackReboots();
+      if (_disposed || !hostConnectionCurrent || _rebooting.isEmpty) {
+        timer.cancel();
+        _rebootRefreshTimer = null;
+        return;
+      }
+      if (!loading) unawaited(refresh(keepGuestError: true));
+    });
+  }
+
+  void _trackReboots() {
+    for (final id in _rebooting.keys.toList()) {
+      final watch = _rebooting[id]!;
+      final matches = instances.where((item) => item.id == id);
+      final ready = matches.isNotEmpty && matches.first.readyForReconnect;
+      if (watch.ticks >= _rebootTicks || (watch.sawDown && ready)) {
+        _rebooting.remove(id);
+      } else if (!ready && !watch.sawDown) {
+        _rebooting[id] = (ticks: watch.ticks, sawDown: true);
+      }
+    }
+  }
 
   /// Memory, cores and screen are offered for managed emulators only.
   bool canChangeAvdSettings(String id) =>
@@ -357,8 +408,9 @@ class EmulatorModel extends ChangeNotifier {
   Future<AvdActionResult> setAvdWindowVisible(String id, bool visible) => _sendAvdAction(
       'avd_window', 'emulator:$id', {'component': id, 'window_visible': visible}, id: id);
 
-  Future<AvdActionResult> rebootEmulator(String id) {
-    if (!canRebootEmulator(id)) {
+  Future<AvdActionResult> rebootEmulator(String id,
+      {bool runningAsKnown = false}) {
+    if (!canRebootEmulator(id, runningAsKnown: runningAsKnown)) {
       return Future.value(const AvdActionResult(
           false, 'This PC can’t manage emulators from the phone right now.'));
     }
@@ -489,9 +541,9 @@ class EmulatorModel extends ChangeNotifier {
     _avdActionCompletions.clear();
   }
 
-  Future<void> shutdownEmulator(String id) async {
+  Future<void> shutdownEmulator(String id, {bool runningAsKnown = false}) async {
     if (isEmulatorShuttingDown(id)) return;
-    if (!canShutdownEmulator(id)) {
+    if (!canShutdownEmulator(id, runningAsKnown: runningAsKnown)) {
       hostError = 'Shutdown is not available for this emulator. Refresh or update the Windows host.';
       if (!_disposed) notifyListeners();
       return;
@@ -517,10 +569,13 @@ class EmulatorModel extends ChangeNotifier {
       'operation_id': operationId, 'session_identity': _operationSessionIdentity,
       'target_identity': targetIdentity, 'session_generation': _operationGeneration,
     }, requestId: requestId, capability: 'host.emulator_shutdown.v1',
-      stillValid: () => hostConnectionCurrent && instances.any((item) => item.id == id && item.state != 'stopped'));
+      stillValid: () => hostConnectionCurrent && instances.any((item) =>
+          item.id == id && (item.state != 'stopped' || runningAsKnown)));
   }
 
   void _clearShutdownState() {
+    _rebootRefreshTimer?.cancel(); _rebootRefreshTimer = null;
+    _rebooting.clear();
     _shutdownRefreshTimer?.cancel(); _shutdownRefreshTimer = null;
     _avdRefreshTimer?.cancel(); _avdRefreshTimer = null;
     _shutdownPending.clear(); _shutdownRequests.clear();
@@ -698,11 +753,14 @@ class EmulatorModel extends ChangeNotifier {
     return completion.future;
   }
 
-  Future<void> refresh() {
+  /// [keepGuestError] keeps a failed game's error, which its automatic
+  /// reconnect waits on.
+  Future<void> refresh({bool keepGuestError = false}) {
     loading = true;
-    error = '';
+    if (!keepGuestError) error = '';
     listError = '';
     _inventoryRequest = ++_sequence;
+    _guestErrorKeptFor = keepGuestError ? _inventoryRequest : 0;
     _inventoryRequestedAt = DateTime.now();
     _inventoryTimeout?.cancel();
     _inventoryTimeout = Timer(const Duration(seconds: 25), () {
@@ -1827,9 +1885,12 @@ class EmulatorModel extends ChangeNotifier {
         if (host['ok'] != true) _shutdownPending.remove(shutdownTarget);
         if (hostConnectionCurrent) unawaited(refresh());
       }
-      if ((operation.action.startsWith('avd_') ||
-              operation.action == 'emulator_reboot') &&
-          hostConnectionCurrent) {
+      if (operation.action == 'emulator_reboot') {
+        if (host['ok'] == true) {
+          _watchReboot(operation.targetIdentity.replaceFirst('emulator:', ''));
+        }
+        if (hostConnectionCurrent) unawaited(refresh(keepGuestError: true));
+      } else if (operation.action.startsWith('avd_') && hostConnectionCurrent) {
         unawaited(refresh());
       }
       _pendingHostOperations.remove(id);
@@ -2013,10 +2074,15 @@ class EmulatorModel extends ChangeNotifier {
               progressPercent: (item['progress_percent'] as num?)?.toInt() ?? 0,
               windowVisible: item['window_visible'] == true))
           .toList();
+      _trackReboots();
       listRequestedAt = _inventoryRequestedAt;
       loading = false;
-      error = (response['provider_errors'] as List? ?? []).join('\n');
-      listError = error;
+      final providerErrors =
+          (response['provider_errors'] as List? ?? []).join('\n');
+      if (id != _guestErrorKeptFor || providerErrors.isNotEmpty) {
+        error = providerErrors;
+      }
+      listError = providerErrors;
       if (!_capabilities.allows('host.emulator_shutdown.v1')) _clearShutdownState();
       _shutdownPending.removeWhere((id) => !instances.any((item) => item.id == id) ||
           instances.any((item) => item.id == id && ['stopped', 'stopping', 'shutdown_failed'].contains(item.state)));
@@ -2115,6 +2181,7 @@ class EmulatorModel extends ChangeNotifier {
           _phoneWorkspaceRequest,
           _gatewayStatusRequest,
           ..._pendingHostOperations,
+          ..._avdSettingsReads.keys,
         ].contains(id)) {
       final requestError =
           response['error']?.toString() ?? 'Remote request failed';
@@ -2150,6 +2217,8 @@ class EmulatorModel extends ChangeNotifier {
         if (_gatewayRestartExpectedIdentity != null && _gatewayNeedsReconcile) {
           _scheduleGatewayReconcileRefresh();
         }
+      } else if (_avdSettingsReads.containsKey(id)) {
+        _finishAvdSettingsRead(id, null, requestError);
       } else if (_pendingHostOperations.contains(id)) {
         final operation = _hostOperations.operationForRequest(id);
         if (operation != null) {

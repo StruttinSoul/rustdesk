@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../common.dart' show translate;
@@ -7,6 +9,37 @@ import 'mirpg_remote_theme.dart';
 /// What the person saved: only the values they changed, and whether a
 /// running emulator is to be restarted with them now.
 typedef AvdSettingsChoice = ({AvdSettings change, bool restart});
+
+/// Shows a spinner with [label] over the page until [work] completes.
+Future<T> waitWithProgress<T>(
+  BuildContext context,
+  Future<T> work, {
+  required String label,
+}) async {
+  final navigator = Navigator.of(context, rootNavigator: true);
+  var shown = true;
+  unawaited(showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    useRootNavigator: true,
+    builder: (_) => PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(children: [
+          const SizedBox.square(
+              dimension: 24, child: CircularProgressIndicator(strokeWidth: 3)),
+          const SizedBox(width: 16),
+          Flexible(child: Text(label)),
+        ]),
+      ),
+    ),
+  ).whenComplete(() => shown = false));
+  try {
+    return await work;
+  } finally {
+    if (shown && navigator.mounted) navigator.pop();
+  }
+}
 
 /// Memory, CPU cores and screen of a managed emulator. Returns null when
 /// dismissed.

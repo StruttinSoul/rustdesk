@@ -1195,6 +1195,9 @@ class _EmulatorPageState extends State<EmulatorPage>
     }
     final failed = model.error.isNotEmpty;
     final retryArmed = failed && _guestReconnectTimer != null;
+    // Rebooted from the menu: the stream ended on purpose and reopens once
+    // Android is back.
+    final rebooting = failed && model.isRebooting(model.targetId);
     final showOnPc = widget.onShowOnPc;
     return StartupChecklist(
       name: name,
@@ -1204,10 +1207,12 @@ class _EmulatorPageState extends State<EmulatorPage>
       elapsed: _startupClock.elapsed,
       failureTitle: !failed
           ? ''
-          : _guestWasLive
-              ? 'Lost the screen for {$name}'
-              : "Couldn't start {$name}",
-      failureMessage: model.error,
+          : rebooting
+              ? 'Rebooting {$name}'
+              : _guestWasLive
+                  ? 'Lost the screen for {$name}'
+                  : "Couldn't start {$name}",
+      failureMessage: rebooting ? '' : model.error,
       retryNote: !retryArmed
           ? ''
           : _guestReconnectAttempts == 0

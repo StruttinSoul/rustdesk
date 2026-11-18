@@ -920,5 +920,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Restarting {}", ""),
         ("Settings saved", ""),
         ("Saved for the next start", ""),
+        ("Loading settings…", ""),
     ].iter().cloned().collect();
 }

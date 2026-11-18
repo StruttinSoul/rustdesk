@@ -774,7 +774,9 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   Future<void> _shutdownEmulator(_Target target) async {
     if (!await showEmulatorShutdownConfirmation(context, _confirmationName(target)) || !mounted) return;
     if (_fullscreen?.id == target.id) await _dashboard();
-    await model.shutdownEmulator(target.id);
+    final instance = target.instance;
+    await model.shutdownEmulator(target.id,
+        runningAsKnown: instance != null && _runningAsKnown(instance));
     if (mounted && model.hostError.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(model.hostError)));
     }
@@ -882,14 +884,19 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         !mounted) {
       return;
     }
-    _reportAvdResult(await model.rebootEmulator(target.id),
+    final instance = target.instance;
+    _reportAvdResult(
+        await model.rebootEmulator(target.id,
+            runningAsKnown: instance != null && _runningAsKnown(instance)),
         success: translate('Rebooting {$shown}'));
   }
 
   /// Memory, CPU cores and screen of managed emulator [target].
   Future<void> _openAvdSettings(_Target target) async {
     final shown = _shownName(target.id, target.name);
-    final loaded = await model.loadAvdSettings(target.id);
+    final loaded = await waitWithProgress(
+        context, model.loadAvdSettings(target.id),
+        label: translate('Loading settings…'));
     if (!mounted) return;
     final info = loaded.info;
     if (info == null) {
@@ -1075,7 +1082,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       blocker: model.avdActionBlocker(target.id, 'avd_delete') ??
           (running ? 'Stop it first' : null),
       onToggleWindow: () => unawaited(_toggleAvdWindow(target)),
-      onStop: model.canShutdownEmulator(target.id)
+      onStop: model.canShutdownEmulator(target.id, runningAsKnown: running)
           ? () => unawaited(_shutdownEmulator(target))
           : null,
       onClone: () => unawaited(_cloneAvd(target)),
@@ -1125,13 +1132,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             ? () => unawaited(_open(target, launchDefaultApp: true))
             : null,
         onStop: instance.provider == 'bluestacks' &&
-                !stopped &&
+                (!stopped || _runningAsKnown(instance)) &&
                 model.emulatorShutdownCapability ==
                     CapabilityStatus.supported &&
                 control
             ? () => unawaited(_shutdownEmulator(target))
             : null,
-        onReboot: control && model.canRebootEmulator(target.id)
+        onReboot: control &&
+                model.canRebootEmulator(target.id,
+                    runningAsKnown: _runningAsKnown(instance))
             ? () => unawaited(_rebootEmulator(target))
             : null,
         onLabel: () => unawaited(_editLabel(target)),
