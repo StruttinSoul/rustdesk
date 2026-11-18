@@ -1132,8 +1132,13 @@ message EmulatorHostRequest {
   string gateway_expected_process_identity = 18;
   uint32 gateway_confirmed_active_sessions = 19;
   bool gateway_active_sessions_known = 20;
+  // Deprecated: belonged to the removed Android Emulator (AVD) actions. Kept,
+  // unused, so older and newer peers stay compatible.
   string new_name = 21;
+  // `emulator_window`: show (true) or hide the emulator's window on the PC.
   bool window_visible = 22;
+  // Deprecated: fields 23-27 belonged to the removed Android Emulator (AVD)
+  // settings. Kept, unused, so older and newer peers stay compatible.
   uint32 avd_ram_mb = 23;
   uint32 avd_cpu_cores = 24;
   uint32 avd_screen_width = 25;
@@ -1173,7 +1178,10 @@ message EmulatorInstance {
   string android_version = 5;
   string default_package = 6;
   string last_error = 7;
+  // Deprecated: belonged to the removed Android Emulator (AVD) copies. Kept,
+  // unused, so older and newer peers stay compatible.
   uint32 progress_percent = 8;
+  // The emulator's window is shown on the PC.
   bool window_visible = 9;
 }
 

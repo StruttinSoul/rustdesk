@@ -169,8 +169,24 @@ PlayStore.enabled=true
 
 /// Plain AVD names only: no path separators, drive colons, dots-first names or
 /// Windows device names (which would address a device instead of a file).
+// `remote::valid_avd_name` went with Android Emulator support on the host
+// branch; this stale Windows copy keeps its own so it still compiles.
 pub fn valid_avd_name(name: &str) -> bool {
-    super::remote::valid_avd_name(name)
+    if name.is_empty()
+        || name.len() > 64
+        || name.starts_with('.')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .map_or(false, |n| matches!(n.as_bytes(), [b'1'..=b'9']))
+    };
+    !(matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
