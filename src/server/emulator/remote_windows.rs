@@ -2331,7 +2331,9 @@ mod tests {
         let mut went_down = false;
         let mut booted_at: Option<Instant> = None;
         while since.elapsed() < Duration::from_secs(150)
-            && booted_at.map_or(true, |at| at.elapsed() < Duration::from_secs(20))
+            && booted_at.map_or(true, |at| {
+                at.elapsed() < Duration::from_secs(if failed.is_some() { 5 } else { 20 })
+            })
         {
             match next_event(runtime, events, Duration::from_millis(500)) {
                 Some(GuestEvent::Frame(_)) => frames += 1,
@@ -2347,8 +2349,8 @@ mod tests {
                             status.error
                         ));
                         if state == EmulatorSessionState::EmulatorFailed {
-                            failed = Some(since.elapsed());
-                            break;
+                            // As the phone does: wait for Android to be back.
+                            failed = failed.or(Some(since.elapsed()));
                         }
                     }
                 }
