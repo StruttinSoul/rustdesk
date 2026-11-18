@@ -1,10 +1,8 @@
 use super::{
-    avd::AvdProvider,
-    avd_feed::{self, FeedEndpoint, Readiness},
     bluestacks::BlueStacksProvider,
     guest_protocol::{text_packet, touch_packet, H264Frames, VideoPacket},
     guest_runtime::{
-        adb_command, adb_command_within, helper_path, is_default_adb_server, is_jammed,
+        adb_command, helper_path, is_default_adb_server, is_jammed,
         is_not_answering, GuestHelper, SCRCPY_CONTROL_RESET_VIDEO,
     },
     ldplayer::LdPlayerProvider,
@@ -30,8 +28,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[path = "avd_host_video.rs"]
-mod avd_host_video;
+#[path = "host_video_session.rs"]
+mod host_video_session;
 
 const GUEST_INPUT_QUEUE_SIZE: usize = 256;
 const GUEST_INPUT_MOVE_SHED_THRESHOLD: usize = 24;
@@ -44,7 +42,7 @@ struct LocalTarget {
 fn targets() -> (Vec<LocalTarget>, Vec<String>) {
     let mut found = Vec::new();
     let mut errors = Vec::new();
-    let providers: [(&str, ResultType<Option<Arc<dyn EmulatorProvider>>>); 3] = [
+    let providers: [(&str, ResultType<Option<Arc<dyn EmulatorProvider>>>); 2] = [
         (
             "BlueStacks",
             BlueStacksProvider::detect().map(|provider| {
@@ -54,12 +52,6 @@ fn targets() -> (Vec<LocalTarget>, Vec<String>) {
         (
             "LDPlayer",
             LdPlayerProvider::detect().map(|provider| {
-                provider.map(|provider| Arc::new(provider) as Arc<dyn EmulatorProvider>)
-            }),
-        ),
-        (
-            "Android Emulator",
-            AvdProvider::detect().map(|provider| {
                 provider.map(|provider| Arc::new(provider) as Arc<dyn EmulatorProvider>)
             }),
         ),
@@ -115,20 +107,6 @@ pub fn inventory(
             last_error: local.target.last_error.unwrap_or_default(),
             ..Default::default()
             };
-            if let Some(percent) = local.target.progress_percent {
-                // An emulator still being copied: nothing but its progress.
-                instance.state = "cloning".to_owned();
-                instance.progress_percent = percent;
-                instance.last_error.clear();
-            } else if instance.provider == "avd"
-                && !matches!(
-                    local.target.state,
-                    EmulatorState::Stopped | EmulatorState::Unknown
-                )
-            {
-                instance.window_visible =
-                    super::avd_launch_windows::window_visible(&local.target.provider_instance_id);
-            }
             super::shutdown_windows::annotate(&mut instance);
             instance
         })
@@ -148,9 +126,7 @@ pub fn inventory(
             "host.windows.list.v1".to_owned(),
             "host.window_focus.v1".to_owned(),
             "host.emulator_shutdown.v1".to_owned(),
-            "host.avd_manage.v1".to_owned(),
             "host.emulator_power.v1".to_owned(),
-            "host.avd_settings.v1".to_owned(),
             "host.process_end".to_owned(),
             "host.shell_restart.v1".to_owned(),
             "host.process_identity.v2".to_owned(),
@@ -214,7 +190,7 @@ pub fn with_phase(mut response: EmulatorResponse, phase: &str) -> EmulatorRespon
 }
 
 fn has_live_preview(provider: &str) -> bool {
-    matches!(provider, "bluestacks" | "avd")
+    provider == "bluestacks"
 }
 
 /// Providers whose emulator-N serial could be BlueStacks' port alias.
@@ -715,63 +691,10 @@ impl Drop for GuestSession {
     }
 }
 
-/// A booted guest answers getprop at once; one that does not within this is
-/// not answering.
-const BOOT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(8);
-
 /// The failure phase of a full-screen session ended because the emulator was
 /// opened on another device; the phone does not reopen it by itself.
 const SUPERSEDED_PHASE: &str = "superseded";
 const SUPERSEDED_MESSAGE: &str = "This emulator was opened on another device.";
-
-/// An Android Emulator's own word on whether Android has booted, so opening
-/// one does not wait on ADB; None for other providers. The emulator's
-/// discovery file is read once it exists, and again only after the
-/// controller stopped answering.
-fn controller_readiness(
-    target: &EmulatorTarget,
-    endpoint: &mut Option<FeedEndpoint>,
-) -> Option<Readiness> {
-    if target.provider.to_string() != "avd" {
-        return None;
-    }
-    if endpoint.is_none() {
-        match avd_feed::discover(&target.provider_instance_id) {
-            Ok(found) => *endpoint = Some(found),
-            Err(error) => return Some(Readiness::Unknown(error.to_string())),
-        }
-    }
-    let readiness = avd_feed::readiness(endpoint.as_ref()?);
-    if matches!(readiness, Readiness::Unknown(_)) {
-        *endpoint = None;
-    }
-    Some(readiness)
-}
-
-/// What the ADB confirmation of a booted answer from the controller means.
-enum BootCheck {
-    Booted,
-    /// Keep waiting; the error, if any, is reported if the wait runs out.
-    Wait(Option<hbb_common::anyhow::Error>),
-    Fail(hbb_common::anyhow::Error),
-}
-
-fn boot_check(answer: ResultType<String>, just_started: bool) -> BootCheck {
-    match answer {
-        Ok(value) if value.trim() == "1" => BootCheck::Booted,
-        Ok(_) => BootCheck::Wait(None),
-        // Android restarting: the controller can still say booted while the
-        // emulator's ADB transport is offline. An emulator this open has just
-        // started may be slow to answer while it boots.
-        Err(error)
-            if error.to_string().contains("device offline")
-                || (just_started && is_not_answering(&error)) =>
-        {
-            BootCheck::Wait(Some(error))
-        }
-        Err(error) => BootCheck::Fail(error),
-    }
-}
 
 fn superseded_status(request_id: u64, id: u64, target_id: &str) -> EmulatorResponse {
     with_phase(
@@ -832,6 +755,15 @@ fn claim_full_screen(entry: FullScreenEntry) -> Option<u64> {
     Some(previous.id)
 }
 
+/// The emulator's screen as captured on this PC, for host-GPU video. No
+/// provider has one until the BlueStacks host-capture work adds it; the
+/// session then streams the in-Android helper video.
+fn host_screen_source(
+    _target: &EmulatorTarget,
+) -> Option<Box<dyn host_video_session::HostScreenSource>> {
+    None
+}
+
 fn release_full_screen(target_id: &str, id: u64) {
     full_screen().retain(|entry| !(entry.target_id == target_id && entry.id == id));
 }
@@ -861,7 +793,7 @@ fn run_session(
         && (!has_live_preview(&local.target.provider.to_string())
             || local.target.state == EmulatorState::Stopped)
     {
-        bail!("Only running BlueStacks and Android Emulator instances have live previews")
+        bail!("Only running BlueStacks instances have live previews")
     }
     if !local.provider.capabilities(&local.target).adb {
         bail!("Enable ADB debugging in this emulator instance's settings before connecting")
@@ -897,47 +829,9 @@ fn run_session(
     let started = Instant::now();
     // Only an emulator that was already running fails at its first silence.
     let just_started = is_stopped;
-    let mut controller = None;
-    let mut last_adb_error = None;
     let serial = loop {
         if cancel.load(Ordering::Acquire) {
             return Ok(());
-        }
-        let readiness = controller_readiness(&local.target, &mut controller);
-        let controller_knows = matches!(
-            readiness,
-            Some(Readiness::Ready(_)) | Some(Readiness::Booting)
-        );
-        match readiness {
-            // The controller still says booted for several seconds after
-            // Android restarts, so one bounded ADB check confirms it.
-            Some(Readiness::Ready(serial)) => {
-                let answer = adb_command_within(
-                    &adb,
-                    &serial,
-                    &["shell", "getprop", "sys.boot_completed"],
-                    BOOT_CONFIRM_TIMEOUT,
-                );
-                match boot_check(answer, just_started) {
-                    BootCheck::Booted => break serial,
-                    BootCheck::Wait(error) => last_adb_error = error.or(last_adb_error),
-                    BootCheck::Fail(error) => return Err(error),
-                }
-            }
-            Some(Readiness::Unknown(reason)) => {
-                log::trace!("Emulator controller cannot tell readiness, asking ADB: {reason}")
-            }
-            _ => {}
-        }
-        if controller_knows {
-            if started.elapsed() > Duration::from_secs(90) {
-                match last_adb_error {
-                    Some(error) => return Err(error),
-                    None => bail!("Android did not finish booting within 90 seconds"),
-                }
-            }
-            thread::sleep(Duration::from_millis(500));
-            continue;
         }
         if let Ok(endpoint) = local.provider.resolve_adb(&local.target) {
             if endpoint.serial.starts_with("127.0.0.1:") {
@@ -1004,32 +898,31 @@ fn run_session(
     if cancel.load(Ordering::Acquire) {
         return Ok(());
     }
-    let input = if local.target.provider.to_string() == "avd" {
-        let session = avd_host_video::HostSession {
-            request,
-            id,
-            target_id,
-            events,
-            cancel,
-            capture_input,
-            pending_requests,
-            preview,
-            adb: &adb,
-            serial: &serial,
-            helper: &helper,
-            avd: &local.target.provider_instance_id,
-        };
-        match avd_host_video::run(&session, input) {
-            avd_host_video::HostAttempt::Finished(result) => return result,
-            avd_host_video::HostAttempt::Fallback(input) => input,
+    let input = match host_screen_source(&local.target) {
+        Some(source) => {
+            let session = host_video_session::HostSession {
+                request,
+                id,
+                target_id,
+                events,
+                cancel,
+                capture_input,
+                pending_requests,
+                preview,
+                adb: &adb,
+                serial: &serial,
+                helper: &helper,
+                source: source.as_ref(),
+            };
+            match host_video_session::run(&session, input) {
+                host_video_session::HostAttempt::Finished(result) => return result,
+                host_video_session::HostAttempt::Fallback(input) => input,
+            }
         }
-    } else {
-        input
+        None => input,
     };
     let mut helper = if preview {
         GuestHelper::connect_preview(&adb, &serial, &helper)?
-    } else if local.target.provider.to_string() == "avd" {
-        GuestHelper::connect_android_emulator(&adb, &serial, &helper)?
     } else {
         GuestHelper::connect(&adb, &serial, &helper)?
     };
@@ -1366,13 +1259,12 @@ mod tests {
     use std::{io::Read, net::TcpListener};
 
     #[test]
-    fn android_emulator_gets_previews_and_the_bluestacks_alias_guard() {
+    fn only_bluestacks_gets_previews_and_others_get_the_bluestacks_alias_guard() {
         assert!(has_live_preview("bluestacks"));
-        assert!(has_live_preview("avd"));
+        assert!(!has_live_preview("avd"));
         assert!(!has_live_preview("ldplayer"));
         assert!(!may_be_bluestacks_alias("bluestacks"));
         assert!(may_be_bluestacks_alias("ldplayer"));
-        assert!(may_be_bluestacks_alias("avd"));
     }
 
     fn shed_touch(action: u32) -> EmulatorRequest {
@@ -1445,11 +1337,11 @@ mod tests {
             (entry, flags, peer)
         };
         let (first, (first_cancel, first_superseded), mut first_peer) =
-            entry("avd:Supersede_Test_A", 1);
+            entry("bluestacks:Supersede_Test_A", 1);
         assert_eq!(claim_full_screen(first), None);
-        let (other, (other_cancel, _), _other_peer) = entry("avd:Supersede_Test_B", 2);
+        let (other, (other_cancel, _), _other_peer) = entry("bluestacks:Supersede_Test_B", 2);
         assert_eq!(claim_full_screen(other), None);
-        let (second, (second_cancel, _), _second_peer) = entry("avd:Supersede_Test_A", 3);
+        let (second, (second_cancel, _), _second_peer) = entry("bluestacks:Supersede_Test_A", 3);
         assert_eq!(claim_full_screen(second), Some(1));
         assert!(first_cancel.load(Ordering::Acquire));
         assert!(first_superseded.load(Ordering::Acquire));
@@ -1459,46 +1351,20 @@ mod tests {
         assert!(!second_cancel.load(Ordering::Acquire));
         assert!(!other_cancel.load(Ordering::Acquire));
         // The ended session's own release does not drop its successor.
-        release_full_screen("avd:Supersede_Test_A", 1);
-        let (third, _, _third_peer) = entry("avd:Supersede_Test_A", 4);
+        release_full_screen("bluestacks:Supersede_Test_A", 1);
+        let (third, _, _third_peer) = entry("bluestacks:Supersede_Test_A", 4);
         assert_eq!(claim_full_screen(third), Some(3));
         assert!(second_cancel.load(Ordering::Acquire));
-        release_full_screen("avd:Supersede_Test_A", 4);
-        release_full_screen("avd:Supersede_Test_B", 2);
+        release_full_screen("bluestacks:Supersede_Test_A", 4);
+        release_full_screen("bluestacks:Supersede_Test_B", 2);
         assert!(!full_screen()
             .iter()
-            .any(|entry| entry.target_id.starts_with("avd:Supersede_Test_")));
-    }
-
-    #[test]
-    fn a_booted_answer_is_confirmed_and_adb_errors_are_not_swallowed() {
-        let failed = |message: &str| -> ResultType<String> { bail!("{}", message) };
-        let not_answering =
-            || -> ResultType<String> { Err(super::super::guest_runtime::GuestNotAnswering { waited: None }.into()) };
-        assert!(matches!(boot_check(Ok("1\r\n".to_owned()), false), BootCheck::Booted));
-        assert!(matches!(boot_check(Ok(String::new()), false), BootCheck::Wait(None)));
-        // Android restarting behind a controller that still says booted.
-        let offline = "Guest ADB command failed: error: device offline";
-        assert!(matches!(boot_check(failed(offline), false), BootCheck::Wait(Some(_))));
-        // Anything else is the open's answer, at once.
-        for message in [
-            "Guest ADB command failed: error: device 'emulator-5554' not found",
-            "Guest ADB command failed: error: device unauthorized.",
-        ] {
-            match boot_check(failed(message), false) {
-                BootCheck::Fail(error) => assert_eq!(error.to_string(), message),
-                _ => panic!("{message} was swallowed"),
-            }
-        }
-        // A silent guest fails an open of a running emulator, but not one
-        // this open has just started.
-        assert!(matches!(boot_check(not_answering(), false), BootCheck::Fail(_)));
-        assert!(matches!(boot_check(not_answering(), true), BootCheck::Wait(Some(_))));
+            .any(|entry| entry.target_id.starts_with("bluestacks:Supersede_Test_")));
     }
 
     #[test]
     fn a_superseded_session_reports_its_own_phase() {
-        let response = superseded_status(7, 42, "avd:Maple_1");
+        let response = superseded_status(7, 42, "bluestacks:Pie64");
         let Some(base::message_proto::emulator_response::Union::Status(status)) = response.union
         else {
             panic!("not a status");
@@ -1506,7 +1372,7 @@ mod tests {
         assert_eq!(status.state.enum_value_or_default(), EmulatorSessionState::EmulatorFailed);
         assert_eq!(status.phase, "superseded");
         assert_eq!(status.session_id, 42);
-        assert_eq!(status.target_id, "avd:Maple_1");
+        assert_eq!(status.target_id, "bluestacks:Pie64");
         assert!(!status.error.is_empty());
     }
 
@@ -1567,6 +1433,9 @@ mod tests {
         assert!(inventory
             .capabilities
             .contains(&"host.gateway.restart.v1".to_owned()));
+        // An older phone offers no Android Emulator management.
+        assert!(!inventory.capabilities.iter().any(|capability| capability.contains("avd")));
+        assert!(inventory.instances.iter().all(|instance| instance.provider != "avd"));
     }
 
     #[test]
@@ -2282,1191 +2151,5 @@ mod tests {
             .unwrap();
         }
         result.unwrap();
-    }
-
-    const TRIAL_AVD: &str = "Aperture_Trial_Play35";
-
-    fn trial_adb() -> PathBuf {
-        PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
-            .join(r"Android\Sdk\platform-tools\adb.exe")
-    }
-
-    fn trial_shell(serial: &str, args: &[&str]) -> String {
-        let mut command = std::process::Command::new(trial_adb());
-        if !serial.is_empty() {
-            command.args(["-s", serial]);
-        }
-        let output = command.args(args).output().unwrap();
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    fn trial_serial() -> String {
-        let devices = trial_shell("", &["devices"]);
-        for line in devices.lines().skip(1) {
-            let serial = line.split_whitespace().next().unwrap_or("");
-            if serial.starts_with("emulator-")
-                && trial_shell(serial, &["emu", "avd", "name"])
-                    .lines()
-                    .next()
-                    .map(str::trim)
-                    == Some(TRIAL_AVD)
-            {
-                return serial.to_owned();
-            }
-        }
-        panic!("{TRIAL_AVD} is not running");
-    }
-
-    fn trial_ui_xml(serial: &str) -> String {
-        trial_shell(
-            serial,
-            &[
-                "shell",
-                "uiautomator dump /data/local/tmp/t5-ui.xml >/dev/null; cat /data/local/tmp/t5-ui.xml",
-            ],
-        )
-    }
-
-    /// The centre of the first UI node with `text` (XML-escaped), in display
-    /// pixels of the current rotation.
-    fn trial_centre_of(xml: &str, text: &str) -> Option<(u32, u32)> {
-        let node = &xml[xml.find(&format!(" text=\"{text}\""))?..];
-        let bounds = &node[node.find(" bounds=\"[")? + 10..];
-        let bounds = &bounds[..bounds.find('"')?];
-        let numbers: Vec<u32> = bounds
-            .split(|c: char| !c.is_ascii_digit())
-            .filter(|part| !part.is_empty())
-            .filter_map(|part| part.parse().ok())
-            .collect();
-        match numbers[..] {
-            [left, top, right, bottom] => Some(((left + right) / 2, (top + bottom) / 2)),
-            _ => None,
-        }
-    }
-
-    /// The display's (long, short) side.
-    fn trial_landscape_display(serial: &str) -> (u32, u32) {
-        let size = trial_shell(serial, &["shell", "wm", "size"]);
-        let (width, height) = size
-            .lines()
-            .filter_map(|line| line.rsplit(':').next()?.trim().split_once('x'))
-            .filter_map(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)))
-            .last()
-            .expect("wm size");
-        (width.max(height), width.min(height))
-    }
-
-    fn trial_screen_texts(serial: &str) -> Vec<String> {
-        let xml = trial_ui_xml(serial);
-        xml.split(" text=\"")
-            .skip(1)
-            .filter_map(|part| part.split_once('"').map(|(text, _)| text.to_owned()))
-            .filter(|text| !text.is_empty())
-            .collect()
-    }
-
-    fn trial_open_settings(serial: &str) -> Vec<String> {
-        for package in ["com.android.settings", "com.google.android.settings.intelligence"] {
-            trial_shell(serial, &["shell", "am", "force-stop", package]);
-        }
-        trial_shell(serial, &["shell", "input", "keyevent", "3"]);
-        // NEW_TASK | CLEAR_TASK: always the main Settings screen.
-        trial_shell(
-            serial,
-            &["shell", "am", "start", "-f", "0x10008000", "-a", "android.settings.SETTINGS"],
-        );
-        thread::sleep(Duration::from_secs(3));
-        trial_screen_texts(serial)
-    }
-
-    fn trial_select() -> EmulatorRequest {
-        let mut request = EmulatorRequest {
-            request_id: 1,
-            protocol_version: PROTOCOL_VERSION,
-            ..Default::default()
-        };
-        request.set_select(base::message_proto::EmulatorSelectRequest {
-            target_id: format!("avd:{TRIAL_AVD}"),
-            ..Default::default()
-        });
-        request
-    }
-
-    type Events = hbb_common::tokio::sync::mpsc::Receiver<GuestEvent>;
-    type TestRuntime = hbb_common::tokio::runtime::Runtime;
-
-    fn test_runtime() -> TestRuntime {
-        hbb_common::tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-    }
-
-    fn next_event(runtime: &TestRuntime, events: &mut Events, wait: Duration) -> Option<GuestEvent> {
-        runtime
-            .block_on(async { hbb_common::tokio::time::timeout(wait, events.recv()).await })
-            .ok()
-            .flatten()
-    }
-
-    /// Waits for `stream_ready` (optionally of a landscape or portrait
-    /// stream), returning its size.
-    fn wait_stream_ready(
-        runtime: &TestRuntime,
-        events: &mut Events,
-        within: Duration,
-        landscape: Option<bool>,
-    ) -> Option<(u32, u32)> {
-        let started = Instant::now();
-        while started.elapsed() < within {
-            let Some(event) = next_event(runtime, events, within.saturating_sub(started.elapsed()))
-            else {
-                break;
-            };
-            if let GuestEvent::Response(response) = event {
-                if let Some(base::message_proto::emulator_response::Union::Status(status)) =
-                    response.union
-                {
-                    let state = status.state.enum_value_or_default();
-                    assert_ne!(state, EmulatorSessionState::EmulatorFailed, "{}", status.error);
-                    if state == EmulatorSessionState::EmulatorStreaming
-                        && status.phase == "stream_ready"
-                        && landscape.map_or(true, |landscape| {
-                            (status.width > status.height) == landscape
-                        })
-                    {
-                        return Some((status.width, status.height));
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Consumes events until the stream has been ready in the expected
-    /// orientation, with no geometry change, for 1 s; returns its size.
-    /// The fixture stops reading events while it drives the guest over adb.
-    /// The session then stalls on the full event queue in the middle of a
-    /// geometry change (HOME turns the guest portrait), and a tap sent before
-    /// that backlog clears arrives while the geometry is not ready.
-    fn settle_stream(
-        runtime: &TestRuntime,
-        events: &mut Events,
-        ready: &mut Option<(u32, u32)>,
-        landscape: bool,
-        within: Duration,
-    ) -> Option<(u32, u32)> {
-        let started = Instant::now();
-        let mut changed = Instant::now();
-        while started.elapsed() < within {
-            if let Some(size) = *ready {
-                if (size.0 > size.1) == landscape && changed.elapsed() >= Duration::from_secs(1) {
-                    return Some(size);
-                }
-            }
-            if let Some(GuestEvent::Response(response)) =
-                next_event(runtime, events, Duration::from_millis(50))
-            {
-                if let Some(base::message_proto::emulator_response::Union::Status(status)) =
-                    response.union
-                {
-                    let state = status.state.enum_value_or_default();
-                    assert_ne!(state, EmulatorSessionState::EmulatorFailed, "{}", status.error);
-                    match status.phase.as_str() {
-                        "stream_ready" => *ready = Some((status.width, status.height)),
-                        "waiting_screen" => *ready = None,
-                        _ => {}
-                    }
-                    changed = Instant::now();
-                }
-            }
-        }
-        None
-    }
-
-    /// Puts the guest in `rotation` (accelerometer off) and waits until the
-    /// stream has settled in that orientation; returns the stream size.
-    /// The setting is re-put while waiting: Android can rewrite user_rotation
-    /// when Settings starts (it restores the rotation it was last shown in).
-    fn force_rotation(
-        runtime: &TestRuntime,
-        events: &mut Events,
-        serial: &str,
-        current: (u32, u32),
-        rotation: u32,
-    ) -> (u32, u32) {
-        let rotation_value = rotation.to_string();
-        let wanted = [("accelerometer_rotation", "0"), ("user_rotation", rotation_value.as_str())];
-        let mut ready = Some(current);
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(15) {
-            for (key, value) in wanted {
-                if trial_setting(serial, key) != value {
-                    trial_shell(serial, &["shell", "settings", "put", "system", key, value]);
-                }
-            }
-            let settled =
-                settle_stream(runtime, events, &mut ready, rotation % 2 == 1, Duration::from_secs(3));
-            if let Some(size) = settled {
-                if wanted.iter().all(|(key, value)| trial_setting(serial, key) == *value) {
-                    return size;
-                }
-            }
-        }
-        panic!("the stream did not settle at rotation {rotation}: {ready:?}");
-    }
-
-    /// Consumes events for `duration`: (frames, key frames).
-    fn pump(runtime: &TestRuntime, events: &mut Events, duration: Duration) -> (usize, usize) {
-        let started = Instant::now();
-        let (mut frames, mut keys) = (0, 0);
-        while started.elapsed() < duration {
-            if let Some(GuestEvent::Frame(frame)) =
-                next_event(runtime, events, duration.saturating_sub(started.elapsed()))
-            {
-                frames += 1;
-                keys += usize::from(frame.key);
-            }
-        }
-        (frames, keys)
-    }
-
-    fn tap(session: &GuestSession, (width, height): (u32, u32)) {
-        tap_at(session, (width, height), (width / 2, height / 2));
-    }
-
-    fn tap_at(session: &GuestSession, (width, height): (u32, u32), (x, y): (u32, u32)) {
-        for action in [0, 1] {
-            let mut request = EmulatorRequest {
-                session_id: session.id,
-                ..Default::default()
-            };
-            request.set_touch(base::message_proto::EmulatorTouch {
-                action,
-                pointer_id: 0,
-                x,
-                y,
-                width,
-                height,
-                ..Default::default()
-            });
-            session.input(request).unwrap();
-            thread::sleep(Duration::from_millis(60));
-        }
-    }
-
-    fn close(runtime: &TestRuntime, session: GuestSession, mut events: Events) {
-        session.cancel();
-        drop(session);
-        runtime
-            .block_on(async {
-                hbb_common::tokio::time::timeout(Duration::from_secs(35), async {
-                    while events.recv().await.is_some() {}
-                })
-                .await
-            })
-            .expect("guest session did not close");
-    }
-
-    /// Restores the trial emulator's rotation settings on drop.
-    struct RotationGuard {
-        serial: String,
-        accelerometer: String,
-        user_rotation: String,
-    }
-
-    impl Drop for RotationGuard {
-        fn drop(&mut self) {
-            for (key, value) in [
-                ("user_rotation", &self.user_rotation),
-                ("accelerometer_rotation", &self.accelerometer),
-            ] {
-                let value = if value.is_empty() || value == "null" {
-                    "0"
-                } else {
-                    value.as_str()
-                };
-                trial_shell(&self.serial, &["shell", "settings", "put", "system", key, value]);
-            }
-        }
-    }
-
-    fn trial_setting(serial: &str, key: &str) -> String {
-        trial_shell(serial, &["shell", "settings", "get", "system", key])
-            .trim()
-            .to_owned()
-    }
-
-    /// What a session sent while Android rebooted: frames, the statuses in
-    /// order, and when (since the reboot) it failed, if it did.
-    fn watch_reboot(
-        runtime: &TestRuntime,
-        events: &mut Events,
-        serial: &str,
-        since: Instant,
-    ) -> (usize, Vec<String>, Option<Duration>) {
-        let (mut frames, mut statuses, mut failed) = (0, Vec::new(), None);
-        let mut went_down = false;
-        let mut booted_at: Option<Instant> = None;
-        while since.elapsed() < Duration::from_secs(150)
-            && booted_at.map_or(true, |at| {
-                at.elapsed() < Duration::from_secs(if failed.is_some() { 5 } else { 20 })
-            })
-        {
-            match next_event(runtime, events, Duration::from_millis(500)) {
-                Some(GuestEvent::Frame(_)) => frames += 1,
-                Some(GuestEvent::Response(response)) => {
-                    if let Some(base::message_proto::emulator_response::Union::Status(status)) =
-                        response.union
-                    {
-                        let state = status.state.enum_value_or_default();
-                        statuses.push(format!(
-                            "{:.1}s {state:?}/{} {}",
-                            since.elapsed().as_secs_f32(),
-                            status.phase,
-                            status.error
-                        ));
-                        if state == EmulatorSessionState::EmulatorFailed {
-                            // As the phone does: wait for Android to be back.
-                            failed = failed.or(Some(since.elapsed()));
-                        }
-                    }
-                }
-                _ => {}
-            }
-            if booted_at.is_none() {
-                let booted =
-                    trial_shell(serial, &["shell", "getprop", "sys.boot_completed"]).trim() == "1";
-                went_down |= !booted;
-                if went_down && booted {
-                    statuses.push(format!("{:.1}s Android booted", since.elapsed().as_secs_f32()));
-                    booted_at = Some(Instant::now());
-                }
-            }
-        }
-        (frames, statuses, failed)
-    }
-
-    /// Whether a tap through `session` at the stream centre changes the
-    /// Settings screen.
-    fn tap_lands(
-        runtime: &TestRuntime,
-        events: &mut Events,
-        session: &GuestSession,
-        serial: &str,
-        size: (u32, u32),
-    ) -> bool {
-        trial_open_settings(serial);
-        let size = force_rotation(runtime, events, serial, size, 0);
-        let before = trial_screen_texts(serial);
-        tap(session, size);
-        pump(runtime, events, Duration::from_millis(1500));
-        before != trial_screen_texts(serial)
-    }
-
-    #[test]
-    #[ignore = "Reboots Android in the running Aperture_Trial_Play35 emulator while streaming it"]
-    fn real_trial_stream_recovers_after_reboot() {
-        let serial = trial_serial();
-        capture_log();
-        let runtime = test_runtime();
-        let (sender, mut events) =
-            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
-        let session = GuestSession::start(trial_select(), sender).unwrap();
-        let size = wait_stream_ready(&runtime, &mut events, Duration::from_secs(15), None)
-            .expect("no stream_ready before the reboot");
-        let (frames, _) = pump(&runtime, &mut events, Duration::from_secs(2));
-        eprintln!("RESULT before reboot: stream {size:?}, {frames} frames in 2 s");
-
-        let rebooted = Instant::now();
-        let message = super::super::emulator_power::reboot(&format!("avd:{TRIAL_AVD}")).unwrap();
-        eprintln!("RESULT reboot answered in {:?}: {message}", rebooted.elapsed());
-        let (frames, statuses, failed) = watch_reboot(&runtime, &mut events, &serial, rebooted);
-        eprintln!("RESULT during reboot: {frames} frames, failed at {failed:?}");
-        for status in &statuses {
-            eprintln!("RESULT   status {status}");
-        }
-        let qemu_alive = running_avd_names_now().contains(TRIAL_AVD);
-        eprintln!("RESULT emulator process kept running: {qemu_alive}");
-        assert!(qemu_alive, "a reboot must not end the emulator");
-
-        if failed.is_none() {
-            // The same session: frames again, and input.
-            thread::sleep(Duration::from_secs(5));
-            let (frames, keys) = pump(&runtime, &mut events, Duration::from_secs(3));
-            let landed = tap_lands(&runtime, &mut events, &session, &serial, size);
-            eprintln!("RESULT same session after boot: {frames} frames ({keys} key) in 3 s, tap landed={landed}");
-            close(&runtime, session, events);
-            assert!(frames > 0 && landed, "the session did not recover");
-            return;
-        }
-        drop(session);
-        // The phone reopens the emulator when its session fails: a new select.
-        let reopened = Instant::now();
-        let (sender, mut events) =
-            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
-        let session = GuestSession::start(trial_select(), sender).unwrap();
-        let size = wait_stream_ready(&runtime, &mut events, Duration::from_secs(120), None)
-            .expect("no stream_ready after the reboot");
-        let ready_after = reopened.elapsed();
-        let (frames, keys) = pump(&runtime, &mut events, Duration::from_secs(3));
-        // Android is still busy for a minute or two after a boot (load
-        // average above 15), so a first tap can go unanswered.
-        let landed = (1..=3).any(|attempt| {
-            let landed = tap_lands(&runtime, &mut events, &session, &serial, size);
-            eprintln!("RESULT reopened session tap {attempt} landed={landed}");
-            landed || {
-                pump(&runtime, &mut events, Duration::from_secs(10));
-                false
-            }
-        });
-        eprintln!(
-            "RESULT reopened session: stream_ready after {ready_after:?} ({:?} after the reboot), {frames} frames ({keys} key) in 3 s, tap landed={landed}",
-            rebooted.elapsed()
-        );
-        close(&runtime, session, events);
-        assert!(frames > 0 && landed, "the reopened session did not stream");
-    }
-
-    fn running_avd_names_now() -> std::collections::BTreeSet<String> {
-        let mut system = hbb_common::sysinfo::System::new();
-        system.refresh_processes();
-        system
-            .processes()
-            .values()
-            .filter_map(|process| super::super::avd::launched_avd(process.name(), process.cmd()))
-            .collect()
-    }
-
-    #[test]
-    #[ignore = "Streams the running Aperture_Trial_Play35 emulator through the host GPU"]
-    fn real_local_avd_streams_from_host_near_sixty_fps() {
-        let serial = trial_serial();
-        capture_log();
-        assert!(
-            scrap::hwcodec::HwRamEncoder::try_get(scrap::CodecFormat::H264).is_some(),
-            "no hardware H.264 encoder in the hwcodec config"
-        );
-        let runtime = test_runtime();
-        trial_open_settings(&serial);
-        let host_streams = avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire);
-        let (sender, mut events) =
-            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
-        let started = Instant::now();
-        let session = GuestSession::start(trial_select(), sender).unwrap();
-        let size = wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), None)
-            .expect("no stream_ready within 10 s");
-        let ready_after = started.elapsed();
-        // The hook counts after `stream_ready` is sent, so it can lag the event.
-        let counted = Instant::now();
-        while avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire) == host_streams
-            && counted.elapsed() < Duration::from_secs(1)
-        {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire) > host_streams,
-            "the session fell back to in-Android video"
-        );
-        eprintln!("RESULT stream_ready after {ready_after:?} at {size:?}");
-
-        // A moving screen: the Settings list scrolled for a bounded time.
-        let swiper = scroll_settings_list(&serial, 8);
-        let first = loop {
-            match next_event(&runtime, &mut events, Duration::from_secs(2)) {
-                Some(GuestEvent::Frame(frame)) => break frame,
-                Some(_) => {}
-                None => panic!("no frame after stream_ready"),
-            }
-        };
-        assert!(first.key, "the first frame must be a keyframe");
-        thread::sleep(Duration::from_millis(300));
-        while events.try_recv().is_ok() {}
-        let (frames, keys) = pump(&runtime, &mut events, Duration::from_secs(5));
-        eprintln!("RESULT moving screen: {frames} frames ({keys} key) in 5 s");
-        swiper.join().unwrap();
-
-        // A still screen, then an explicit refresh.
-        let (still_frames, still_keys) = pump(&runtime, &mut events, Duration::from_secs(5));
-        eprintln!("RESULT still screen: {still_frames} frames ({still_keys} key) in 5 s");
-        let requested = Instant::now();
-        session.refresh_video().unwrap();
-        let refresh_latency = loop {
-            assert!(
-                requested.elapsed() < Duration::from_secs(1),
-                "no keyframe within 1 s of refresh"
-            );
-            if let Some(GuestEvent::Frame(frame)) =
-                next_event(&runtime, &mut events, Duration::from_millis(100))
-            {
-                if frame.key {
-                    break requested.elapsed();
-                }
-            }
-        };
-        eprintln!("RESULT refresh keyframe after {refresh_latency:?}");
-
-        // A tap through input() at the centre of the stream.
-        trial_open_settings(&serial);
-        let size = force_rotation(&runtime, &mut events, &serial, size, 0);
-        let main = trial_screen_texts(&serial);
-        tap(&session, size);
-        pump(&runtime, &mut events, Duration::from_millis(1500));
-        let after = trial_screen_texts(&serial);
-        let portrait_tap = main != after;
-        eprintln!("RESULT portrait tap landed={portrait_tap}: {main:?} -> {after:?}");
-
-        // Landscape: rotate the guest, wait for the new geometry, tap again.
-        let landscape = {
-            let _restore = RotationGuard {
-                serial: serial.clone(),
-                accelerometer: trial_setting(&serial, "accelerometer_rotation"),
-                user_rotation: trial_setting(&serial, "user_rotation"),
-            };
-            trial_shell(&serial, &["shell", "settings", "put", "system", "accelerometer_rotation", "0"]);
-            trial_shell(&serial, &["shell", "settings", "put", "system", "user_rotation", "1"]);
-            let rotated =
-                wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), Some(true));
-            eprintln!("RESULT landscape stream_ready: {rotated:?}");
-            rotated.map(|rotated| {
-                trial_open_settings(&serial);
-                let rotated = force_rotation(&runtime, &mut events, &serial, rotated, 1);
-                let main = trial_screen_texts(&serial);
-                tap(&session, rotated);
-                pump(&runtime, &mut events, Duration::from_millis(1500));
-                let after = trial_screen_texts(&serial);
-                let centre = main != after;
-                eprintln!("RESULT landscape centre tap landed={centre}: {main:?} -> {after:?}");
-
-                // Off-centre (lower-left quadrant): "Network & internet" by its
-                // bounds in the rotated display. A swapped mapping would put
-                // this tap far outside the 1080-pixel-high landscape screen.
-                trial_open_settings(&serial);
-                let settled = force_rotation(&runtime, &mut events, &serial, rotated, 1);
-                assert_eq!(settled, rotated, "the landscape stream size changed");
-                let display = trial_landscape_display(&serial);
-                let target = trial_centre_of(&trial_ui_xml(&serial), "Network &amp; internet")
-                    .expect("Network & internet in landscape Settings");
-                let point = (
-                    target.0 * rotated.0 / display.0,
-                    target.1 * rotated.1 / display.1,
-                );
-                tap_at(&session, rotated, point);
-                pump(&runtime, &mut events, Duration::from_millis(1500));
-                let after = trial_screen_texts(&serial);
-                let off_centre = after.iter().any(|text| text == "Internet")
-                    && !after.iter().any(|text| text == "Connected devices");
-                eprintln!(
-                    "RESULT landscape off-centre tap at display {target:?} = stream {point:?} landed={off_centre}: {after:?}"
-                );
-                centre && off_centre
-            })
-        };
-        trial_shell(&serial, &["shell", "input", "keyevent", "3"]);
-        pump(&runtime, &mut events, Duration::from_secs(2));
-        close(&runtime, session, events);
-
-        assert!(ready_after <= Duration::from_secs(10));
-        assert!(frames >= 250, "only {frames} frames in 5 s");
-        assert!(portrait_tap, "the portrait tap did not land");
-        assert_eq!(landscape, Some(true), "landscape stream or tap failed");
-    }
-
-    #[test]
-    #[ignore = "Rotates the running Aperture_Trial_Play35 emulator"]
-    fn real_rotation_watcher_follows_the_guest() {
-        let serial = trial_serial();
-        // Captured before Settings opens: opening it can rewrite user_rotation.
-        let _restore = RotationGuard {
-            serial: serial.clone(),
-            accelerometer: trial_setting(&serial, "accelerometer_rotation"),
-            user_rotation: trial_setting(&serial, "user_rotation"),
-        };
-        trial_open_settings(&serial);
-        trial_shell(&serial, &["shell", "settings", "put", "system", "accelerometer_rotation", "0"]);
-        trial_shell(&serial, &["shell", "settings", "put", "system", "user_rotation", "0"]);
-        let watcher = avd_host_video::RotationWatcher::start(&trial_adb(), &serial).unwrap();
-        let wait_for = |rotation: u32| {
-            let started = Instant::now();
-            while started.elapsed() < Duration::from_secs(6) {
-                if watcher.rotation() == Some(rotation) {
-                    return Some(started.elapsed());
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            None
-        };
-        assert!(wait_for(0).is_some(), "no initial rotation");
-        // The guest's own rotation (its animation) can take seconds; the
-        // watcher is measured against when the display itself reports it.
-        let display_reports = |serial: String, rotation: u32, started: Instant| {
-            thread::spawn(move || {
-                let wanted = format!("mCurrentOrientation={rotation}");
-                while started.elapsed() < Duration::from_secs(6) {
-                    if trial_shell(
-                        &serial,
-                        &["shell", "dumpsys display | grep -m1 -o 'mCurrentOrientation=[0-3]'"],
-                    )
-                    .contains(&wanted)
-                    {
-                        return Some(started.elapsed());
-                    }
-                }
-                None
-            })
-        };
-        let mut latencies = Vec::new();
-        for rotation in [1, 2, 3, 0] {
-            let started = Instant::now();
-            trial_shell(
-                &serial,
-                &["shell", "settings", "put", "system", "user_rotation", &rotation.to_string()],
-            );
-            let display = display_reports(serial.clone(), rotation, started);
-            // Both measured from `started`.
-            let seen = wait_for(rotation).map(|_| started.elapsed());
-            let display = display.join().unwrap();
-            latencies.push((rotation, display, seen));
-        }
-        drop(watcher);
-        // The guest loop ends at its next echo, after the dumpsys it may be
-        // in (slow while the guest is still rotating).
-        let dropped = Instant::now();
-        let leftover = loop {
-            thread::sleep(Duration::from_millis(500));
-            let leftover =
-                trial_shell(&serial, &["shell", "ps -A -o ARGS | grep -c '[m]CurrentOrientation'"]);
-            if leftover.trim() == "0" || dropped.elapsed() >= Duration::from_secs(5) {
-                break leftover;
-            }
-        };
-        eprintln!(
-            "RESULT rotation (rotation, display, watcher) {latencies:?}; leftover loops {}",
-            leftover.trim()
-        );
-        for (rotation, display, seen) in latencies {
-            let seen = seen.unwrap_or_else(|| panic!("rotation {rotation} not seen"));
-            let display = display.unwrap_or_else(|| panic!("the display never reached {rotation}"));
-            // The watcher polls every 250 ms (plus a dumpsys); the display
-            // time is itself an adb poll, so allow for both.
-            let lag = seen.saturating_sub(display);
-            assert!(lag <= Duration::from_secs(1), "rotation {rotation}: watcher {lag:?} behind");
-        }
-        assert_eq!(leftover.trim(), "0", "the guest loop outlived the watcher");
-    }
-
-    /// Soak length and sample interval: APERTURE_SOAK_MINUTES (30) and
-    /// APERTURE_SOAK_SAMPLE_SECS (300).
-    /// A time-bounded on-device loop that scrolls the open Settings list up and
-    /// down continuously, so the screen keeps changing for `secs` seconds.
-    fn scroll_settings_list(serial: &str, secs: u64) -> thread::JoinHandle<()> {
-        let serial = serial.to_owned();
-        thread::spawn(move || {
-            trial_shell(
-                &serial,
-                &[
-                    "shell",
-                    &format!("end=$(( $(date +%s) + {secs} )); while [ $(date +%s) -lt $end ]; do input swipe 540 1700 540 900 400; input swipe 540 900 540 1700 400; done"),
-                ],
-            );
-        })
-    }
-
-    fn soak_timing() -> (Duration, Duration) {
-        let read = |key: &str, default: u64| {
-            std::env::var(key)
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(default)
-        };
-        (
-            Duration::from_secs(read("APERTURE_SOAK_MINUTES", 30) * 60),
-            Duration::from_secs(read("APERTURE_SOAK_SAMPLE_SECS", 300)),
-        )
-    }
-
-    /// Guest memory and process counts, for the soak samples.
-    fn trial_guest_stats(serial: &str) -> String {
-        trial_shell(
-            serial,
-            &[
-                "shell",
-                "echo \"avail=$(grep MemAvailable /proc/meminfo | tr -s ' ' | cut -d' ' -f2)kB procs=$(ps -A | wc -l) watch_loops=$(ps -A -o ARGS | grep -c '[m]CurrentOrientation') helpers=$(ps -A -o ARGS | grep -c '[c]om.genymobile.scrcpy') load=$(cut -d' ' -f1-3 /proc/loadavg)\"",
-            ],
-        )
-        .trim()
-        .to_owned()
-    }
-
-    #[test]
-    #[ignore = "Streams the running Aperture_Trial_Play35 emulator through the host GPU for 30 minutes"]
-    fn soak_host_stream() {
-        let serial = trial_serial();
-        capture_log();
-        let (length, every) = soak_timing();
-        let runtime = test_runtime();
-        trial_open_settings(&serial);
-        let (sender, mut events) =
-            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
-        let session = GuestSession::start(trial_select(), sender).unwrap();
-        wait_stream_ready(&runtime, &mut events, Duration::from_secs(10), None)
-            .expect("no stream_ready within 10 s");
-        // One time-bounded on-device loop keeps the Settings list moving.
-        let swiper = scroll_settings_list(&serial, length.as_secs() + 30);
-        let started = Instant::now();
-        let mut frame_times: std::collections::VecDeque<Instant> = Default::default();
-        let mut next_sample = started + Duration::from_secs(30);
-        while started.elapsed() < length + Duration::from_secs(31) {
-            if let Some(GuestEvent::Frame(_)) =
-                next_event(&runtime, &mut events, Duration::from_millis(50))
-            {
-                frame_times.push_back(Instant::now());
-            }
-            while frame_times
-                .front()
-                .is_some_and(|time| time.elapsed() > Duration::from_secs(60))
-            {
-                frame_times.pop_front();
-            }
-            if Instant::now() >= next_sample {
-                next_sample += every;
-                let last_5s = frame_times
-                    .iter()
-                    .filter(|time| time.elapsed() <= Duration::from_secs(5))
-                    .count();
-                let per_5s_over_minute = frame_times.len() as f64 / 12.0;
-                let timing = CAPTURED_LOG
-                    .0
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .rev()
-                    .find(|line| line.contains("Guest video (host GPU)"))
-                    .cloned()
-                    .unwrap_or_default();
-                eprintln!(
-                    "SOAK host t={:>4}s frames/5s={last_5s} (minute avg {per_5s_over_minute:.0}) guest[{}] timing[{timing}]",
-                    started.elapsed().as_secs(),
-                    trial_guest_stats(&serial)
-                );
-            }
-        }
-        close(&runtime, session, events);
-        let _ = swiper.join();
-        eprintln!("SOAK host end guest[{}]", trial_guest_stats(&serial));
-    }
-
-    #[test]
-    #[ignore = "Runs the rotation watcher shell in the running Aperture_Trial_Play35 emulator"]
-    fn real_closed_job_ends_the_watcher_shell() {
-        use std::io::BufRead;
-        let serial = trial_serial();
-        let loops = || {
-            trial_shell(&serial, &["shell", "ps -A -o ARGS | grep -c '[m]CurrentOrientation'"])
-                .trim()
-                .to_owned()
-        };
-        assert_eq!(loops(), "0", "a watcher loop is already running");
-        let (mut child, stdout) =
-            avd_host_video::spawn_rotation_shell(&trial_adb(), &serial).unwrap();
-        // Stands in for this process's lifetime job: closing it is what an
-        // abrupt exit does.
-        let job = super::super::guest_runtime::KillOnCloseJob::new().unwrap();
-        job.assign(&child).unwrap();
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut line = String::new();
-        // Android's boot id comes first, then the rotation.
-        reader.read_line(&mut line).unwrap();
-        assert!(line.starts_with("b="), "{line:?}");
-        line.clear();
-        reader.read_line(&mut line).unwrap();
-        assert!(line.starts_with("r="), "{line:?}");
-        assert_eq!(loops(), "1");
-        drop(job);
-        let closed = Instant::now();
-        while child.try_wait().unwrap().is_none() {
-            assert!(closed.elapsed() < Duration::from_secs(2), "adb outlived the job");
-            thread::sleep(Duration::from_millis(20));
-        }
-        let host_gone = closed.elapsed();
-        let guest_gone = loop {
-            if loops() == "0" {
-                break closed.elapsed();
-            }
-            assert!(closed.elapsed() < Duration::from_secs(10), "the guest loop outlived adb");
-            thread::sleep(Duration::from_millis(250));
-        };
-        eprintln!("RESULT job closed: adb gone after {host_gone:?}, guest loop gone after {guest_gone:?}");
-    }
-
-    #[test]
-    #[ignore = "Rotates the running Aperture_Trial_Play35 emulator and streams it through the host GPU"]
-    fn real_cold_landscape_start_is_upright() {
-        let serial = trial_serial();
-        capture_log();
-        let runtime = test_runtime();
-        let _restore = RotationGuard {
-            serial: serial.clone(),
-            accelerometer: trial_setting(&serial, "accelerometer_rotation"),
-            user_rotation: trial_setting(&serial, "user_rotation"),
-        };
-        trial_open_settings(&serial);
-        trial_shell(&serial, &["shell", "settings", "put", "system", "accelerometer_rotation", "0"]);
-        trial_shell(&serial, &["shell", "settings", "put", "system", "user_rotation", "1"]);
-        let rotated = Instant::now();
-        while !trial_shell(&serial, &["shell", "dumpsys display | grep -m1 -o 'mCurrentOrientation=[0-3]'"])
-            .contains("mCurrentOrientation=1")
-        {
-            assert!(rotated.elapsed() < Duration::from_secs(5), "the guest did not rotate");
-            thread::sleep(Duration::from_millis(100));
-        }
-        thread::sleep(Duration::from_secs(1));
-        let log_mark = CAPTURED_LOG.0.lock().unwrap().len();
-        let host_streams = avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire);
-        let (sender, mut events) =
-            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
-        let started = Instant::now();
-        let session = GuestSession::start(trial_select(), sender).unwrap();
-        // Every stream_ready of the first 6 s, and when the first frame came.
-        let mut readies = Vec::new();
-        let mut first_frame = None;
-        while started.elapsed() < Duration::from_secs(6) {
-            match next_event(&runtime, &mut events, Duration::from_millis(100)) {
-                Some(GuestEvent::Response(response)) => {
-                    if let Some(base::message_proto::emulator_response::Union::Status(status)) =
-                        response.union
-                    {
-                        let state = status.state.enum_value_or_default();
-                        assert_ne!(state, EmulatorSessionState::EmulatorFailed, "{}", status.error);
-                        if status.phase == "stream_ready" {
-                            readies.push((started.elapsed(), status.width, status.height));
-                        }
-                    }
-                }
-                Some(GuestEvent::Frame(frame)) if first_frame.is_none() => {
-                    first_frame = Some((started.elapsed(), frame.key));
-                }
-                _ => {}
-            }
-        }
-        let host_readies =
-            avd_host_video::HOST_STREAMS_READY.load(Ordering::Acquire) - host_streams;
-        eprintln!("RESULT cold landscape: stream_ready {readies:?}; host readies {host_readies}; first frame {first_frame:?}");
-
-        // The first tap of the session: "Network & internet" by its bounds in
-        // the rotated display (lower-left quadrant in landscape).
-        let landed = readies.first().map(|&(_, width, height)| {
-            let display = trial_landscape_display(&serial);
-            let target = trial_centre_of(&trial_ui_xml(&serial), "Network &amp; internet")
-                .expect("Network & internet in landscape Settings");
-            let point = (target.0 * width / display.0, target.1 * height / display.1);
-            while events.try_recv().is_ok() {}
-            tap_at(&session, (width, height), point);
-            pump(&runtime, &mut events, Duration::from_millis(1500));
-            let after = trial_screen_texts(&serial);
-            let landed = after.iter().any(|text| text == "Internet")
-                && !after.iter().any(|text| text == "Connected devices");
-            eprintln!("RESULT cold landscape first tap at stream {point:?} landed={landed}: {after:?}");
-            landed
-        });
-        trial_shell(&serial, &["shell", "input", "keyevent", "3"]);
-        close(&runtime, session, events);
-        let unknown_warned = CAPTURED_LOG.0.lock().unwrap()[log_mark..]
-            .iter()
-            .any(|line| line.contains("rotation unknown"));
-        eprintln!("RESULT rotation-unknown warn={unknown_warned}");
-
-        assert_eq!(host_readies, 1, "the session must reach stream_ready once, on the host path");
-        assert_eq!(readies.len(), 1, "exactly one stream_ready: {readies:?}");
-        // Upright: the display's long side across, scaled into the 1280 box
-        // (1080x2208 gives 1280x626).
-        let (long, short) = trial_landscape_display(&serial);
-        let upright = (1280, (1280 * short / long) & !1);
-        assert_eq!((readies[0].1, readies[0].2), upright, "the first stream must be upright");
-        assert!(!unknown_warned, "rotation unknown was logged");
-        assert_eq!(landed, Some(true), "the first landscape tap did not land");
-    }
-
-    struct CapturedLog(Mutex<Vec<String>>);
-
-    impl hbb_common::log::Log for CapturedLog {
-        fn enabled(&self, metadata: &hbb_common::log::Metadata) -> bool {
-            metadata.level() <= hbb_common::log::Level::Info
-        }
-
-        fn log(&self, record: &hbb_common::log::Record) {
-            if self.enabled(record.metadata()) {
-                let line = format!("{} {}", record.level(), record.args());
-                eprintln!("{line}");
-                self.0.lock().unwrap().push(line);
-            }
-        }
-
-        fn flush(&self) {}
-    }
-
-    static CAPTURED_LOG: CapturedLog = CapturedLog(Mutex::new(Vec::new()));
-
-    fn capture_log() {
-        // Only the first test of a run installs it; later ones share it.
-        if hbb_common::log::set_logger(&CAPTURED_LOG).is_ok() {
-            hbb_common::log::set_max_level(hbb_common::log::LevelFilter::Info);
-        }
-    }
-
-    /// How long `adb <args>` took, or None when it did not answer within `limit`
-    /// (then it is killed).
-    fn timed_trial_adb(args: &[&str], limit: Duration) -> Option<Duration> {
-        let started = Instant::now();
-        let mut child = std::process::Command::new(trial_adb())
-            .args(args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        while started.elapsed() < limit {
-            if child.try_wait().unwrap().is_some() {
-                return Some(started.elapsed());
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        None
-    }
-
-    /// adb clients on this PC talking to `serial` (the server excluded).
-    fn host_adb_clients(serial: &str) -> usize {
-        let mut system = hbb_common::sysinfo::System::new();
-        system.refresh_processes();
-        system
-            .processes()
-            .values()
-            .filter(|process| {
-                process.name().eq_ignore_ascii_case("adb.exe")
-                    && process.cmd().iter().any(|arg| arg == serial)
-                    && !process.cmd().iter().any(|arg| arg.contains("com.google.android.gms"))
-            })
-            .count()
-    }
-
-    /// Opens the trial emulator once: its failure message (None when it
-    /// streamed), the statuses it sent, and how long it took.
-    fn open_once(runtime: &TestRuntime, within: Duration) -> (Option<String>, Vec<String>, Duration) {
-        let (sender, mut events) =
-            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
-        let started = Instant::now();
-        let session = GuestSession::start(trial_select(), sender).unwrap();
-        let (mut phases, mut failure) = (Vec::new(), Some("no answer".to_owned()));
-        while started.elapsed() < within {
-            let Some(GuestEvent::Response(response)) =
-                next_event(runtime, &mut events, Duration::from_millis(200))
-            else {
-                continue;
-            };
-            let Some(base::message_proto::emulator_response::Union::Status(status)) = response.union
-            else {
-                continue;
-            };
-            let state = status.state.enum_value_or_default();
-            phases.push(format!("{:.1}s {state:?}/{}", started.elapsed().as_secs_f32(), status.phase));
-            if state == EmulatorSessionState::EmulatorFailed {
-                failure = Some(status.error);
-                break;
-            }
-            if state == EmulatorSessionState::EmulatorStreaming && status.phase == "stream_ready" {
-                failure = None;
-                break;
-            }
-        }
-        let took = started.elapsed();
-        drop(session);
-        drop(events);
-        (failure, phases, took)
-    }
-
-    /// Resumes the trial emulator's VM on drop.
-    struct ResumeGuard(String);
-
-    impl Drop for ResumeGuard {
-        fn drop(&mut self) {
-            eprintln!("RESULT resume: {}", trial_shell(&self.0, &["emu", "avd", "resume"]).trim());
-        }
-    }
-
-    #[test]
-    #[ignore = "Pauses the running Aperture_Trial_Play35 emulator's VM for about half a minute"]
-    fn real_paused_android_fails_the_open_with_a_clear_message() {
-        let serial = trial_serial();
-        capture_log();
-        let runtime = test_runtime();
-        // Android freezes while the emulator process (and its controller) runs on.
-        let paused = trial_shell(&serial, &["emu", "avd", "pause"]);
-        let resume = ResumeGuard(serial.clone());
-        assert!(paused.contains("OK"), "{paused}");
-        let mut opens = Vec::new();
-        for attempt in 0..3 {
-            let (failure, phases, took) = open_once(&runtime, Duration::from_secs(120));
-            let devices = timed_trial_adb(&["devices"], Duration::from_secs(10));
-            eprintln!(
-                "RESULT paused open {attempt}: failed={failure:?} after {took:?} phases={phases:?} adb devices={devices:?}"
-            );
-            opens.push((failure, took, devices));
-        }
-        drop(resume);
-        let back = Instant::now();
-        while timed_trial_adb(&["-s", &serial, "shell", "echo"], Duration::from_secs(5)).is_none() {
-            assert!(back.elapsed() < Duration::from_secs(60), "Android did not come back");
-        }
-        // As the user would: open again until it streams.
-        let reopened = Instant::now();
-        let mut attempts = 0;
-        let streamed = loop {
-            attempts += 1;
-            let (failure, phases, took) = open_once(&runtime, Duration::from_secs(40));
-            eprintln!("RESULT resumed open {attempts}: failed={failure:?} after {took:?} phases={phases:?}");
-            if failure.is_none() || reopened.elapsed() > Duration::from_secs(40) {
-                break failure.is_none();
-            }
-            thread::sleep(Duration::from_secs(2));
-        };
-        thread::sleep(Duration::from_secs(5));
-        let stats = trial_guest_stats(&serial);
-        let clients = host_adb_clients(&serial);
-        eprintln!(
-            "RESULT resumed: streamed={streamed} after {:?} ({attempts} opens); host_adb={clients} guest[{stats}]",
-            reopened.elapsed()
-        );
-        for (failure, took, devices) in &opens {
-            let failure = failure.as_deref().unwrap_or("");
-            assert!(failure.starts_with("Android isn't answering on the PC"), "{failure}");
-            assert!(*took < Duration::from_secs(20), "{took:?}");
-            assert!(devices.is_some_and(|devices| devices < Duration::from_secs(2)));
-        }
-        assert!(opens[1].1 < Duration::from_secs(3) && opens[2].1 < Duration::from_secs(3));
-        assert!(streamed, "no stream within 40 s of Android answering again");
-        assert!(stats.contains("watch_loops=0 helpers=0"), "{stats}");
-        assert_eq!(clients, 0);
-    }
-
-    #[test]
-    #[ignore = "Pauses, then stops the running Aperture_Trial_Play35 emulator (start it again afterwards)"]
-    fn real_stop_reaches_a_paused_android() {
-        let serial = trial_serial();
-        capture_log();
-        let paused = trial_shell(&serial, &["emu", "avd", "pause"]);
-        assert!(paused.contains("OK"), "{paused}");
-        let provider = AvdProvider::detect().unwrap().unwrap();
-        let target = provider
-            .discover()
-            .unwrap()
-            .into_iter()
-            .find(|target| target.provider_instance_id == TRIAL_AVD)
-            .unwrap();
-        let resolved = provider.resolve_adb(&target).map(|endpoint| endpoint.serial);
-        eprintln!("RESULT paused: listed {:?}, serial {resolved:?}", target.state);
-        let started = Instant::now();
-        let stopped = provider.stop(&target);
-        eprintln!("RESULT stop: {stopped:?} after {:?}", started.elapsed());
-        if stopped.is_err() {
-            trial_shell(&serial, &["emu", "avd", "resume"]);
-        }
-        assert_eq!(resolved.unwrap(), serial);
-        stopped.unwrap();
-        assert!(!running_avd_names_now().contains(TRIAL_AVD));
-    }
-
-    #[test]
-    #[ignore = "Opens, relaunches and closes the running Aperture_Trial_Play35 stream many times"]
-    fn real_reopen_storm_keeps_adb_responsive() {
-        let serial = trial_serial();
-        capture_log();
-        let rounds = std::env::var("APERTURE_STORM_ROUNDS")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(24);
-        let runtime = test_runtime();
-        let channel =
-            || hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
-        // A relaunched phone's old connection lives on until the host notices.
-        let mut lingering: Option<(GuestSession, Events)> = None;
-        let mut ready_times = Vec::new();
-        let mut worst_devices = Duration::ZERO;
-        for round in 0..rounds {
-            let (sender, mut previews) = channel();
-            let preview =
-                GuestSession::start_preview(u64::from(round), format!("avd:{TRIAL_AVD}"), sender)
-                    .unwrap();
-            let preview_ready =
-                wait_stream_ready(&runtime, &mut previews, Duration::from_secs(30), None).is_some();
-            let opened = Instant::now();
-            let (sender, mut events) = channel();
-            let session = GuestSession::start(trial_select(), sender).unwrap();
-            // The select replaces the dashboard preview of the same emulator.
-            drop(preview);
-            drop(previews);
-            let ready = wait_stream_ready(&runtime, &mut events, Duration::from_secs(60), None);
-            let ready_after = opened.elapsed();
-            let (frames, _) = pump(&runtime, &mut events, Duration::from_secs(2));
-            if let Some((old, old_events)) = lingering.take() {
-                drop(old);
-                drop(old_events);
-            }
-            let relaunched = round % 3 == 2;
-            if relaunched {
-                lingering = Some((session, events));
-            } else {
-                drop(session);
-                drop(events);
-            }
-            let devices = timed_trial_adb(&["devices"], Duration::from_secs(10));
-            worst_devices = worst_devices.max(devices.unwrap_or(Duration::MAX));
-            eprintln!(
-                "STORM round={round} preview_ready={preview_ready} ready={ready:?} after {ready_after:?} frames/2s={frames} relaunch={relaunched} devices={devices:?} host_adb={} guest[{}]",
-                host_adb_clients(&serial),
-                trial_guest_stats(&serial)
-            );
-            ready_times.push(ready.map(|_| ready_after));
-        }
-        drop(lingering);
-        thread::sleep(Duration::from_secs(5));
-        let stats = trial_guest_stats(&serial);
-        let clients = host_adb_clients(&serial);
-        eprintln!("STORM end host_adb={clients} guest[{stats}] worst_devices={worst_devices:?}");
-        assert!(
-            ready_times.iter().all(|ready| ready.is_some_and(|after| after < Duration::from_secs(10))),
-            "{ready_times:?}"
-        );
-        assert!(worst_devices < Duration::from_secs(2), "adb devices took {worst_devices:?}");
-        assert!(stats.contains("watch_loops=0 helpers=0"), "{stats}");
-        assert_eq!(clients, 0);
-    }
-
-    #[test]
-    #[ignore = "Streams the running Aperture_Trial_Play35 emulator with its screen feed hidden"]
-    fn blocked_feed_falls_back_to_in_android_video() {
-        trial_serial();
-        capture_log();
-        *avd_host_video::FEED_AVD_OVERRIDE.lock().unwrap() =
-            Some("Aperture_No_Such_Avd".to_owned());
-        let runtime = test_runtime();
-        let (sender, mut events) =
-            hbb_common::tokio::sync::mpsc::channel(super::super::remote::GUEST_EVENT_QUEUE_SIZE);
-        let started = Instant::now();
-        let session = GuestSession::start(trial_select(), sender).unwrap();
-        let ready = wait_stream_ready(&runtime, &mut events, Duration::from_secs(25), None);
-        let ready_after = started.elapsed();
-        let (frames, _) = pump(&runtime, &mut events, Duration::from_secs(1));
-        close(&runtime, session, events);
-        *avd_host_video::FEED_AVD_OVERRIDE.lock().unwrap() = None;
-        let warned = CAPTURED_LOG.0.lock().unwrap().iter().any(|line| {
-            line.starts_with("WARN AVD host video unavailable, using in-Android video: ")
-        });
-        eprintln!(
-            "RESULT fallback stream_ready={ready:?} after {ready_after:?}, {frames} frames in 1 s, warned={warned}"
-        );
-        assert!(ready.is_some(), "no stream_ready within 25 s");
-        assert!(frames > 0);
-        assert!(warned, "the fallback warn line is missing");
     }
 }

@@ -29,8 +29,7 @@ pub(super) fn rebooted_after(serial: &str, since: Instant) -> bool {
         .any(|(noted, at)| noted == serial && *at > since)
 }
 
-/// Reboots Android in the running emulator `component` (`avd:<name>` or
-/// `bluestacks:<instance>`).
+/// Reboots Android in the running emulator `component` (`bluestacks:<instance>`).
 pub fn reboot(component: &str) -> ResultType<String> {
     if !super::remote::valid_shutdown_target(component) {
         bail!("Invalid emulator")
@@ -48,9 +47,6 @@ fn reboot_target(
     mut adb: impl FnMut(&str, &[&str]) -> ResultType<String>,
 ) -> ResultType<String> {
     let name = &target.display_name;
-    if target.progress_percent.is_some() {
-        bail!("{name} is being copied; wait for the copy in progress to finish")
-    }
     if matches!(target.state, EmulatorState::Stopped | EmulatorState::Stopping) {
         bail!("{name} is not running")
     }
@@ -70,14 +66,7 @@ fn reboot_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::{
-        avd::{
-            tests::{create, temp_root, FakeSystem},
-            AvdProvider,
-        },
-        avd_files::AvdHome,
-        AdbEndpoint, EmulatorCapabilities, EmulatorRuntimeState, ProviderId,
-    };
+    use super::super::{AdbEndpoint, EmulatorCapabilities, EmulatorRuntimeState, ProviderId};
 
     struct OneTarget(EmulatorTarget);
 
@@ -155,35 +144,5 @@ mod tests {
             assert!(error.to_string().contains("not running"), "{error}");
             assert_eq!(calls, 0);
         }
-    }
-
-    #[test]
-    fn a_running_android_emulator_reboots_through_its_own_serial() {
-        let root = temp_root("reboot");
-        create(&root, "Maple_1");
-        let system = FakeSystem::new(64_000);
-        system.run("Other_AVD", Some("emulator-5556"));
-        system.run("Maple_1", Some("emulator-5558"));
-        let provider = AvdProvider::for_test(AvdHome::new(root.0.clone()), system.clone());
-        let target = provider
-            .discover()
-            .unwrap()
-            .into_iter()
-            .find(|target| target.stable_id == "avd:Maple_1")
-            .unwrap();
-        let mut calls = Vec::new();
-        reboot_target(&provider, &target, |serial, args| {
-            calls.push(format!("{serial} {}", args.join(" ")));
-            Ok(String::new())
-        })
-        .unwrap();
-        assert_eq!(calls, ["emulator-5558 reboot"]);
-    }
-
-    #[test]
-    fn a_copy_in_progress_is_not_rebooted() {
-        let mut provider = bluestacks(EmulatorState::Ready);
-        provider.0.progress_percent = Some(40);
-        assert!(reboot_target(&provider, &provider.0, |_, _| Ok(String::new())).is_err());
     }
 }

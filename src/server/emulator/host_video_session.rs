@@ -1,17 +1,20 @@
-//! Host-GPU video for Google's Android Emulator. The emulator's own screen
-//! feed (`avd_feed`) is encoded on this PC (`avd_video`) while a control-only
+//! Host-GPU video for an emulator: a screen captured on this PC (a
+//! `HostScreenSource`) is encoded here (`host_video`) while a control-only
 //! helper carries input. When the host path cannot deliver a first frame, the
 //! session falls back to the in-Android helper video.
 //!
 //! A child module of `remote_windows`: it reuses that module's private session
 //! machinery (geometry, input worker, watchdog and frame backpressure).
+//!
+//! No provider has a source since the Android Emulator was removed; the
+//! BlueStacks host-capture work adds one (`host_screen_source`).
 
 use super::super::{
-    avd_feed::{self, FeedImage, ScreenFeed},
-    avd_video::{
-        even_size, orient_rgba, stream_box, upright_rgba, EncodedHostFrame, HostEncoder, BOTTOM_UP,
-    },
     guest_runtime::{adb_command, bind_to_process_lifetime, GuestHelper, GuestStreamProfile},
+    host_video::{
+        even_size, orient_rgba, stream_box, upright_rgba, EncodedHostFrame, HostEncoder, HostImage,
+        BOTTOM_UP,
+    },
     remote::GuestEvent,
 };
 use super::{
@@ -156,14 +159,14 @@ fn supervise<R: BufRead>(
                 hbb_common::throttled_log!(
                     Duration::from_secs(60),
                     info,
-                    "AVD rotation watcher ended; restarted it"
+                    "Rotation watcher ended; restarted it"
                 );
                 reader = Some(restarted);
             }
             Err(error) => hbb_common::throttled_log!(
                 Duration::from_secs(60),
                 warn,
-                "AVD rotation watcher ended and cannot restart: {error}"
+                "Rotation watcher ended and cannot restart: {error}"
             ),
         }
     }
@@ -195,8 +198,8 @@ fn end_child(child: &mut Child) {
 }
 
 /// Watches the guest's display rotation through one persistent `adb shell`
-/// (restarted, throttled, if it ends). The emulator feed keeps the portrait
-/// panel, so the host turns frames upright itself. Killed (and joined) on
+/// (restarted, throttled, if it ends). A source that keeps the portrait panel
+/// leaves the host to turn frames upright itself. Killed (and joined) on
 /// drop.
 pub(super) struct RotationWatcher {
     child: Arc<Mutex<Option<Child>>>,
@@ -253,11 +256,6 @@ impl RotationWatcher {
         }
     }
 
-    /// Android's current display rotation (0-3), if known.
-    pub(super) fn rotation(&self) -> Option<u32> {
-        self.state.rotation()
-    }
-
     /// Android was restarted (`adb reboot`) since the watcher started: the
     /// input helper died with it.
     pub(super) fn guest_restarted(&self) -> bool {
@@ -288,13 +286,13 @@ fn encode_rotation(watcher: Option<(RotationReading, Duration)>) -> Option<u32> 
         return Some(rotation);
     }
     if !reading.reported && waited < FIRST_ROTATION_WAIT {
-        log::trace!("AVD display rotation not reported yet; holding the first frame");
+        log::trace!("Display rotation not reported yet; holding the first frame");
         return None;
     }
     hbb_common::throttled_log!(
         Duration::from_secs(60),
         warn,
-        "AVD display rotation unknown; streaming the emulator screen unrotated"
+        "Display rotation unknown; streaming the emulator screen unrotated"
     );
     Some(0)
 }
@@ -345,25 +343,21 @@ impl Liveness {
             ))));
         }
         bail!(
-            "the AVD screen feed sent no frame within {} s of reconnecting",
+            "the host screen source sent no frame within {} s of reconnecting",
             FIRST_FRAME_TIMEOUT.as_secs()
         )
     }
 }
 
-/// Test hook: the AVD name given to `discover`, to force discovery to fail.
-#[cfg(test)]
-pub(super) static FEED_AVD_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
-/// Test evidence: host-path streams that reached `stream_ready`.
-#[cfg(test)]
-pub(super) static HOST_STREAMS_READY: AtomicUsize = AtomicUsize::new(0);
-
-fn feed_avd_name(avd: &str) -> String {
-    #[cfg(test)]
-    if let Some(name) = FEED_AVD_OVERRIDE.lock().unwrap().clone() {
-        return name;
-    }
-    avd.to_owned()
+/// A screen captured on this PC: images fitted into a `width`x`height` box,
+/// rows top-down. A failure arrives as an `Err` on the channel and is the
+/// last item. Dropping the returned guard stops the source.
+pub(super) trait HostScreenSource {
+    fn start(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> ResultType<(Box<dyn Send>, Receiver<ResultType<HostImage>>)>;
 }
 
 /// What `run_session` hands the host path.
@@ -379,8 +373,7 @@ pub(super) struct HostSession<'a> {
     pub(super) adb: &'a Path,
     pub(super) serial: &'a str,
     pub(super) helper: &'a Path,
-    /// The AVD name (the provider instance id).
-    pub(super) avd: &'a str,
+    pub(super) source: &'a dyn HostScreenSource,
 }
 
 pub(super) enum HostAttempt {
@@ -406,7 +399,7 @@ struct HostSettings {
 
 impl HostSettings {
     fn new(preview: bool) -> Self {
-        let profile = GuestStreamProfile::for_android_emulator(preview);
+        let profile = GuestStreamProfile::for_host_video(preview);
         let fps = profile.max_fps().max(1);
         Self {
             long_side: profile.max_size(),
@@ -449,7 +442,7 @@ pub(super) fn run(session: &HostSession, input: Receiver<GuestInputCommand>) -> 
         if session.cancel.load(Ordering::Acquire) {
             return HostAttempt::Finished(Ok(()));
         }
-        log::warn!("AVD host video unavailable, using in-Android video: {reason}");
+        log::warn!("Host video unavailable, using in-Android video: {reason}");
         HostAttempt::Fallback(input)
     };
     let settings = HostSettings::new(session.preview);
@@ -473,7 +466,7 @@ pub(super) fn run(session: &HostSession, input: Receiver<GuestInputCommand>) -> 
     let rotation = match RotationWatcher::start(session.adb, session.serial) {
         Ok(watcher) => Some(watcher),
         Err(error) => {
-            log::warn!("AVD rotation watcher unavailable: {error}");
+            log::warn!("Rotation watcher unavailable: {error}");
             None
         }
     };
@@ -605,26 +598,20 @@ fn deliver(
     live: &mut Liveness,
 ) -> ResultType<()> {
     for frame in frames.into_iter().filter(|frame| !frame.data.is_empty()) {
-        let _became_ready = sender.send(frame.data, frame.key, frame.pts)?;
-        #[cfg(test)]
-        if _became_ready {
-            HOST_STREAMS_READY.fetch_add(1, Ordering::AcqRel);
-        }
+        sender.send(frame.data, frame.key, frame.pts)?;
         live.delivered();
     }
     Ok(())
 }
 
-/// Feed -> host encoder -> session. `NoFirstFrame` when nothing was delivered
-/// within `FIRST_FRAME_TIMEOUT` (or the feed or encoder failed before that);
-/// an error when the feed stays silent that long after the reconnect.
+/// Source -> host encoder -> session. `NoFirstFrame` when nothing was
+/// delivered within `FIRST_FRAME_TIMEOUT` (or the source or encoder failed
+/// before that); an error when the source stays silent that long after the
+/// reconnect.
 fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
     let session = video.session;
-    let avd = feed_avd_name(session.avd);
     let (box_width, box_height) = stream_box(video.settings.long_side);
-    let start_feed = || -> ResultType<(ScreenFeed, Receiver<ResultType<FeedImage>>)> {
-        ScreenFeed::start(avd_feed::discover(&avd)?, box_width, box_height)
-    };
+    let start_feed = || session.source.start(box_width, box_height);
     let (mut feed, mut images) = match start_feed() {
         Ok(started) => started,
         Err(error) => return Ok(HostOutcome::NoFirstFrame(error.to_string())),
@@ -644,10 +631,10 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
     let mut encoder: Option<HostEncoder> = None;
     // The upright stream size and the rotation it was turned by.
     let mut size: Option<(u32, u32, u32)> = None;
-    let mut pending: Option<FeedImage> = None;
+    let mut pending: Option<HostImage> = None;
     // The last encoded image, re-encoded if Android's rotation moves on
     // while the screen is still.
-    let mut last_image: Option<FeedImage> = None;
+    let mut last_image: Option<HostImage> = None;
     let mut last_encode: Option<Instant> = None;
     let mut reconnected = false;
     let min_gap = video.settings.min_gap();
@@ -774,7 +761,7 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Ok(Err(error)) => error,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                hbb_common::anyhow::anyhow!("the screen feed stopped")
+                hbb_common::anyhow::anyhow!("the host screen source stopped")
             }
         };
         if !live.streaming {
@@ -783,10 +770,10 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
         if reconnected {
             return Err(failure);
         }
-        // One silent reconnect: re-read the discovery file, re-subscribe and
-        // start a new encoder so the next image is a keyframe.
+        // One silent reconnect: restart the source and start a new encoder so
+        // the next image is a keyframe.
         reconnected = true;
-        log::info!("AVD screen feed dropped ({failure}); reconnecting");
+        log::info!("Host screen source dropped ({failure}); reconnecting");
         drop(feed);
         (feed, images) = start_feed()?;
         live.resubscribed(Instant::now());
@@ -800,8 +787,8 @@ fn host_video_loop(video: &HostVideo) -> ResultType<HostOutcome> {
 /// watcher lags the rotation animation). With no newer image waiting, the
 /// last one is queued again so it goes through the geometry change.
 fn requeue_on_rotation(
-    pending: &mut Option<FeedImage>,
-    last_image: &mut Option<FeedImage>,
+    pending: &mut Option<HostImage>,
+    last_image: &mut Option<HostImage>,
     encoded_rotation: Option<u32>,
     rotation: u32,
 ) {
@@ -814,11 +801,10 @@ fn requeue_on_rotation(
 mod tests {
     use super::*;
 
-    fn feed_image(seq: u32) -> FeedImage {
-        FeedImage {
+    fn feed_image(seq: u32) -> HostImage {
+        HostImage {
             width: 2,
             height: 2,
-            rotation: 0,
             seq,
             pixels: vec![0; 16],
         }

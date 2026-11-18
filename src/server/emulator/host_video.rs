@@ -1,11 +1,13 @@
-//! Host-side H.264 encoding of the emulator's own screen feed.
+//! Host-side H.264 encoding of an emulator screen captured on this PC.
 //!
-//! The feed (`avd_feed`) yields RGBA frames; this module crops them to even
+//! A host screen source yields RGBA frames; this module crops them to even
 //! dimensions, converts to NV12 and encodes them with the host's hardware
 //! encoder (NVENC on the target machine). It also owns the global budget of
 //! host encoders so previews never starve a full-screen session.
+//!
+//! No provider has a host screen source since the Android Emulator was
+//! removed; the BlueStacks host-capture work adds one.
 
-use super::avd_feed::FeedImage;
 use hbb_common::{bail, ResultType};
 use scrap::{
     codec::{EncoderApi, EncoderCfg},
@@ -18,7 +20,17 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-/// Rows of the emulator feed are delivered top-down (Task 3 ruling).
+/// One RGBA frame from a host screen source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostImage {
+    pub width: u32,
+    pub height: u32,
+    /// The source's frame counter.
+    pub seq: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// Host screen sources deliver rows top-down.
 pub const BOTTOM_UP: bool = false;
 
 /// Most host encoders alive at once.
@@ -26,7 +38,7 @@ const MAX_ENCODERS: usize = 6;
 /// Previews may only take a slot while fewer than this many are in use.
 const PREVIEW_LIMIT: usize = 4;
 
-/// The square the feed fits the emulator screen into; it keeps aspect.
+/// The square a host screen source fits the emulator screen into; it keeps aspect.
 pub fn stream_box(long_side: u32) -> (u32, u32) {
     (long_side, long_side)
 }
@@ -37,7 +49,7 @@ pub fn even_size(width: u32, height: u32) -> (u32, u32) {
 }
 
 /// Crops the image to `even_size` and, when `bottom_up`, flips the rows.
-pub fn orient_rgba(image: &FeedImage, bottom_up: bool) -> Vec<u8> {
+pub fn orient_rgba(image: &HostImage, bottom_up: bool) -> Vec<u8> {
     let (w, h) = even_size(image.width, image.height);
     let (w, h) = (w as usize, h as usize);
     let src_stride = image.width as usize * 4;
@@ -51,8 +63,8 @@ pub fn orient_rgba(image: &FeedImage, bottom_up: bool) -> Vec<u8> {
     out
 }
 
-/// Turns an RGBA frame captured at Android display `rotation` (0-3, the
-/// emulator feed keeps the portrait panel) upright. Rotations 1 and 3 swap
+/// Turns an RGBA frame captured at Android display `rotation` (0-3, for a
+/// source that keeps the portrait panel) upright. Rotations 1 and 3 swap
 /// width and height. Returns the frame and its new size.
 pub fn upright_rgba(
     rgba: Vec<u8>,
@@ -286,11 +298,10 @@ mod tests {
         BUDGET_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn image(width: u32, height: u32, pixels: Vec<u8>) -> FeedImage {
-        FeedImage {
+    fn image(width: u32, height: u32, pixels: Vec<u8>) -> HostImage {
+        HostImage {
             width,
             height,
-            rotation: 0,
             seq: 0,
             pixels,
         }

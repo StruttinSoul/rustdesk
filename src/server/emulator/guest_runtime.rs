@@ -128,8 +128,7 @@ impl GuestStreamProfile {
         Self::fullscreen_from_options(Config::get_option)
     }
 
-    /// The Android Emulator's software encoder drops to about a third of any
-    /// frame cap below its 60 Hz screen (30 -> ~10 fps), so it streams at 60.
+    /// Host-encoded video runs at 60 FPS whatever the guest helper's cap.
     fn uncapped_fps(self) -> Self {
         Self {
             max_fps: 60,
@@ -159,9 +158,9 @@ impl GuestStreamProfile {
         }
     }
 
-    /// The profile of a host-encoded Android Emulator stream: the preview
-    /// profile, or the full-screen one at the emulator's 60 Hz.
-    pub(super) fn for_android_emulator(preview: bool) -> Self {
+    /// The profile of a host-encoded stream: the preview profile, or the
+    /// full-screen one at 60 FPS.
+    pub(super) fn for_host_video(preview: bool) -> Self {
         if preview {
             Self::preview()
         } else {
@@ -220,22 +219,17 @@ pub struct GuestHelper {
 
 impl GuestHelper {
     pub fn connect(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, false, false, true)
-    }
-
-    /// Full-screen stream for Google's Android Emulator (see `uncapped_fps`).
-    pub fn connect_android_emulator(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, false, true, true)
+        Self::connect_with_options(adb, serial, helper, false, true)
     }
 
     pub fn connect_preview(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, true, false, true)
+        Self::connect_with_options(adb, serial, helper, true, true)
     }
 
     /// Input only: the helper runs with `video=false`, so the first (and only)
     /// socket is control and there is no codec header (scrcpy's dummy byte proves it is live).
     pub fn connect_control_only(adb: &Path, serial: &str, helper: &Path) -> ResultType<Self> {
-        Self::connect_with_options(adb, serial, helper, false, false, false)
+        Self::connect_with_options(adb, serial, helper, false, false)
     }
 
     fn connect_with_options(
@@ -243,7 +237,6 @@ impl GuestHelper {
         serial: &str,
         helper: &Path,
         preview: bool,
-        uncapped_fps: bool,
         video: bool,
     ) -> ResultType<Self> {
         if !is_local_emulator(serial) {
@@ -277,10 +270,10 @@ impl GuestHelper {
         session.port = Some(port);
         let classpath = format!("CLASSPATH={}", session.jar);
         let scid_arg = format!("scid={scid:08x}");
-        let profile = match (preview, uncapped_fps) {
-            (true, _) => GuestStreamProfile::preview(),
-            (false, true) => GuestStreamProfile::fullscreen().uncapped_fps(),
-            (false, false) => GuestStreamProfile::fullscreen(),
+        let profile = if preview {
+            GuestStreamProfile::preview()
+        } else {
+            GuestStreamProfile::fullscreen()
         };
         if !preview && profile != GuestStreamProfile::FULLSCREEN {
             log::debug!("Guest fullscreen stream profile: {profile:?}");
@@ -582,11 +575,6 @@ pub(super) fn adb_command_within(
     result
 }
 
-/// `adb devices` on the default server.
-pub(super) fn adb_devices(adb: &Path) -> ResultType<String> {
-    run_adb_within(adb, &["devices"], Duration::from_secs(5))
-}
-
 fn run_adb_within(adb: &Path, args: &[&str], limit: Duration) -> ResultType<String> {
     let mut child = Command::new(adb)
         .creation_flags(0x08000000)
@@ -816,8 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn android_emulator_streams_at_sixty_fps() {
-        // Below 60 the Android Emulator's software encoder falls to ~10 fps.
+    fn host_video_streams_at_sixty_fps() {
         let configured = fullscreen_profile_from(&[(GUEST_MAX_FPS_OPTION, "30")]);
         assert_eq!(
             configured.uncapped_fps(),
