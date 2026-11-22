@@ -108,10 +108,12 @@ pub(super) struct GuestStreamProfile {
 }
 
 impl GuestStreamProfile {
+    /// BlueStacks encodes in software inside Android; at 1920 it still kept the
+    /// game's ~30 fps (2026-11-22). Lower `aperture-guest-max-size` if a guest lags.
     const FULLSCREEN: Self = Self {
-        max_size: 1280,
+        max_size: 1920,
         max_fps: 30,
-        bit_rate: 4_000_000,
+        bit_rate: 8_000_000,
         keyframe_interval_secs: 1,
     };
 
@@ -817,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_profile_defaults_match_the_previous_fixed_values() {
+    fn fullscreen_profile_defaults_to_the_sharp_stream() {
         let profile = fullscreen_profile_from(&[]);
         assert_eq!(
             (
@@ -826,7 +828,7 @@ mod tests {
                 profile.bit_rate,
                 profile.keyframe_interval_secs
             ),
-            (1280, 30, 4_000_000, 1)
+            (1920, 30, 8_000_000, 1)
         );
         let preview = GuestStreamProfile::preview();
         assert_eq!(
@@ -868,6 +870,19 @@ mod tests {
                 max_size: 720,
                 max_fps: 15,
                 bit_rate: 1_000_000,
+                keyframe_interval_secs: 1,
+            }
+        );
+        let previous = fullscreen_profile_from(&[
+            ("aperture-guest-max-size", "1280"),
+            ("aperture-guest-bit-rate", "4000000"),
+        ]);
+        assert_eq!(
+            previous,
+            GuestStreamProfile {
+                max_size: 1280,
+                max_fps: 30,
+                bit_rate: 4_000_000,
                 keyframe_interval_secs: 1,
             }
         );
@@ -923,13 +938,13 @@ mod tests {
     }
 
     #[test]
-    fn default_profiles_format_the_previous_scrcpy_arguments() {
+    fn default_profiles_format_the_scrcpy_arguments() {
         assert_eq!(
             fullscreen_profile_from(&[]).scrcpy_args(),
             [
-                "max_size=1280",
+                "max_size=1920",
                 "max_fps=30",
-                "video_bit_rate=4000000",
+                "video_bit_rate=8000000",
                 "video_codec_options=i-frame-interval:int=1",
             ]
         );
