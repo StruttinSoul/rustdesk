@@ -195,6 +195,10 @@ EmulatorUiState emulatorUiState(RemoteEmulator instance,
       causeKey: 'Status unavailable', pcMessage: instance.error);
 }
 
+/// Longest full-screen edge accepted from the PC. Keep equal to
+/// GUEST_STREAM_MAX_EDGE in src/client/emulator.rs.
+const _guestStreamMaxEdge = 2048;
+
 class EmulatorModel extends ChangeNotifier {
   EmulatorModel(
     this.sessionId, {
@@ -2026,7 +2030,12 @@ class EmulatorModel extends ChangeNotifier {
           response['session_id'] == guestSessionId) {
         final w = response['width'] as int? ?? 0;
         final h = response['height'] as int? ?? 0;
-        if (w < 1 || h < 1 || w > 1280 || h > 1280) return;
+        if (w < 1 ||
+            h < 1 ||
+            w > _guestStreamMaxEdge ||
+            h > _guestStreamMaxEdge) {
+          return;
+        }
         final streamChanged = !streaming || width != w || height != h;
         if (streamChanged) _invalidateGuestFrameFreshness(notify: false);
         width = w;

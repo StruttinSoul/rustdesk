@@ -16,6 +16,15 @@ const GUEST_CHANNEL_BASE: usize = 0x40000000;
 const GUEST_VIDEO_QUEUE_SIZE: usize = 12;
 const GUEST_VIDEO_REFRESH_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Longest full-screen edge accepted from the PC. It must cover the largest
+/// `aperture-guest-max-size` (1920) and match `_guestStreamMaxEdge` in
+/// `flutter/lib/models/emulator_model.dart`; a larger stream is ignored.
+const GUEST_STREAM_MAX_EDGE: u32 = 2048;
+
+fn is_guest_stream_size(width: u32, height: u32) -> bool {
+    (1..=GUEST_STREAM_MAX_EDGE).contains(&width) && (1..=GUEST_STREAM_MAX_EDGE).contains(&height)
+}
+
 /// A received guest frame with when it arrived, for timing the phone side.
 struct QueuedFrame {
     arrived: std::time::Instant,
@@ -239,6 +248,17 @@ mod tests {
         assert_eq!(*config.custom_fps.lock().unwrap(), Some(30));
     }
 
+
+    #[test]
+    fn the_full_screen_profile_fits_the_accepted_stream_size() {
+        assert!(is_guest_stream_size(1080, 1920));
+        assert!(is_guest_stream_size(1920, 886));
+        assert!(is_guest_stream_size(2048, 944));
+        assert!(!is_guest_stream_size(2049, 944));
+        assert!(!is_guest_stream_size(944, 2049));
+        assert!(!is_guest_stream_size(0, 720));
+        assert!(!is_guest_stream_size(720, 0));
+    }
 
     #[test]
     fn guest_video_preserves_references_during_a_short_delivery_burst() {
@@ -482,10 +502,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 EmulatorSessionState::EmulatorStreaming => {
                     if status.session_id != self.emulator_session_id
-                        || status.width == 0
-                        || status.height == 0
-                        || status.width > 1280
-                        || status.height > 1280
+                        || !is_guest_stream_size(status.width, status.height)
                     {
                         return;
                     }
