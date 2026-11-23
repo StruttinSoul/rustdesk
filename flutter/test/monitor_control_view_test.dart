@@ -5,6 +5,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/mobile/widgets/monitor_control_view.dart';
 import 'package:flutter_hbb/mobile/widgets/monitor_live_keyboard.dart';
+import 'package:flutter_hbb/mobile/widgets/mirpg_remote_theme.dart';
+
+import 'support/fake_translate.dart';
 
 void main() {
   Future<void> show(WidgetTester tester,
@@ -23,13 +26,24 @@ void main() {
       ValueChanged<PhysicalKeyboardKey>? key,
       void Function(PhysicalKeyboardKey, bool)? keyState,
       ValueChanged<bool>? softKeyboard,
-      String? frameStatus}) async {
+      String? frameStatus,
+      Size desktopSize = const Size(3840, 2160),
+      VoidCallback? clipboard,
+      VoidCallback? windows,
+      VoidCallback? quality,
+      bool localViewOnly = false,
+      ThemeData? theme}) async {
     await tester.pumpWidget(MaterialApp(
-        theme: ThemeData(splashFactory: NoSplash.splashFactory),
+        theme: theme ?? ThemeData(splashFactory: NoSplash.splashFactory),
         home: Scaffold(
             resizeToAvoidBottomInset: false,
             body: MonitorControlView(
-              desktopSize: const Size(3840, 2160),
+              tr: fakeTr,
+              desktopSize: desktopSize,
+              localViewOnly: localViewOnly,
+              onClipboard: clipboard,
+              onWindows: windows,
+              onSessionStatus: quality,
               canControl: control,
               preferences: preferences,
               onPreferencesChanged: onPreferencesChanged,
@@ -83,8 +97,7 @@ void main() {
         'Keyboard',
         'Controls',
         'Switch view',
-        'Dashboard',
-        'Session controls',
+        'Exit',
       ]) {
         final control = find.byTooltip(tooltip);
         expect(control.hitTestable(), findsOneWidget, reason: tooltip);
@@ -100,9 +113,118 @@ void main() {
       }
       await tester.tap(find.byTooltip('Switch view'));
       expect(switches, 1);
+      expect(find.byKey(const ValueKey('monitor-top-bar')), findsNothing);
+      if (size.width < size.height) {
+        expect(tester.getCenter(find.byTooltip('Exit')).dx,
+            lessThan(tester.getCenter(find.byTooltip('Fit view')).dx));
+      }
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('the picture gains the old top bar height', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(384, 832));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await show(tester,
+        // Tall enough that the height, not the width, limits the picture.
+        desktopSize: const Size(1080, 2400),
+        dashboard: () {},
+        switchView: () {});
+    final toolbar =
+        tester.getSize(find.byKey(const ValueKey('monitor-toolbar')));
+    expect(tester.getSize(frame).height, closeTo(832 - toolbar.height, 0.5));
+  });
+
+  testWidgets('session actions live in the Controls panel', (tester) async {
+    var clipboards = 0, windows = 0, qualities = 0;
+    await show(tester,
+        clipboard: () => clipboards++,
+        windows: () => windows++,
+        quality: () => qualities++);
+    final panel = find.byKey(const ValueKey('monitor-controls-panel'));
+    await openControls(tester);
+    await tester.tap(find.byTooltip('Clipboard'));
+    await tester.pump();
+    expect(clipboards, 1);
+    expect(panel, findsNothing);
+    await openControls(tester);
+    await tester.tap(find.byTooltip('Windows'));
+    await tester.pump();
+    expect(windows, 1);
+    expect(panel, findsNothing);
+    await openControls(tester);
+    await tester.tap(find.byTooltip('Quality and connection'));
+    await tester.pump();
+    expect(qualities, 1);
+    expect(panel, findsNothing);
+    expect(find.byTooltip('Session controls'), findsNothing);
+  });
+
+  testWidgets('Controls omit session actions the page does not offer',
+      (tester) async {
+    await show(tester);
+    await openControls(tester);
+    expect(find.byTooltip('Clipboard'), findsNothing);
+    expect(find.byTooltip('Windows'), findsNothing);
+    expect(find.byTooltip('Quality and connection'), findsNothing);
+    expect(find.byTooltip('Hide toolbar'), findsOneWidget);
+  });
+
+  testWidgets('Controls header shows resolution and view', (tester) async {
+    await show(tester);
+    await openControls(tester);
+    expect(
+        find.descendant(
+            of: find.byKey(const ValueKey('monitor-panel-header')),
+            matching: find.text('3840 × 2160 · Fit')),
+        findsOneWidget);
+  });
+
+  testWidgets('Hide toolbar from Controls, then show it again', (tester) async {
+    final changes = <MonitorControlPreferences>[];
+    await show(tester, onPreferencesChanged: changes.add);
+    await openControls(tester);
+    await tester.tap(find.byTooltip('Hide toolbar'));
+    await tester.pump();
+    expect(changes.last.toolbarVisible, isFalse);
+    expect(find.byTooltip('Keyboard'), findsNothing);
+    expect(find.byKey(const ValueKey('monitor-controls-panel')), findsNothing);
+    await tester.tap(find.byTooltip('Show toolbar'));
+    await tester.pump();
+    expect(changes.last.toolbarVisible, isTrue);
+    expect(find.byTooltip('Keyboard'), findsOneWidget);
+  });
+
+  testWidgets('view only stays visible without the top bar', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(384, 832));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final chip = find.byKey(const ValueKey('monitor-view-only-chip'));
+    await show(tester, localViewOnly: true);
+    expect(chip, findsOneWidget);
+    expect(find.descendant(of: chip, matching: find.text('View only')),
+        findsOneWidget);
+    expect(
+        tester.getRect(chip).overlaps(
+            tester.getRect(find.byKey(const ValueKey('monitor-toolbar')))),
+        isFalse);
+    await show(tester);
+    expect(chip, findsNothing);
+  });
+
+  testWidgets('chrome over the picture stays dark in a light app',
+      (tester) async {
+    await show(tester, theme: MirpgRemoteTheme.build(ThemeData.light()));
+    final toolbar = find.byKey(const ValueKey('monitor-toolbar'));
+    expect(tester.widget<Material>(toolbar).color,
+        MirpgStudioPalette.dark.background);
+    await openControls(tester);
+    expect(
+        tester
+            .widget<Material>(
+                find.byKey(const ValueKey('monitor-controls-panel')))
+            .color,
+        MirpgStudioPalette.dark.surface);
+  });
 
   testWidgets('stale video is visibly marked while controls stay disabled',
       (tester) async {
@@ -438,7 +560,7 @@ void main() {
     expect(find.text('Right-click next tap'), findsOneWidget);
     await tester.tap(find.byTooltip('Ctrl+Alt+Del'));
     expect(ctrlAltDel, 1);
-    await tester.tap(find.byTooltip('Dashboard'));
+    await tester.tap(find.byTooltip('Exit'));
     expect(dashboards, 1);
   });
 
@@ -615,7 +737,7 @@ void main() {
 
     const portrait = Size(384, 832);
     final bar = find.byType(MonitorLiveKeyboardBar);
-    final topBar = find.byKey(const ValueKey('monitor-top-bar'));
+    final topBar = find.byKey(const ValueKey('monitor-toolbar'));
 
     Future<List<Offset>> openTyping(WidgetTester tester,
         {double inset = 300}) async {
@@ -642,7 +764,7 @@ void main() {
       return rect.top + desktop.dy / 2160 * rect.height;
     }
 
-    testWidgets('typing hides the top bar and keeps the picture size',
+    testWidgets('typing hides the toolbar and keeps the picture size',
         (tester) async {
       await tester.binding.setSurfaceSize(portrait);
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -687,7 +809,7 @@ void main() {
       expect(screenY(tester, points.last), lessThan(tester.getRect(bar).top));
     });
 
-    testWidgets('closing the keyboard restores the top bar', (tester) async {
+    testWidgets('closing the keyboard restores the toolbar', (tester) async {
       await openTyping(tester);
       await tester.tap(find.byTooltip('Close keyboard'));
       await tester.pump();

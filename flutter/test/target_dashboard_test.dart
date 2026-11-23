@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/mobile/pages/target_dashboard_page.dart';
+import 'package:flutter_hbb/mobile/widgets/emulator_action_sheet.dart';
+import 'package:flutter_hbb/mobile/widgets/emulator_tile.dart';
 import 'package:flutter_hbb/mobile/widgets/mirpg_remote_theme.dart';
 import 'package:flutter_hbb/mobile/widgets/session_quality_panel.dart';
 import 'package:flutter_hbb/mobile/widgets/monitor_session_continuity.dart';
+import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_hbb/models/model.dart';
+
+import 'support/fake_translate.dart';
 
 void main() {
   test('a monitor frame is usable only for the acknowledged preview request',
@@ -82,24 +87,69 @@ void main() {
             filesAvailable: true,
             powershellAvailable: true,
             onDestinationSelected: (index) => setState(() => selected = index),
+            tr: fakeTr,
           ),
         );
       }),
     ));
 
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('PC'), findsOneWidget);
     expect(selected, 0);
 
-    await tester.tap(find.text('Screens'));
+    // Left to right: Screens, Play, PC.
+    final screensX = tester.getCenter(find.text('Screens')).dx;
+    final playX = tester.getCenter(find.text('Play')).dx;
+    final pcX = tester.getCenter(find.text('PC')).dx;
+    expect(screensX, lessThan(playX));
+    expect(playX, lessThan(pcX));
+
+    await tester.tap(find.text('Play'));
     await tester.pump();
     expect(selected, 1);
 
-    await tester.tap(find.text('Tools'));
+    await tester.tap(find.text('PC'));
     await tester.pump();
     expect(selected, 2);
 
+    await tester.tap(find.text('Screens'));
+    await tester.pump();
+    expect(selected, 0);
+  });
+
+  test('the dashboard opens on Screens and maps tabs Screens, Play, PC', () {
+    expect(kConnectedPcInitialSection, ConnectedPcSection.screens);
+    expect(connectedPcNavigationIndex(ConnectedPcSection.screens), 0);
+    expect(connectedPcNavigationIndex(ConnectedPcSection.devices), 1);
+    expect(connectedPcNavigationIndex(ConnectedPcSection.pc), 2);
+    for (final sub in [
+      ConnectedPcSection.system,
+      ConnectedPcSection.files,
+      ConnectedPcSection.powershell,
+    ]) {
+      expect(connectedPcNavigationIndex(sub), 2);
+    }
+    expect(connectedPcSectionForIndex(0), ConnectedPcSection.screens);
+    expect(connectedPcSectionForIndex(1), ConnectedPcSection.devices);
+    expect(connectedPcSectionForIndex(2), ConnectedPcSection.pc);
+    expect(connectedPcSectionForIndex(3), isNull);
+  });
+
+  test('Back goes Play and PC to Screens, sub-pages to PC, Screens is root',
+      () {
+    expect(connectedPcBackTarget(ConnectedPcSection.screens), isNull);
+    expect(connectedPcBackTarget(ConnectedPcSection.devices),
+        ConnectedPcSection.screens);
+    expect(connectedPcBackTarget(ConnectedPcSection.pc),
+        ConnectedPcSection.screens);
+    for (final sub in [
+      ConnectedPcSection.system,
+      ConnectedPcSection.files,
+      ConnectedPcSection.powershell,
+    ]) {
+      expect(connectedPcBackTarget(sub), ConnectedPcSection.pc);
+    }
   });
 
   testWidgets('connected PC navigation keeps useful tabs',
@@ -112,14 +162,15 @@ void main() {
           filesAvailable: true,
           powershellAvailable: true,
           onDestinationSelected: (_) {},
+          tr: fakeTr,
         ),
       ),
     ));
 
     expect(find.byType(NavigationBar), findsOneWidget);
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('PC'), findsOneWidget);
     expect(find.text('Codex'), findsNothing);
   });
 
@@ -133,13 +184,14 @@ void main() {
           filesAvailable: false,
           powershellAvailable: false,
           onDestinationSelected: (_) {},
+          tr: fakeTr,
         ),
       ),
     ));
 
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Play'), findsOneWidget);
     expect(find.text('Screens'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('PC'), findsOneWidget);
     expect(find.text('System'), findsNothing);
     expect(find.text('Files'), findsNothing);
     expect(find.text('Shell'), findsNothing);
@@ -160,25 +212,26 @@ void main() {
             filesAvailable: true,
             powershellAvailable: true,
             onDestinationSelected: (_) {},
+            tr: fakeTr,
           ),
         ),
       ),
     ));
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Home'), findsOneWidget);
-    expect(find.text('Tools'), findsOneWidget);
+    expect(find.text('Play'), findsOneWidget);
+    expect(find.text('PC'), findsOneWidget);
   });
 
-  testWidgets('Studio screen rows keep boot, open and game actions accessible',
+  testWidgets('Studio emulator rows keep boot, open and game actions accessible',
       (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(320, 700);
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    var monitorOpens = 0;
-    var emulatorBoots = 0;
+    var emulatorStarts = 0;
     var gameLaunches = 0;
+    const stopped = EmulatorUiState(EmulatorUiWord.stopped, 'Stopped');
 
     for (final base in [ThemeData.light(), ThemeData.dark()]) {
       await tester.pumpWidget(MaterialApp(
@@ -186,45 +239,51 @@ void main() {
         home: Scaffold(
           body: MediaQuery(
             data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
-            child: Column(children: [
-              TargetScreenRow(
-                name: 'Monitor 1',
-                type: 'Windows',
-                stopped: false,
-                live: true,
-                onOpen: () => monitorOpens++,
-              ),
-              TargetScreenRow(
-                name: 'BlueStacks App Player 3',
-                type: 'Android 13',
-                stopped: true,
-                live: false,
-                onOpen: () => emulatorBoots++,
-                onLaunchGame: () => gameLaunches++,
-              ),
-            ]),
+            child: Builder(
+              builder: (context) => Column(children: [
+                EmulatorRow(
+                  data: const EmulatorTileData(
+                    id: 'bs3',
+                    title: 'BlueStacks App Player 3',
+                    state: stopped,
+                  ),
+                  onOpen: () => emulatorStarts++,
+                  onMore: () => showEmulatorActionSheet(
+                    context,
+                    EmulatorActionSheet(
+                      title: 'BlueStacks App Player 3',
+                      subtitle: 'BlueStacks',
+                      state: stopped,
+                      stopped: true,
+                      onOpen: () => emulatorStarts++,
+                      onLaunchGame: () => gameLaunches++,
+                      onLabel: () {},
+                      tr: fakeTr,
+                    ),
+                  ),
+                  tr: fakeTr,
+                ),
+              ]),
+            ),
           ),
         ),
       ));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      expect(find.text('Monitor 1'), findsOneWidget);
       expect(find.text('BlueStacks App Player 3'), findsOneWidget);
-      await tester.tap(find.byTooltip('Open'));
-      await tester.tap(find.byTooltip('Boot'));
+      await tester.tap(find.byTooltip('Start'));
       await tester.tap(find.byTooltip('More BlueStacks App Player 3 actions'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Launch game'));
+      await tester.tap(find.text('Open and launch game'));
       await tester.pumpAndSettle();
     }
-    expect(monitorOpens, 2);
-    expect(emulatorBoots, 2);
+    expect(emulatorStarts, 2);
     expect(gameLaunches, 2);
   });
 
   testWidgets('Studio Home emulator cards avoid overlap at high text scale',
       (tester) async {
-    var boots = 0;
+    var starts = 0;
     for (final base in [ThemeData.light(), ThemeData.dark()]) {
       await tester.pumpWidget(MaterialApp(
         theme: MirpgRemoteTheme.build(base),
@@ -235,12 +294,14 @@ void main() {
               child: SizedBox(
                 width: 134,
                 height: 218,
-                child: TargetPreviewCard(
-                  name: 'BlueStacks App Player 3',
-                  type: 'Android 13',
-                  stopped: true,
-                  live: false,
-                  onOpen: () => boots++,
+                child: EmulatorTile(
+                  data: const EmulatorTileData(
+                    id: 'bs3',
+                    title: 'BlueStacks App Player 3',
+                    state: EmulatorUiState(EmulatorUiWord.stopped, 'Stopped'),
+                  ),
+                  onOpen: () => starts++,
+                  tr: fakeTr,
                 ),
               ),
             ),
@@ -249,67 +310,17 @@ void main() {
       ));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      expect(find.text('Boot'), findsOneWidget);
-      expect(find.widgetWithText(FilledButton, 'Boot').hitTestable(),
+      expect(find.text('Start'), findsOneWidget);
+      expect(
+          find
+              .ancestor(
+                  of: find.text('Start'),
+                  matching: find.bySubtype<FilledButton>())
+              .hitTestable(),
           findsOneWidget);
-      await tester.tap(find.text('Boot'));
+      await tester.tap(find.text('Start'));
     }
-    expect(boots, 2);
-  });
-
-  testWidgets('connected PC session menu exposes settings and explicit end',
-      (tester) async {
-    var quality = 0;
-    var privacy = 0;
-    var settings = 0;
-    var endSession = 0;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        appBar: AppBar(actions: [
-          ConnectedPcSessionMenu(
-            onQualityConnection: () => quality++,
-            onPrivacyControls: () => privacy++,
-            onSettings: () => settings++,
-            onEndSession: () => endSession++,
-          ),
-        ]),
-      ),
-    ));
-
-    await tester.tap(find.byTooltip('Session menu'));
-    await tester.pumpAndSettle();
-    expect(find.text('Quality & connection'), findsOneWidget);
-    expect(find.text('Privacy & host controls'), findsOneWidget);
-    expect(find.text('App settings'), findsOneWidget);
-    expect(find.text('End session'), findsOneWidget);
-
-    await tester.tap(find.text('Quality & connection'));
-    await tester.pumpAndSettle();
-    expect(quality, 1);
-    expect(privacy, 0);
-    expect(settings, 0);
-    expect(endSession, 0);
-
-    await tester.tap(find.byTooltip('Session menu'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Privacy & host controls'));
-    await tester.pumpAndSettle();
-    expect(privacy, 1);
-    expect(settings, 0);
-    expect(endSession, 0);
-
-    await tester.tap(find.byTooltip('Session menu'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('App settings'));
-    await tester.pumpAndSettle();
-    expect(settings, 1);
-    expect(endSession, 0);
-
-    await tester.tap(find.byTooltip('Session menu'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('End session'));
-    await tester.pumpAndSettle();
-    expect(endSession, 1);
+    expect(starts, 2);
   });
 
   test('quality profiles map only to supported RustDesk presets', () {
@@ -318,6 +329,14 @@ void main() {
     expect(mirpgQualityProfileValue(MirpgQualityProfile.smoothMotion), 'low');
     expect(
         mirpgQualityProfileFromEffective('custom'), MirpgQualityProfile.auto);
+  });
+
+  test('quality profile descriptions do not name the app', () {
+    for (final profile in MirpgQualityProfile.values) {
+      expect(mirpgQualityProfileDescription(profile), isNot(contains('RustDesk')));
+    }
+    expect(mirpgQualityProfileDescription(MirpgQualityProfile.auto),
+        'Uses Balanced quality for an adaptive everyday profile.');
   });
 
   test('slow warning requires a fresh measured delay', () {
@@ -358,61 +377,82 @@ void main() {
     expect(find.textContaining('prove a LAN route'), findsOneWidget);
   });
 
-  testWidgets('stopped cards boot only after an explicit tap', (tester) async {
-    var boots = 0;
+  testWidgets('compact status button fits 360 dp at 1.3 text scale',
+      (tester) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final now = DateTime(2026, 10, 4, 12);
+    final data = QualityMonitorData()
+      ..delay = '3'
+      ..delayUpdatedAt = now.subtract(const Duration(seconds: 1));
+    await tester.pumpWidget(MaterialApp(
+      theme: MirpgRemoteTheme.build(ThemeData.dark()),
+      home: MediaQuery(
+        data: const MediaQueryData(
+          size: Size(360, 800),
+          textScaler: TextScaler.linear(1.3),
+        ),
+        child: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 120,
+              child: SessionStatusButton(
+                compact: true,
+                direct: true,
+                data: data,
+                now: now,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ));
+
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('Direct'), findsOneWidget);
+    expect(find.byIcon(Icons.lan_outlined), findsNothing);
+  });
+
+  testWidgets('stopped tiles start only after an explicit tap', (tester) async {
+    var starts = 0;
     await tester.pumpWidget(MaterialApp(
         home: Scaffold(
             body: SizedBox(
-      width: 360,
-      height: 260,
-      child: TargetPreviewCard(
-          name: 'MapleStory',
-          type: 'Android 13',
-          stopped: true,
-          live: false,
-          onOpen: () => boots++),
+      width: 158,
+      height: 290,
+      child: EmulatorTile(
+          data: const EmulatorTileData(
+              id: 'maple',
+              title: 'MapleStory',
+              state: EmulatorUiState(EmulatorUiWord.stopped, 'Stopped')),
+          onOpen: () => starts++,
+          tr: fakeTr),
     ))));
-    expect(boots, 0);
+    expect(starts, 0);
     expect(find.textContaining('Live'), findsNothing);
-    await tester.tap(find.text('Boot'));
-    expect(boots, 1);
+    await tester.tap(find.text('Start'));
+    expect(starts, 1);
   });
 
-  testWidgets('running target cards expose explicit Open and Resume actions',
-      (tester) async {
-    var desktopOpens = 0;
-    var androidResumes = 0;
+  testWidgets('monitor cards expose Open', (tester) async {
+    var opens = 0;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: Column(children: [
-          Expanded(
-            child: TargetPreviewCard(
-              name: 'Desktop',
-              type: 'Windows',
-              stopped: false,
-              live: true,
-              onOpen: () => desktopOpens++,
-            ),
-          ),
-          Expanded(
-            child: TargetPreviewCard(
-              name: 'MapleStory',
-              type: 'Android 13',
-              stopped: false,
-              live: true,
-              onOpen: () => androidResumes++,
-            ),
-          ),
-        ]),
+        body: TargetPreviewCard(
+          name: 'Monitor 1',
+          detail: '2560 × 1440',
+          live: true,
+          onOpen: () => opens++,
+          tr: fakeTr,
+        ),
       ),
     ));
 
     expect(find.text('Open'), findsOneWidget);
-    expect(find.text('Resume'), findsOneWidget);
+    expect(find.text('Resume'), findsNothing);
     await tester.tap(find.text('Open'));
-    await tester.tap(find.text('Resume'));
-    expect(desktopOpens, 1);
-    expect(androidResumes, 1);
+    expect(opens, 1);
   });
 
   testWidgets(
@@ -426,20 +466,21 @@ void main() {
       tester.view.physicalSize = size;
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
-          body: TargetSwitcherCards(cards: [
+          body: TargetSwitcherGrid(cards: [
             TargetPreviewCard(
               name: 'Monitor 1',
-              type: 'Windows',
-              stopped: false,
               live: true,
               onOpen: () {},
+              tr: fakeTr,
             ),
-            TargetPreviewCard(
-              name: 'BlueStacks App Player 3',
-              type: 'Android 13',
-              stopped: false,
-              live: true,
+            EmulatorTile(
+              data: const EmulatorTileData(
+                  id: 'bs3',
+                  title: 'BlueStacks App Player 3',
+                  state: EmulatorUiState(EmulatorUiWord.live, 'Live')),
               onOpen: () {},
+              onMore: () {},
+              tr: fakeTr,
             ),
           ]),
         ),
@@ -447,10 +488,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(find.text('Open'), findsOneWidget);
-      expect(find.text('Resume'), findsOneWidget);
-      expect(find.text('Tap to control'), findsNWidgets(2));
-      for (final card in find.byType(TargetPreviewCard).evaluate()) {
-        final rect = tester.getRect(find.byWidget(card.widget));
+      expect(find.text('Live'), findsWidgets);
+      expect(find.byTooltip('More BlueStacks App Player 3 actions'),
+          findsOneWidget);
+      for (final finder in [
+        find.byType(TargetPreviewCard),
+        find.byType(EmulatorTile)
+      ]) {
+        final rect = tester.getRect(finder);
         expect(rect.bottom, lessThanOrEqualTo(size.height));
         expect(rect.right, lessThanOrEqualTo(size.width));
       }
@@ -458,53 +503,67 @@ void main() {
   });
 
   testWidgets('launch game is a separate emulator action', (tester) async {
-    var boots = 0;
+    var opens = 0;
     var launches = 0;
     await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-            body: SizedBox(
-      width: 360,
-      height: 280,
-      child: TargetPreviewCard(
-        name: 'MapleStory',
-        type: 'Android 13',
-        stopped: true,
-        live: false,
-        onOpen: () => boots++,
-        onLaunchGame: () => launches++,
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: TextButton(
+            onPressed: () => showEmulatorActionSheet(
+              context,
+              EmulatorActionSheet(
+                title: 'MapleStory',
+                subtitle: 'BlueStacks',
+                state: const EmulatorUiState(EmulatorUiWord.stopped, 'Stopped'),
+                stopped: true,
+                onOpen: () => opens++,
+                onLaunchGame: () => launches++,
+                onLabel: () {},
+                tr: fakeTr,
+              ),
+            ),
+            child: const Text('go'),
+          ),
+        ),
       ),
-    ))));
+    ));
 
-    await tester.tap(find.text('Launch game'));
+    await tester.tap(find.text('go'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open and launch game'));
+    await tester.pumpAndSettle();
     expect(launches, 1);
-    expect(boots, 0);
+    expect(opens, 0);
 
-    await tester.tap(find.text('Boot'));
-    expect(boots, 1);
+    await tester.tap(find.text('go'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start'));
+    await tester.pumpAndSettle();
+    expect(opens, 1);
+    expect(launches, 1);
   });
 
-  testWidgets('closed guest stays visible as a running emulator with Reconnect',
+  testWidgets('closed guest stays visible as a problem tile with Reconnect',
       (tester) async {
     var reconnects = 0;
     await tester.pumpWidget(MaterialApp(
         home: Scaffold(
             body: SizedBox(
-      width: 360,
-      height: 280,
-      child: TargetPreviewCard(
-        name: 'BlueStacks App Player 3',
-        type: 'Android 13',
-        stopped: false,
-        live: false,
-        instanceState: 'Running',
-        streamDisconnected: true,
-        error: 'Guest session is closed',
+      width: 158,
+      height: 290,
+      child: EmulatorTile(
+        data: const EmulatorTileData(
+          id: 'bs3',
+          title: 'BlueStacks App Player 3',
+          state: EmulatorUiState(EmulatorUiWord.problem, 'Problem',
+              causeKey: 'Stream stopped'),
+        ),
         onOpen: () => reconnects++,
+        tr: fakeTr,
       ),
     ))));
-    expect(find.text('Disconnected'), findsOneWidget);
-    expect(find.text('Stream disconnected'), findsOneWidget);
-    expect(find.text('Running · Stream disconnected'), findsOneWidget);
+    expect(find.text('Problem'), findsOneWidget);
+    expect(find.text('Stream stopped'), findsOneWidget);
     expect(find.text('Reconnect'), findsOneWidget);
     expect(find.text('Live'), findsNothing);
     await tester.tap(find.text('Reconnect'));
@@ -515,7 +574,6 @@ void main() {
   testWidgets('disconnected preview fits compact cards with large text',
       (tester) async {
     var reconnects = 0;
-    var gameLaunches = 0;
     for (final size in [const Size(230, 145), const Size(360, 260)]) {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
@@ -526,16 +584,17 @@ void main() {
               child: SizedBox(
                 width: size.width,
                 height: size.height,
-                child: TargetPreviewCard(
-                  name: 'BlueStacks App Player 3',
-                  type: 'Android 13',
-                  stopped: false,
-                  live: false,
-                  instanceState: 'Running',
-                  streamDisconnected: true,
-                  error: 'Guest session is closed',
+                child: EmulatorTile(
+                  data: const EmulatorTileData(
+                    id: 'bs3',
+                    title: 'BlueStacks App Player 3',
+                    state: EmulatorUiState(EmulatorUiWord.problem, 'Problem',
+                        causeKey: 'Stream stopped',
+                        pcMessage: 'Guest session is closed'),
+                  ),
                   onOpen: () => reconnects++,
-                  onLaunchGame: () => gameLaunches++,
+                  onMore: () {},
+                  tr: fakeTr,
                 ),
               ),
             ),
@@ -544,156 +603,11 @@ void main() {
       ));
       await tester.pump();
       expect(tester.takeException(), isNull, reason: 'card size: $size');
-      expect(find.byTooltip('Reconnect'), findsOneWidget);
-      expect(find.byTooltip('Launch game'), findsOneWidget);
-      await tester.tap(find.byTooltip('Reconnect'));
-      await tester.tap(find.byTooltip('Launch game'));
-      expect(reconnects, greaterThan(0));
-      expect(gameLaunches, greaterThan(0));
+      expect(find.text('Reconnect'), findsOneWidget);
+      expect(find.byTooltip('More BlueStacks App Player 3 actions'),
+          findsOneWidget);
+      await tester.tap(find.text('Reconnect'));
     }
-  });
-
-  testWidgets(
-      'preview failure remains usable in a compact chooser at large font size',
-      (tester) async {
-    await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-            body: MediaQuery(
-      data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
-      child: const Align(
-          alignment: Alignment.topLeft,
-          child: SizedBox(
-            width: 230,
-            height: 145,
-            child: TargetPreviewCard(
-                name: 'MapleStory',
-                type: 'Android 13',
-                stopped: false,
-                live: false,
-                error:
-                    'Enable ADB debugging in this emulator instance before connecting'),
-          )),
-    ))));
-    expect(tester.takeException(), isNull);
-    expect(find.text('Retry preview'), findsOneWidget);
-  });
-
-  group('managed emulator menu', () {
-    Widget host(Widget child) => MaterialApp(
-        home: Scaffold(body: SizedBox(width: 360, height: 280, child: child)));
-
-    for (final asRow in [false, true]) {
-      final label = asRow ? 'row' : 'card';
-      Widget build(AvdCardActions actions,
-              {bool stopped = false,
-              void Function()? onOpen,
-              String stoppedNote = ''}) =>
-          host(asRow
-              ? TargetScreenRow(
-                  name: 'Phone 2',
-                  type: 'Android 15',
-                  stopped: stopped,
-                  live: !stopped,
-                  onOpen: onOpen,
-                  stoppedNote: stoppedNote,
-                  avd: actions)
-              : TargetPreviewCard(
-                  name: 'Phone 2',
-                  type: 'Android 15',
-                  stopped: stopped,
-                  live: !stopped,
-                  onOpen: onOpen,
-                  stoppedNote: stoppedNote,
-                  avd: actions));
-
-      testWidgets('stopped avd $label shows why its copy failed',
-          (tester) async {
-        const failure = 'Copy to Phone_3 failed: not enough space';
-        await tester.pumpWidget(build(const AvdCardActions(),
-            stopped: true, stoppedNote: failure));
-        expect(tester.takeException(), isNull);
-        expect(find.text(failure), findsOneWidget);
-        await tester.pumpWidget(build(const AvdCardActions(), stopped: true));
-        expect(find.text(failure), findsNothing);
-      });
-
-      testWidgets('running avd $label offers Stop and a blocked Delete',
-          (tester) async {
-        var stops = 0;
-        var toggles = 0;
-        await tester.pumpWidget(build(AvdCardActions(
-          running: true,
-          windowVisible: false,
-          blocker: 'Stop it first',
-          onStop: () => stops++,
-          onToggleWindow: () => toggles++,
-          onClone: () {},
-          onRename: () {},
-          onDelete: () {},
-        )));
-        await tester.tap(find.byTooltip('More Phone 2 actions'));
-        await tester.pumpAndSettle();
-        expect(find.text('Show on PC'), findsOneWidget);
-        expect(find.text('Hide on PC'), findsNothing);
-        expect(find.text('Restart'), findsNothing);
-        expect(find.text('Stop it first'), findsNWidgets(3));
-        final stop = tester.widget<PopupMenuItem<String>>(
-            find.widgetWithText(PopupMenuItem<String>, 'Stop'));
-        expect(stop.enabled, isTrue);
-        final delete = tester.widget<PopupMenuItem<String>>(
-            find.ancestor(
-                of: find.text('Delete'),
-                matching: find.byType(PopupMenuItem<String>)));
-        expect(delete.enabled, isFalse);
-        await tester.tap(find.text('Show on PC'));
-        await tester.pumpAndSettle();
-        expect(toggles, 1);
-        await tester.tap(find.byTooltip('More Phone 2 actions'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Stop'));
-        await tester.pumpAndSettle();
-        expect(stops, 1);
-      });
-
-      testWidgets('stopped avd $label can clone, rename and delete',
-          (tester) async {
-        final calls = <String>[];
-        await tester.pumpWidget(build(
-            AvdCardActions(
-              running: false,
-              onClone: () => calls.add('clone'),
-              onRename: () => calls.add('rename'),
-              onDelete: () => calls.add('delete'),
-            ),
-            stopped: true));
-        for (final item in ['Clone', 'Rename', 'Delete']) {
-          await tester.tap(find.byTooltip('More Phone 2 actions'));
-          await tester.pumpAndSettle();
-          expect(find.text('Stop'), findsNothing);
-          expect(find.text('Show on PC'), findsNothing);
-          expect(find.text('Hide on PC'), findsNothing);
-          await tester.tap(find.text(item));
-          await tester.pumpAndSettle();
-        }
-        expect(calls, ['clone', 'rename', 'delete']);
-      });
-
-      testWidgets('visible window avd $label offers Hide on PC',
-          (tester) async {
-        await tester.pumpWidget(build(AvdCardActions(
-            running: true, windowVisible: true, onToggleWindow: () {})));
-        await tester.tap(find.byTooltip('More Phone 2 actions'));
-        await tester.pumpAndSettle();
-        expect(find.text('Hide on PC'), findsOneWidget);
-      });
-
-      testWidgets('cloning avd $label shows progress and no menu',
-          (tester) async {
-        await tester.pumpWidget(
-            build(const AvdCardActions(cloningLabel: 'Cloning 42%')));
-        expect(find.text('Cloning 42%'), findsWidgets);
-        expect(find.byTooltip('More Phone 2 actions'), findsNothing);
-      });
-    }
+    expect(reconnects, 2);
   });
 }

@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
+import '../../common.dart' show translate;
 import '../../consts.dart' show kPeerPlatformLinux, kPeerPlatformWindows;
 import '../../common/widgets/dialog.dart' show clientClose;
 import '../../models/platform_model.dart' show bind;
+import '../../models/emulator_labels.dart';
 import '../../models/emulator_model.dart';
 import '../../models/host_management_model.dart';
 import '../../models/input_model.dart';
@@ -20,25 +23,66 @@ import 'settings_page.dart';
 import 'terminal_page.dart';
 import '../widgets/mirpg_remote_theme.dart';
 import '../../common/widgets/aperture_brand.dart';
-import '../widgets/avd_manage_sheets.dart';
 import '../widgets/clipboard_transfer_sheet.dart';
+import '../widgets/computers_hero.dart' show hostDisplayName;
+import '../widgets/emulator_action_sheet.dart';
+import '../widgets/emulator_tile.dart';
 import '../widgets/monitor_control_view.dart';
 import '../widgets/monitor_key_sender.dart';
 import '../widgets/monitor_session_continuity.dart';
+import '../widgets/play_rail.dart';
+import '../widgets/pc_tab.dart';
+import '../widgets/reconnecting_banner.dart';
+import '../widgets/play_tab.dart';
 import '../widgets/privacy_controls_sheet.dart';
+import '../widgets/screens_tab.dart';
+export '../widgets/screens_tab.dart' show TargetPreviewCard, TargetSwitcherGrid;
 import '../widgets/session_quality_panel.dart';
+import '../widgets/trust_phone_sheet.dart';
 import '../widgets/window_picker_sheet.dart';
+import '../../models/session_reconnect.dart';
 
-enum _ConnectedPcSection {
+/// The dashboard's pages. `devices` is the Play tab (emulators); the bottom
+/// bar reads Screens, Play, PC.
+enum ConnectedPcSection {
   devices,
   screens,
-  tools,
+  pc,
   system,
   files,
   powershell,
 }
 
-enum _ScreenFilter { all, windows, android }
+/// The dashboard opens on Screens.
+const ConnectedPcSection kConnectedPcInitialSection = ConnectedPcSection.screens;
+
+/// Position of [section] in the bottom bar: Screens, Play, PC. System, Files
+/// and PowerShell are sub-pages of PC.
+int connectedPcNavigationIndex(ConnectedPcSection section) => switch (section) {
+      ConnectedPcSection.screens => 0,
+      ConnectedPcSection.devices => 1,
+      _ => 2,
+    };
+
+/// The section a bottom-bar [index] selects, or null when out of range.
+ConnectedPcSection? connectedPcSectionForIndex(int index) => switch (index) {
+      0 => ConnectedPcSection.screens,
+      1 => ConnectedPcSection.devices,
+      2 => ConnectedPcSection.pc,
+      _ => null,
+    };
+
+/// Where Android Back goes from [section]: sub-pages to PC, Play and PC to
+/// Screens, and null on Screens itself (the root).
+ConnectedPcSection? connectedPcBackTarget(ConnectedPcSection section) =>
+    switch (section) {
+      ConnectedPcSection.screens => null,
+      ConnectedPcSection.system ||
+      ConnectedPcSection.files ||
+      ConnectedPcSection.powershell =>
+        ConnectedPcSection.pc,
+      _ => ConnectedPcSection.screens,
+    };
 
 class TargetDashboardPage extends StatefulWidget {
   const TargetDashboardPage({
@@ -54,13 +98,43 @@ class TargetDashboardPage extends StatefulWidget {
 class _TargetDashboardPageState extends State<TargetDashboardPage>
     with WidgetsBindingObserver {
   final _scroll = ScrollController();
+  final _playScroll = ScrollController();
+  final _chooserScroll = ScrollController();
   final _monitorFocus = FocusNode();
+
+  /// Height of one Play grid row (tile + spacing) from the last layout.
+  double _playRowExtent = 0;
+
+  /// Stopped emulators the phone asked to start, until the PC's list shows
+  /// them as no longer stopped (or 120 s pass), so their tile reads Starting.
+  final Map<String, DateTime> _startRequested = {};
+
+  /// When this phone last saw each emulator live (a fresh frame of the game).
+  /// The list is not refreshed during a game, so this keeps an emulator
+  /// started from the phone running until a newer list says otherwise.
+  final Map<String, DateTime> _seenLive = {};
+
+  /// Whether the first emulator list after opening the dashboard has ended.
+  bool _listSeen = false;
   Timer? _scrollDebounce;
   Timer? _refreshTimer;
   Timer? _healthTimer;
   _Target? _fullscreen;
+
+  /// A copy of the opened emulator's last preview frame, shown dimmed until
+  /// its stream is live. Preview images are disposed when no longer retained,
+  /// so this page owns its copy.
+  ui.Image? _switchFrame;
+
+  /// A chip switch has been accepted but has not reached the PC yet (so
+  /// `model.connecting` is still false); further switches are ignored.
+  bool _switchPending = false;
   bool _chooser = false;
   bool _background = false;
+
+  /// Reconnects the session on its own after an unexpected drop, then reopens
+  /// the emulator or monitor that was open.
+  late final SessionReconnectController _sessionReconnect;
   bool _viewFocused = true;
   bool _monitorDown = false;
   bool _monitorRightDown = false;
@@ -98,12 +172,13 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   int _windowFocusRevision = 0;
   bool? _landscape;
   String _subscription = '';
-  double _viewport = 1;
-  double _extent = 1;
-  int _columns = 1;
-  int _chooserStart = 0;
-  _ConnectedPcSection _section = _ConnectedPcSection.devices;
-  _ScreenFilter _screenFilter = _ScreenFilter.all;
+  /// Distance between the tops of the Screens cards (card plus spacing), from
+  /// the last layout, for choosing which monitors get a preview.
+  List<double> _screensExtents = const [];
+
+  /// Size of the view switcher's grid from its last layout.
+  Size _chooserSize = Size.zero;
+  ConnectedPcSection _section = kConnectedPcInitialSection;
   bool _filesOpened = false;
   bool _systemOpened = false;
   bool _powershellOpened = false;
@@ -115,6 +190,23 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   int _peerInfoGeneration = 0;
   int _reconnectGeneration = 0;
   EmulatorModel get model => widget.ffi.emulatorModel;
+  late final EmulatorLabelStore _labels = EmulatorLabelStore(
+    peerId: widget.ffi.id,
+    read: (k) => bind.getLocalFlutterOption(k: k),
+    write: (k, v) => bind.setLocalFlutterOption(k: k, v: v),
+  );
+
+  void _labelsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// The name a confirmation dialog shows: "Label (emulator name)" when a
+  /// phone-side label is set, so the person sees both what they named it and
+  /// what the PC calls it.
+  String _confirmationName(_Target target) {
+    final label = _labels.labelFor(target.id);
+    return label.isEmpty ? target.name : '$label (${target.name})';
+  }
 
   String get _qualityPreferenceKey => 'mirpg-quality-profile:${widget.ffi.id}';
 
@@ -166,12 +258,23 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _sessionReconnect = SessionReconnectController(
+      attempt: widget.ffi.ffiModel.reconnectQuietly,
+      onRestored: _restoreAfterReconnect,
+      onGiveUp: (event) => widget.ffi.ffiModel
+          .handleMsgBox(event, widget.ffi.sessionId, widget.ffi.id),
+      isForeground: () => !_background,
+    );
+    widget.ffi.ffiModel.sessionReconnect = _sessionReconnect;
     model.addListener(_changed);
+    _labels.addListener(_labelsChanged);
     widget.ffi.ffiModel.addListener(_changed);
     widget.ffi.qualityMonitorModel.addListener(_qualityChanged);
     _peerInfoGeneration = widget.ffi.ffiModel.peerInfoGeneration;
     _reconnectGeneration = widget.ffi.ffiModel.reconnectGeneration;
     _scroll.addListener(_scrolled);
+    _playScroll.addListener(_scrolled);
+    _chooserScroll.addListener(_scrolled);
     widget.ffi.aperturePairResult.addListener(_pairResultChanged);
     unawaited(_refreshPairingState());
     unawaited(model.refresh());
@@ -209,8 +312,47 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
           param: '');
       if (!mounted) return;
       setState(() => _pairingState = state ?? '');
+      if (state == 'paired') _setPairedFlag('Y');
+      if (state == 'can-pair') _setPairedFlag('N');
     } catch (_) {
       if (mounted) setState(() => _pairingState = 'unavailable');
+      return;
+    }
+    unawaited(_maybeOfferPairing());
+  }
+
+  void _setPairedFlag(String value) => unawaited(bind.setLocalFlutterOption(
+      k: pairedFlagKey(widget.ffi.id), v: value));
+
+  /// Offers "Trust this phone" once per PC, never over a game or the monitor;
+  /// a prompt deferred meanwhile appears when the dashboard is shown again.
+  bool _offeringPairing = false;
+
+  Future<void> _maybeOfferPairing() async {
+    if (!mounted || _fullscreen != null || _offeringPairing) return;
+    final promptedKey = pairPromptedKey(widget.ffi.id);
+    if (!shouldOfferPairing(
+        pairingState: _pairingState,
+        promptedFlag: bind.getLocalFlutterOption(k: promptedKey))) {
+      return;
+    }
+    _offeringPairing = true;
+    try {
+      // Recorded before the sheet opens so it is one-time even if the app dies.
+      await bind.setLocalFlutterOption(k: promptedKey, v: 'Y');
+      // A game or monitor may have opened during the write.
+      if (!mounted || _fullscreen != null) return;
+      final trust = await showTrustPhoneSheet(context, hostName: _hostName);
+      if (trust == true) await _trustThisPhone();
+    } catch (_) {
+      // Runs unawaited: report instead of reaching the zone's uncaught handler.
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(translate('Pairing failed'))));
+      }
+    } finally {
+      _offeringPairing = false;
     }
   }
 
@@ -236,6 +378,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         sessionId: widget.ffi.sessionId,
         key: 'aperture-forget-pairing',
         value: '');
+    _setPairedFlag('N');
     await _refreshPairingState();
   }
 
@@ -249,9 +392,10 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(
         content: Text(ok
-            ? 'This phone connects without a password at home'
-            : (error.isEmpty ? 'Pairing failed' : error)),
+            ? translate('This phone connects without a password at home')
+            : (error.isEmpty ? translate('Pairing failed') : error)),
       ));
+    if (ok) _setPairedFlag('Y');
     unawaited(_refreshPairingState());
   }
 
@@ -406,15 +550,12 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
 
   Future<void> _showQualityConnection() async {
     if (!mounted) return;
-    final studioTheme = MirpgRemoteTheme.build(Theme.of(context));
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: studioTheme.colorScheme.surface,
-      builder: (sheetContext) => Theme(
-        data: studioTheme,
-        child: StatefulBuilder(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (sheetContext) => StatefulBuilder(
         builder: (context, sheetSetState) => AnimatedBuilder(
           animation: widget.ffi.qualityMonitorModel,
           builder: (_, __) => SessionQualityConnectionSheet(
@@ -432,13 +573,21 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
             },
           ),
         ),
-        ),
       ),
     );
   }
 
   void _changed() {
     if (!mounted) return;
+    if (!model.loading) _listSeen = true;
+    final now = DateTime.now();
+    pruneStartRequests(_startRequested, model.instances, now);
+    // Only a fresh frame of the open game counts. Previews never go to an
+    // emulator the list calls stopped, and a stale preview state must not
+    // keep one "running" past the next list.
+    if (model.streaming && model.guestFrameFresh && model.targetId.isNotEmpty) {
+      noteSeenLive(_seenLive, model.targetId, now);
+    }
     if (!widget.ffi.ffiModel.keyboard || widget.ffi.ffiModel.viewOnly) {
       unawaited(_releaseMonitorInput());
     }
@@ -471,6 +620,14 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       unawaited(_dashboard());
       return;
     }
+    if (_switchFrame != null &&
+        model.streaming &&
+        !model.connecting &&
+        model.targetId == _fullscreen?.id) {
+      // Cleared in the same rebuild, so the page never shows a disposed image.
+      _switchFrame!.dispose();
+      _switchFrame = null;
+    }
     _presentation();
     setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) => _subscribe());
@@ -484,6 +641,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _background = state != AppLifecycleState.resumed;
+    _sessionReconnect.onForegroundChanged(!_background);
     if (_background) unawaited(_releaseMonitorInput());
     _subscription = '';
     _subscribe();
@@ -512,48 +670,48 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     final previewsEnabled = !_background &&
         (active != null ||
             _chooser ||
-            _section == _ConnectedPcSection.devices ||
-            _section == _ConnectedPcSection.screens);
+            _section == ConnectedPcSection.devices ||
+            _section == ConnectedPcSection.screens);
     if (!_background && active?.display != null) displays.add(active!.display!);
     if (!_background && previewsEnabled && (active == null || _chooser)) {
-      final screenTargets = !_chooser &&
-              _section == _ConnectedPcSection.devices
-          ? <_Target>[
-              ...all.where((target) => target.display != null).take(1),
-              ...all.where((target) => target.instance != null).take(2),
-            ]
-          : _section == _ConnectedPcSection.screens
-          ? all.where((target) => switch (_screenFilter) {
-                _ScreenFilter.all => true,
-                _ScreenFilter.windows => target.display != null,
-                _ScreenFilter.android => target.instance != null,
-              }).toList(growable: false)
-          : all;
-      final first = _chooser
-          ? _chooserStart
-          : _section == _ConnectedPcSection.devices
-              ? 0
-              : math.min(
-                  math.max(0, screenTargets.length - 4),
-                  ((math.max(0, _scroll.hasClients ? _scroll.offset - 176 : 0) /
-                              _extent)
-                          .floor()) *
-                      _columns,
-                );
-      final count = _chooser || _section == _ConnectedPcSection.devices
-          ? 4
-          : ((_viewport / _extent).ceil() + 1) * _columns;
-      // Inspect the visible rows even if some guests are stopped; stopped
-      // instances consume no stream, so they must not take up preview slots.
-      for (final target in screenTargets.skip(first).take(count)) {
-        if (guestIds.length + displays.length >= 4) break;
-        if (target.display != null) {
-          if (!displays.contains(target.display)) displays.add(target.display!);
-        } else if (target.id != active?.id &&
-            target.instance!.state != 'stopped' &&
-            !model.isEmulatorShuttingDown(target.id)) {
-          guestIds.add(target.id);
+      if (_chooser) {
+        // The view switcher: the first four monitors or running emulators
+        // from the grid's first visible card. Stopped instances consume no
+        // stream, so they must not take up preview slots.
+        final first = switcherGridFirstVisibleIndex(
+            _chooserSize, _chooserScroll.hasClients ? _chooserScroll.offset : 0);
+        for (final target in all.skip(first)) {
+          if (guestIds.length + displays.length >= 4) break;
+          if (target.display != null) {
+            if (!displays.contains(target.display)) {
+              displays.add(target.display!);
+            }
+          } else if (target.id != active?.id &&
+              target.instance!.state != 'stopped' &&
+              !model.isEmulatorShuttingDown(target.id)) {
+            guestIds.add(target.id);
+          }
         }
+      } else if (_section == ConnectedPcSection.devices) {
+        // Play: all four slots go to running emulators nearest the top of
+        // the viewport; no monitor preview on this tab.
+        guestIds.addAll(playTabPreviewIds(
+          [
+            for (final target in all)
+              if (target.instance != null) target.instance!,
+          ],
+          firstVisibleIndex: playTabFirstVisibleIndex(
+              _playScroll.hasClients ? _playScroll.offset : 0, _playRowExtent),
+          shuttingDown: model.isEmulatorShuttingDown,
+          activeId: active?.id,
+        ));
+      } else if (_section == ConnectedPcSection.screens) {
+        // Screens shows monitors only; emulators never take a slot here.
+        displays.addAll(screensPreviewDisplays(
+          monitorCount: widget.ffi.ffiModel.pi.displays.length,
+          firstVisibleIndex: screensTabFirstVisibleIndex(
+              _screensExtents, _scroll.hasClients ? _scroll.offset : 0),
+        ));
       }
     }
     final signature = '${guestIds.join(',')}|${displays.join(',')}';
@@ -581,11 +739,18 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     HostWindowInfo? focusedWindow,
   }) async {
     if (model.connecting) return;
+    final instance = target.instance;
+    if (instance != null) {
+      noteStartRequest(_startRequested, instance, DateTime.now());
+    }
     await _releaseMonitorInput();
+    final frame = instance == null ? null : _guestFrame(target).image;
     setState(() {
       _fullscreen = target;
       _focusedWindow = focusedWindow;
       if (focusedWindow != null) _windowFocusRevision++;
+      _switchFrame?.dispose();
+      _switchFrame = frame?.clone();
     });
     _resetMonitorLivenessForCurrentTarget();
     _subscription = '';
@@ -599,86 +764,376 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   }
 
   Future<void> _shutdownEmulator(_Target target) async {
-    if (!await showEmulatorShutdownConfirmation(context, target.name) || !mounted) return;
+    if (!await showEmulatorShutdownConfirmation(context, _confirmationName(target)) || !mounted) return;
     if (_fullscreen?.id == target.id) await _dashboard();
-    await model.shutdownEmulator(target.id);
+    final instance = target.instance;
+    await model.shutdownEmulator(target.id,
+        runningAsKnown: instance != null && _runningAsKnown(instance));
     if (mounted && model.hostError.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(model.hostError)));
     }
   }
 
-  String _avdRawName(String id) => id.replaceFirst('avd:', '');
-
-  bool _avdNameTaken(String name, {String? except}) {
-    final lower = name.toLowerCase();
-    return model.instances.any((item) =>
-        item.provider == 'avd' &&
-        item.id != except &&
-        _avdRawName(item.id).toLowerCase() == lower);
+  /// Shows the PC's refusal or failure as is; on success a short [success]
+  /// confirmation (already translated) replaces whatever snackbar is showing.
+  void _reportResult(EmulatorActionResult result, {required String success}) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (!result.ok) {
+      if (result.message.isNotEmpty) {
+        messenger.showSnackBar(SnackBar(content: Text(result.message)));
+      }
+      return;
+    }
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+          content: Text(success), duration: const Duration(seconds: 2)));
   }
 
-  /// Shows the PC's refusal or failure; success stays quiet (the card updates).
-  void _reportAvdResult(AvdActionResult result) {
-    if (mounted && !result.ok && result.message.isNotEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.message)));
+  /// The label when set, else the emulator name, for confirmations.
+  String _shownName(String id, String name) => _labels.displayName(id, name);
+
+  /// Restarts Android inside [target]; the game stays open and reconnects
+  /// once Android is back.
+  Future<void> _rebootEmulator(_Target target) async {
+    final shown = _shownName(target.id, target.name);
+    if (!await showEmulatorRebootConfirmation(
+            context, _confirmationName(target)) ||
+        !mounted) {
+      return;
+    }
+    final instance = target.instance;
+    _reportResult(
+        await model.rebootEmulator(target.id,
+            runningAsKnown: instance != null && _runningAsKnown(instance)),
+        success: translate('Rebooting {$shown}'));
+  }
+
+  Future<void> _toggleWindow(_Target target) async {
+    final show = !(target.instance?.windowVisible ?? false);
+    _reportResult(await model.setEmulatorWindowVisible(target.id, show),
+        success: translate(show ? 'Shown on the PC' : 'Hidden on the PC'));
+  }
+
+  bool get _canControl =>
+      widget.ffi.ffiModel.keyboard && !widget.ffi.ffiModel.viewOnly;
+
+  String get _hostName {
+    final name = widget.ffi.ffiModel.pi.hostname;
+    return name.isEmpty ? 'Your PC' : name;
+  }
+
+  _Target? _targetById(String id) {
+    for (final target in targets) {
+      if (target.id == id) return target;
+    }
+    return null;
+  }
+
+  /// The guest's latest preview image and whether it is current (acknowledged
+  /// preview request, under 8 s old), as the dashboard cards decide it.
+  ({ui.Image? image, RemotePreview? preview, bool frameCurrent}) _guestFrame(
+      _Target target) {
+    final preview = model.previews[target.id];
+    final activeGuest = _fullscreen?.id == target.id &&
+        model.targetId == target.id &&
+        model.streaming;
+    final channel = activeGuest ? model.videoChannel : preview?.channel;
+    final image =
+        channel == null ? null : widget.ffi.imageModel.dashboardImage(channel);
+    final updatedAt = channel == null
+        ? null
+        : widget.ffi.imageModel.dashboardImageUpdatedAt(channel);
+    final frameAge =
+        updatedAt == null ? null : DateTime.now().difference(updatedAt);
+    final frameCurrent = image != null &&
+        frameAge != null &&
+        !frameAge.isNegative &&
+        frameAge < const Duration(seconds: 8) &&
+        (activeGuest
+            ? model.guestFrameFresh
+            : preview?.state == 'streaming' &&
+                model.previewsAcknowledged &&
+                widget.ffi.imageModel.dashboardImagePreviewRequest(channel!) ==
+                    model.previewRequest);
+    return (image: image, preview: preview, frameCurrent: frameCurrent);
+  }
+
+  EmulatorUiState _guestState(
+          _Target target, RemotePreview? preview, bool frameCurrent) =>
+      emulatorUiState(target.instance!,
+          preview: preview,
+          flags: EmulatorUiFlags(
+            frameCurrent: frameCurrent,
+            shuttingDown: model.isEmulatorShuttingDown(target.id),
+            startRequested: startRequestPending(
+                _startRequested, target.id, DateTime.now()),
+            seenLive:
+                seenLiveSinceList(_seenLive, target.id, model.listRequestedAt),
+            guestFailure: model.guestFailures[target.id] ?? '',
+          ));
+
+  /// Opening [id] needs no startup checklist: the PC lists it ready, or this
+  /// phone has played it since that list. A start request alone does not
+  /// count; that emulator is still booting and the checklist shows it.
+  bool _alreadyRunning(String id) {
+    final instance = _targetById(id)?.instance;
+    return instance != null &&
+        (instance.readyForReconnect ||
+            (_runningAsKnown(instance) &&
+                seenLiveSinceList(_seenLive, id, model.listRequestedAt)));
+  }
+
+  /// [emulatorRunningAsKnown] with this page's start requests and sightings.
+  bool _runningAsKnown(RemoteEmulator instance) => emulatorRunningAsKnown(
+        instance,
+        startRequests: _startRequested,
+        seenLive: _seenLive,
+        listRequestedAt: model.listRequestedAt,
+        now: DateTime.now(),
+      );
+
+  EmulatorTileData _guestTile(_Target target) {
+    final instance = target.instance!;
+    final frame = _guestFrame(target);
+    final label = _labels.labelFor(target.id);
+    return EmulatorTileData(
+      id: target.id,
+      title: _labels.displayName(target.id, instance.name),
+      secondary: label.isEmpty ? '' : instance.name,
+      state: _guestState(target, frame.preview, frame.frameCurrent),
+      image: frame.image,
+      windowVisible: instance.windowVisible,
+    );
+  }
+
+  /// Every listed emulator in the PC's order.
+  List<EmulatorTileData> _playTiles() => [
+        for (final target in targets)
+          if (target.instance != null) _guestTile(target),
+      ];
+
+  /// Tile tap: opens (and starts, if stopped) the emulator, or says why not.
+  void _openGuest(String id) {
+    final target = _targetById(id);
+    if (target == null) return;
+    if (!_canControl) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+            content: Text(translate("{$_hostName} hasn't granted control"))));
+      return;
+    }
+    unawaited(_open(target));
+  }
+
+  void _showGuestActions(String id) {
+    final target = _targetById(id);
+    if (target != null) unawaited(_showEmulatorActions(target));
+  }
+
+  Future<void> _showEmulatorActions(_Target target) async {
+    final instance = target.instance;
+    if (instance == null) return;
+    final frame = _guestFrame(target);
+    final state = _guestState(target, frame.preview, frame.frameCurrent);
+    final control = _canControl;
+    final stopped = instance.state == 'stopped';
+    // Open on the game being played would only reconnect its stream.
+    final playing = target.id == _fullscreen?.id && model.streaming;
+    final label = _labels.labelFor(target.id);
+    final subtitle = [
+      if (label.isNotEmpty) instance.name,
+      emulatorProviderLabel(instance.provider),
+      if (instance.androidVersion.isNotEmpty)
+        'Android ${instance.androidVersion}',
+    ].join(' · ');
+    await showEmulatorActionSheet(
+      context,
+      EmulatorActionSheet(
+        title: _labels.displayName(target.id, instance.name),
+        subtitle: subtitle,
+        state: state,
+        stopped: state.word == EmulatorUiWord.stopped,
+        onOpen: control && state.canOpen && !model.connecting && !playing
+            ? () => unawaited(_open(target))
+            : null,
+        openBlocker:
+            !control ? translate("{$_hostName} hasn't granted control") : null,
+        onLaunchGame: instance.defaultPackage.isNotEmpty &&
+                !model.connecting &&
+                control
+            ? () => unawaited(_open(target, launchDefaultApp: true))
+            : null,
+        onStop: instance.provider == 'bluestacks' &&
+                (!stopped || _runningAsKnown(instance)) &&
+                model.emulatorShutdownCapability ==
+                    CapabilityStatus.supported &&
+                control
+            ? () => unawaited(_shutdownEmulator(target))
+            : null,
+        onReboot: control &&
+                model.canRebootEmulator(target.id,
+                    runningAsKnown: _runningAsKnown(instance))
+            ? () => unawaited(_rebootEmulator(target))
+            : null,
+        windowVisible: instance.windowVisible,
+        onToggleWindow: control && model.canShowOnPc(target.id)
+            ? () => unawaited(_toggleWindow(target))
+            : null,
+        onLabel: () => unawaited(_editLabel(target)),
+        shuttingDown: model.isEmulatorShuttingDown(target.id),
+      ),
+    );
+  }
+
+  Future<void> _editLabel(_Target target) async {
+    final instance = target.instance;
+    if (instance == null) return;
+    final label = await showEmulatorLabelSheet(context,
+        emulatorName: instance.name,
+        currentLabel: _labels.labelFor(target.id));
+    if (label == null || !mounted) return;
+    await _labels.setLabel(target.id, label);
+  }
+
+  /// The play rail's chips: Live and Starting emulators plus the open one,
+  /// in grid order, named by their labels.
+  List<PlayAccount> _playAccounts() => playRailAccounts([
+        for (final target in targets)
+          if (target.instance != null) _playAccount(_guestTile(target)),
+      ], currentId: _fullscreen?.id);
+
+  static PlayAccount _playAccount(EmulatorTileData tile) =>
+      PlayAccount(id: tile.id, label: tile.title, word: tile.state.word);
+
+  /// In a game: switches to emulator [id] (starting it if stopped). Ignored
+  /// for the open emulator and while another switch is under way, so a
+  /// second chip tap during a switch does nothing.
+  Future<void> _switchTo(String id) async {
+    if (!playRailCanSwitch(
+        id: id,
+        currentId: _fullscreen?.id,
+        connecting: model.connecting,
+        pending: _switchPending)) {
+      return;
+    }
+    final target = _targetById(id);
+    if (target == null || target.instance == null) return;
+    if (!_canControl) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+            content: Text(translate("{$_hostName} hasn't granted control"))));
+      return;
+    }
+    _switchPending = true;
+    try {
+      await _open(target);
+    } finally {
+      _switchPending = false;
     }
   }
 
-  Future<void> _newAvd() async {
-    final name = await showAvdNameSheet(context,
-        title: 'New emulator',
-        initialName: model.suggestAvdName('Emulator'),
-        note: 'Android 15 · 4 GB · 4 cores · about 12 GB on D after setup',
-        isTaken: _avdNameTaken);
-    if (name == null || !mounted) return;
-    _reportAvdResult(await model.createAvd(name));
-  }
-
-  Future<void> _cloneAvd(_Target target) async {
-    final raw = _avdRawName(target.id);
-    final name = await showAvdNameSheet(context,
-        title: 'Clone ${target.name}',
-        initialName: model.suggestAvdName('${raw}_copy'),
-        note: 'Exact copy, including Google and game sign-ins. The game will see it as the same device.',
-        isTaken: _avdNameTaken,
-        confirmLabel: 'Clone');
-    if (name == null || !mounted) return;
-    _reportAvdResult(await model.cloneAvd(target.id, name));
-  }
-
-  Future<void> _renameAvd(_Target target) async {
-    final raw = _avdRawName(target.id);
-    final name = await showAvdNameSheet(context,
-        title: 'Rename ${target.name}',
-        initialName: raw,
-        note: 'Only the name changes. The emulator keeps everything in it.',
-        isTaken: (candidate) => _avdNameTaken(candidate, except: target.id),
-        confirmLabel: 'Rename');
-    if (name == null || name == raw || !mounted) return;
-    _reportAvdResult(await model.renameAvd(target.id, name));
-  }
-
-  Future<void> _deleteAvd(_Target target) async {
-    if (!await confirmAvdDelete(context, target.name) || !mounted) return;
-    _reportAvdResult(await model.deleteAvd(target.id));
-  }
-
-  Future<void> _toggleAvdWindow(_Target target) async {
-    _reportAvdResult(await model.setAvdWindowVisible(
-        target.id, !(target.instance?.windowVisible ?? false)));
+  /// The menu's "+": every emulator as a tile. Tapping one switches to it,
+  /// starting it if it is stopped. No extra preview streams are requested
+  /// while a game is streaming; tiles show their state and any frame held.
+  Future<void> _chooseEmulator() async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) => FractionallySizedBox(
+        heightFactor: 0.85,
+        child: AnimatedBuilder(
+          animation: Listenable.merge([widget.ffi.imageModel, model, _labels]),
+          builder: (context, _) {
+            final guests = [
+              for (final target in targets)
+                if (target.instance != null) target,
+            ];
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                      MirpgRemoteTheme.pageMargin,
+                      0,
+                      MirpgRemoteTheme.pageMargin,
+                      MirpgRemoteTheme.rhythm),
+                  child: Text(translate('Emulators'),
+                      style: Theme.of(context).textTheme.titleMedium),
+                ),
+                Expanded(
+                  child: LayoutBuilder(builder: (context, constraints) {
+                    // Two columns; four in landscape so a row fits the sheet.
+                    final size = MediaQuery.sizeOf(context);
+                    final columns = size.width > size.height ? 4 : 2;
+                    const spacing = 12.0;
+                    final tileWidth = math.max(
+                        0.0,
+                        (constraints.maxWidth -
+                                2 * MirpgRemoteTheme.pageMargin -
+                                (columns - 1) * spacing) /
+                            columns);
+                    return GridView.builder(
+                      padding: const EdgeInsets.fromLTRB(
+                          MirpgRemoteTheme.pageMargin,
+                          0,
+                          MirpgRemoteTheme.pageMargin,
+                          MirpgRemoteTheme.pageMargin),
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: columns,
+                        mainAxisSpacing: spacing,
+                        crossAxisSpacing: spacing,
+                        mainAxisExtent: playTabTileExtent(
+                            tileWidth, MediaQuery.textScalerOf(context)),
+                      ),
+                      itemCount: guests.length,
+                      itemBuilder: (_, index) {
+                        final data = _guestTile(guests[index]);
+                        return EmulatorTile(
+                          data: data,
+                          onOpen: data.state.canOpen &&
+                                  _canControl &&
+                                  !model.connecting
+                              ? () => Navigator.of(sheetContext).pop(data.id)
+                              : null,
+                        );
+                      },
+                    );
+                  }),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    if (!mounted || picked == null) return;
+    await _switchTo(picked);
   }
 
   Future<void> _dashboard() async {
     await _releaseMonitorInput();
     await model.desktop();
     if (!mounted) return;
-    setState(() => _fullscreen = null);
+    // The list is not refreshed during a game; catch up on what was started
+    // or stopped meanwhile before the grid shows it.
+    if (!model.loading) unawaited(model.refresh());
+    setState(() {
+      _fullscreen = null;
+      _switchFrame?.dispose();
+      _switchFrame = null;
+    });
     _resetMonitorLivenessForCurrentTarget();
     _landscape = null;
     await SystemChrome.setPreferredOrientations(const []);
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _subscription = '';
     _subscribe();
+    unawaited(_maybeOfferPairing());
   }
 
   void _presentation() {
@@ -720,7 +1175,7 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     await _releaseMonitorInput();
     if (!mounted) return;
     _chooser = true;
-    _chooserStart = 0;
+    _chooserSize = Size.zero;
     _subscription = '';
     _subscribe();
     final selected = await showModalBottomSheet<_Target>(
@@ -731,32 +1186,34 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         heightFactor: 0.85,
         child: Column(children: [
           ListTile(
-            title: const Text('Switch view'),
+            title: Text(translate('Switch view')),
             trailing: IconButton(
-                tooltip: 'Dashboard',
+                tooltip: translate('Exit'),
                 icon: const Icon(Icons.grid_view_outlined),
                 onPressed: () =>
                     Navigator.of(sheetContext).pop(const _Target.dashboard())),
           ),
           Expanded(
-              child: PageView.builder(
-            itemCount: (targets.length / 2).ceil(),
-            onPageChanged: (page) {
-              _chooserStart = page * 2;
-              _subscription = '';
-              _subscribe();
-            },
-            itemBuilder: (_, page) => TargetSwitcherCards(
+              child: LayoutBuilder(builder: (_, box) {
+            if (box.biggest != _chooserSize) {
+              _chooserSize = box.biggest;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _subscription = '';
+                _subscribe();
+              });
+            }
+            return TargetSwitcherGrid(
+              controller: _chooserScroll,
               cards: [
-                for (final target in targets.skip(page * 2).take(2))
-                  _card(target, () => Navigator.of(sheetContext).pop(target))
+                for (final target in targets)
+                  target.instance == null
+                      ? _monitorCard(
+                          target, () => Navigator.of(sheetContext).pop(target))
+                      : _guestSwitcherTile(
+                          target, () => Navigator.of(sheetContext).pop(target))
               ],
-            ),
-          )),
-          if (targets.length > 4)
-            const Padding(
-                padding: EdgeInsets.all(12),
-                child: Text('Swipe for more views')),
+            );
+          })),
         ]),
       ),
     );
@@ -775,7 +1232,15 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    if (identical(widget.ffi.ffiModel.sessionReconnect, _sessionReconnect)) {
+      widget.ffi.ffiModel.sessionReconnect = null;
+    }
+    _sessionReconnect.dispose();
     model.removeListener(_changed);
+    _labels.removeListener(_labelsChanged);
+    _labels.dispose();
+    _switchFrame?.dispose();
+    _switchFrame = null;
     widget.ffi.ffiModel.removeListener(_changed);
     widget.ffi.qualityMonitorModel.removeListener(_qualityChanged);
     widget.ffi.aperturePairResult.removeListener(_pairResultChanged);
@@ -783,6 +1248,8 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     _refreshTimer?.cancel();
     _healthTimer?.cancel();
     _scroll.dispose();
+    _playScroll.dispose();
+    _chooserScroll.dispose();
     _monitorFocus.dispose();
     model.framePacer.focused = true;
     unawaited(model.setMonitorPreviewMode(false));
@@ -793,24 +1260,77 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
     super.dispose();
   }
 
+  /// The session is back after a drop: ask the PC for its list again and
+  /// reopen what was open. The tab is unchanged (this page stayed open), and a
+  /// stopped emulator is never started by this.
+  void _restoreAfterReconnect() {
+    // Peer info is still being applied when this is called.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _subscription = '';
+      unawaited(model.refresh());
+      final active = _fullscreen;
+      final restore = reconnectRestoreFor(
+        guestId: active?.instance != null ? active!.id : null,
+        display: active?.display,
+      );
+      switch (restore.kind) {
+        case ReconnectRestoreKind.guest:
+          unawaited(model.connect(restore.guestId!, startIfStopped: false));
+        case ReconnectRestoreKind.monitor:
+          unawaited(model.desktop());
+        case ReconnectRestoreKind.none:
+          break;
+      }
+      _subscribe();
+    });
+  }
+
+  /// The page with the "Reconnecting…" state over it.
   @override
   Widget build(BuildContext context) {
+    final body = _buildPage(context);
+    final inGame = _fullscreen != null;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        body,
+        ReconnectingBanner(
+          controller: _sessionReconnect,
+          // Over a game or monitor the bottom holds controls; over a tab the
+          // navigation bar does.
+          alignment: inGame ? Alignment.topCenter : Alignment.bottomCenter,
+          padding: EdgeInsets.fromLTRB(
+              16, inGame ? 56 : 16, 16, inGame ? 16 : 96),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPage(BuildContext context) {
     final active = _fullscreen;
     if (active?.instance != null) {
-      return Theme(
-        data: MirpgRemoteTheme.build(Theme.of(context)),
-        child: EmulatorPage(
-            ffi: widget.ffi,
-            dashboardMode: true,
-            onSwitch: _choose,
-            onReturn: _dashboard),
-      );
+      // The list refreshes, so read the emulator's current window state.
+      final current = _targetById(active!.id) ?? active;
+      final instance = current.instance!;
+      final offerShowOnPc =
+          model.canShowOnPc(instance.id) && !instance.windowVisible;
+      return EmulatorPage(
+          ffi: widget.ffi,
+          dashboardMode: true,
+          onSwitch: _chooseEmulator,
+          onReturn: _dashboard,
+          nameFor: (id) =>
+              _labels.displayName(id, _targetById(id)?.name ?? ''),
+          switchFrame: _switchFrame,
+          onShowOnPc: offerShowOnPc ? () => _toggleWindow(current) : null,
+          accounts: _playAccounts(),
+          onSelectTarget: _switchTo,
+          onCurrentActions: () => unawaited(_showEmulatorActions(current)),
+          alreadyRunning: _alreadyRunning);
     }
     if (active?.display != null) {
-      return Theme(
-        data: MirpgRemoteTheme.build(Theme.of(context)),
-        child: _monitor(active!),
-      );
+      return _monitor(active!);
     }
     final pi = widget.ffi.ffiModel.pi;
     final filesAvailable = widget.ffi.ffiModel.permissions['file'] != false;
@@ -818,38 +1338,55 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
         pi.platform == kPeerPlatformWindows && pi.features.terminal;
     final hostManagementAvailable =
         pi.platform == kPeerPlatformWindows && pi.features.hostManagement;
-    final sections = <_ConnectedPcSection>[
-      _ConnectedPcSection.devices,
-      _ConnectedPcSection.screens,
-      _ConnectedPcSection.tools,
-      if (hostManagementAvailable) _ConnectedPcSection.system,
-      if (filesAvailable) _ConnectedPcSection.files,
-      if (powershellAvailable) _ConnectedPcSection.powershell,
+    final sections = <ConnectedPcSection>[
+      ConnectedPcSection.screens,
+      ConnectedPcSection.devices,
+      ConnectedPcSection.pc,
+      if (hostManagementAvailable) ConnectedPcSection.system,
+      if (filesAvailable) ConnectedPcSection.files,
+      if (powershellAvailable) ConnectedPcSection.powershell,
     ];
-    final activeSection =
-        sections.contains(_section) ? _section : _ConnectedPcSection.devices;
+    final activeSection = sections.contains(_section)
+        ? _section
+        : kConnectedPcInitialSection;
     final sectionIndex = sections.indexOf(activeSection);
-    final navigationIndex = switch (activeSection) {
-      _ConnectedPcSection.devices => 0,
-      _ConnectedPcSection.screens => 1,
-      _ => 2,
-    };
-    final hostName = pi.hostname.isEmpty ? 'Your PC' : pi.hostname;
-    final studioTheme = MirpgRemoteTheme.build(Theme.of(context));
+    final navigationIndex = connectedPcNavigationIndex(activeSection);
+    final hostName = _hostName;
+    final root = activeSection == kConnectedPcInitialSection;
+    final subPage = activeSection == ConnectedPcSection.system ||
+        activeSection == ConnectedPcSection.files ||
+        activeSection == ConnectedPcSection.powershell;
+    final theme = Theme.of(context);
     final connToken = bind.sessionGetConnToken(sessionId: widget.ffi.sessionId);
     final pages = <Widget>[
-      _homeBody(),
-      _devicesBody(),
-      _toolsBody(
-        hostManagementAvailable: hostManagementAvailable,
-        filesAvailable: filesAvailable,
-        powershellAvailable: powershellAvailable,
+      _screensBody(hostName),
+      _homeBody(hostName),
+      PcTabBody(
+        onSystem: hostManagementAvailable
+            ? () => _openToolsSection(ConnectedPcSection.system)
+            : null,
+        onFiles: filesAvailable
+            ? () => _openToolsSection(ConnectedPcSection.files)
+            : null,
+        onPowerShell: powershellAvailable
+            ? () => _openToolsSection(ConnectedPcSection.powershell)
+            : null,
+        onQuality: () => unawaited(_showQualityConnection()),
+        onPrivacy: () => unawaited(showPrivacyControlsSheet(
+          context,
+          ffi: widget.ffi,
+        )),
+        pairingState: _pairingState,
+        onTrustPhone: () => unawaited(_trustThisPhone()),
+        onForgetPairing: () => unawaited(_forgetPairing()),
+        onSettings: _openSettings,
+        onEndSession: () => clientClose(widget.ffi.sessionId, widget.ffi),
       ),
       if (hostManagementAvailable)
         _systemOpened
             ? HostManagementPage(
                 model: model,
-                active: activeSection == _ConnectedPcSection.system,
+                active: activeSection == ConnectedPcSection.system,
                 canControl: widget.ffi.ffiModel.keyboard &&
                     !widget.ffi.ffiModel.viewOnly,
               )
@@ -879,158 +1416,128 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
         handleConnectedPcWorkspaceBack(
-          atOverview: activeSection == _ConnectedPcSection.devices,
+          atOverview: connectedPcBackTarget(activeSection) == null,
           onReturnToOverview: () => setState(() {
-            _section = switch (activeSection) {
-              _ConnectedPcSection.system ||
-              _ConnectedPcSection.files ||
-              _ConnectedPcSection.powershell => _ConnectedPcSection.tools,
-              _ => _ConnectedPcSection.devices,
-            };
+            _section = connectedPcBackTarget(activeSection) ??
+                kConnectedPcInitialSection;
             _subscription = '';
             _subscribe();
           }),
           onStayConnected: _showSessionStillConnected,
         );
       },
-      child: Theme(
-        data: studioTheme,
-        child: Scaffold(
-          appBar: AppBar(
-            automaticallyImplyLeading: false,
-            leadingWidth: 64,
-            leading: activeSection == _ConnectedPcSection.devices
-                ? Padding(
-                    padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8),
-                    child: const ApertureBrandMark(),
-                  )
-                : IconButton(
-                    tooltip: 'Back',
-                    icon: const Icon(Icons.arrow_back_rounded),
-                    onPressed: () => setState(() {
-                      _section = switch (activeSection) {
-                        _ConnectedPcSection.system ||
-                        _ConnectedPcSection.files ||
-                        _ConnectedPcSection.powershell => _ConnectedPcSection.tools,
-                        _ => _ConnectedPcSection.devices,
-                      };
-                      _subscription = '';
-                      _subscribe();
-                    }),
-                  ),
-            titleSpacing: 10,
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
+      child: Scaffold(
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          leadingWidth: 56,
+          leading: activeSection == kConnectedPcInitialSection
+              ? Padding(
+                  padding: const EdgeInsets.only(left: 16, top: 10, bottom: 10),
+                  child: const ApertureBrandMark(size: 36),
+                )
+              : IconButton(
+                  tooltip: 'Back',
+                  icon: const Icon(Icons.arrow_back_rounded),
+                  onPressed: () => setState(() {
+                    _section = connectedPcBackTarget(activeSection) ??
+                        kConnectedPcInitialSection;
+                    _subscription = '';
+                    _subscribe();
+                  }),
+                ),
+          titleSpacing: 10,
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                switch (activeSection) {
+                  ConnectedPcSection.devices ||
+                  ConnectedPcSection.screens ||
+                  ConnectedPcSection.pc => hostDisplayName(hostName),
+                  ConnectedPcSection.system => 'System',
+                  ConnectedPcSection.files => 'Files',
+                  ConnectedPcSection.powershell => 'PowerShell',
+                },
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (!root)
                 Text(
                   switch (activeSection) {
-                    _ConnectedPcSection.devices => ApertureBrand.name,
-                    _ConnectedPcSection.screens => 'All screens',
-                    _ConnectedPcSection.tools => 'Tools',
-                    _ConnectedPcSection.system => 'System',
-                    _ConnectedPcSection.files => 'Files',
-                    _ConnectedPcSection.powershell => 'PowerShell',
+                    ConnectedPcSection.devices => translate('Play'),
+                    ConnectedPcSection.pc => translate('PC'),
+                    _ => hostDisplayName(hostName),
                   },
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelMedium,
                 ),
-                Text(
-                  activeSection == _ConnectedPcSection.devices
-                      ? widget.ffi.ffiModel.direct == null
-                          ? 'Connecting'
-                          : widget.ffi.ffiModel.direct!
-                              ? 'Direct connection'
-                              : 'Relay connection'
-                      : hostName,
-                  style: studioTheme.textTheme.labelSmall,
-                ),
-              ],
-            ),
-            actions: [
-              if (MediaQuery.sizeOf(context).width >= 480)
-                SessionStatusButton(
-                  direct: widget.ffi.ffiModel.direct,
-                  data: widget.ffi.qualityMonitorModel.data,
-                  now: DateTime.now(),
-                  onPressed: () => unawaited(_showQualityConnection()),
-                ),
-              if (activeSection == _ConnectedPcSection.devices ||
-                  activeSection == _ConnectedPcSection.screens)
-                IconButton(
-                    tooltip: 'Refresh views',
-                    icon: const Icon(Icons.refresh),
-                    onPressed: model.loading
-                        ? null
-                        : () {
-                            _subscription = '';
-                            unawaited(model.refresh());
-                          }),
-              if (activeSection == _ConnectedPcSection.system)
-                IconButton(
-                    tooltip: 'Refresh system status',
-                    icon: const Icon(Icons.refresh),
-                    onPressed: model.hostLoading
-                        ? null
-                        : () => unawaited(model.refreshHost())),
-              ConnectedPcSessionMenu(
-                onQualityConnection: () => unawaited(_showQualityConnection()),
-                onPrivacyControls: () => unawaited(showPrivacyControlsSheet(
-                  context,
-                  ffi: widget.ffi,
-                )),
-                pairingState: _pairingState,
-                onTrustPhone: () => unawaited(_trustThisPhone()),
-                onForgetPairing: () => unawaited(_forgetPairing()),
-                onSettings: _openSettings,
-                onEndSession: () =>
-                    clientClose(widget.ffi.sessionId, widget.ffi),
-              ),
             ],
           ),
-          body: IndexedStack(
-            index: sectionIndex,
-            children: pages,
-          ),
-          bottomNavigationBar: ConnectedPcTabBar(
-            currentIndex: navigationIndex,
-            filesAvailable: filesAvailable,
-            hostManagementAvailable: hostManagementAvailable,
-            powershellAvailable: powershellAvailable,
-            onDestinationSelected: (index) {
-              final selected = switch (index) {
-                0 => _ConnectedPcSection.devices,
-                1 => _ConnectedPcSection.screens,
-                2 => _ConnectedPcSection.tools,
-                _ => activeSection,
-              };
-              if (selected == activeSection) return;
-              setState(() {
-                _section = selected;
-                if (selected == _ConnectedPcSection.system) {
-                  _systemOpened = true;
-                }
-                if (selected == _ConnectedPcSection.files) _filesOpened = true;
-                if (selected == _ConnectedPcSection.powershell) {
-                  _powershellOpened = true;
-                }
-              });
-              _subscribe();
-            },
-          ),
+          actions: [
+            // The status pill is on every tab and sub-page (compact on
+            // narrow phones).
+            // Play refreshes by pulling the grid down; Screens has nothing to
+            // refresh (monitors come with the connection).
+            if (activeSection == ConnectedPcSection.system)
+              IconButton(
+                  tooltip: 'Refresh system status',
+                  icon: const Icon(Icons.refresh),
+                  onPressed: model.hostLoading
+                      ? null
+                      : () => unawaited(model.refreshHost())),
+            Padding(
+              padding: const EdgeInsets.only(right: MirpgRemoteTheme.pageMargin),
+              child: SessionStatusButton(
+                compact: MediaQuery.sizeOf(context).width < 480,
+                direct: widget.ffi.ffiModel.direct,
+                data: widget.ffi.qualityMonitorModel.data,
+                now: DateTime.now(),
+                onPressed: () => unawaited(_showQualityConnection()),
+              ),
+            ),
+          ],
         ),
+        body: IndexedStack(
+          index: sectionIndex,
+          children: pages,
+        ),
+        // System, Files and PowerShell look like pushed pages (back arrow,
+        // no tab bar) but stay in the IndexedStack so their sessions survive.
+        bottomNavigationBar: subPage
+            ? null
+            : ConnectedPcTabBar(
+              currentIndex: navigationIndex,
+              filesAvailable: filesAvailable,
+              hostManagementAvailable: hostManagementAvailable,
+              powershellAvailable: powershellAvailable,
+              onDestinationSelected: (index) {
+                final selected =
+                    connectedPcSectionForIndex(index) ?? activeSection;
+                if (selected == activeSection) return;
+                setState(() {
+                  _section = selected;
+                  if (selected == ConnectedPcSection.system) {
+                    _systemOpened = true;
+                  }
+                  if (selected == ConnectedPcSection.files) _filesOpened = true;
+                  if (selected == ConnectedPcSection.powershell) {
+                    _powershellOpened = true;
+                  }
+                });
+                _subscribe();
+              },
+            ),
       ),
     );
   }
 
   void _openSettings() {
     Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (routeContext) => Theme(
-        data: MirpgRemoteTheme.build(Theme.of(routeContext)),
-        child: Scaffold(
-          appBar: AppBar(title: const Text('Settings')),
-          body: SettingsPage(),
-        ),
+      builder: (routeContext) => Scaffold(
+        appBar: AppBar(title: const Text('Settings')),
+        body: SettingsPage(),
       ),
     ));
   }
@@ -1038,584 +1545,164 @@ class _TargetDashboardPageState extends State<TargetDashboardPage>
   void _showSessionStillConnected() {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(
-        content:
-            Text('Session still connected. Use the session menu to end it.'),
+      ..showSnackBar(SnackBar(
+        content: Text(translate('Session still connected. End it from the PC tab.')),
         duration: Duration(seconds: 2),
       ));
   }
 
-  void _openToolsSection(_ConnectedPcSection section) {
+  void _openToolsSection(ConnectedPcSection section) {
     setState(() {
       _section = section;
-      if (section == _ConnectedPcSection.system) _systemOpened = true;
-      if (section == _ConnectedPcSection.files) _filesOpened = true;
-      if (section == _ConnectedPcSection.powershell) _powershellOpened = true;
+      if (section == ConnectedPcSection.system) _systemOpened = true;
+      if (section == ConnectedPcSection.files) _filesOpened = true;
+      if (section == ConnectedPcSection.powershell) _powershellOpened = true;
     });
     _subscription = '';
     _subscribe();
   }
 
-  Widget _homeBody() {
-    // The page is constructed above the nested Studio theme in build().
-    // Resolve its text styles from a descendant context after it mounts.
-    return Builder(builder: (context) {
-      final monitors = targets.where((target) => target.display != null).toList();
-      final guests = targets.where((target) => target.instance != null).toList();
-      return CustomScrollView(
-      slivers: [
-        if (model.error.isNotEmpty)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-              child: MirpgSurface(
-                child: Row(children: [
-                  Icon(Icons.info_outline_rounded,
-                      color: MirpgStudioPalette.of(context).error),
-                  const SizedBox(width: 10),
-                  Expanded(child: Text(model.error)),
-                  IconButton(
-                    tooltip: 'Retry discovery',
-                    onPressed: () => unawaited(model.refresh()),
-                    icon: const Icon(Icons.refresh_rounded),
-                  ),
-                ]),
-              ),
-            ),
-          ),
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 12, 8),
-            child: Row(children: [
-              Expanded(
-                  child: Text('Continue working',
-                      style: Theme.of(context).textTheme.titleMedium)),
-              TextButton.icon(
-                onPressed: () => _openToolsSection(_ConnectedPcSection.screens),
-                iconAlignment: IconAlignment.end,
-                icon: const Icon(Icons.arrow_forward, size: 17),
-                label: const Text('ALL SCREENS'),
-              ),
-            ]),
-          ),
-        ),
-        if (monitors.isNotEmpty)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-              child: SizedBox(
-                height: 235,
-                child: _card(monitors.first, () => unawaited(_open(monitors.first))),
-              ),
-            ),
-          ),
-        if (guests.isNotEmpty) ...[
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 14, 12, 8),
-              child: Row(children: [
-                Expanded(
-                  child: Text('Android instances',
-                      style: Theme.of(context).textTheme.titleMedium),
-                ),
-                TextButton.icon(
-                  onPressed: () => _openToolsSection(_ConnectedPcSection.screens),
-                  iconAlignment: IconAlignment.end,
-                  icon: const Icon(Icons.arrow_forward, size: 17),
-                  label: const Text('VIEW ALL'),
-                ),
-              ]),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: SizedBox(
-              height: 218,
-              child: LayoutBuilder(builder: (context, constraints) {
-                // Keep both Android cards entirely visible on phone widths.
-                final cardWidth = math.min(240.0,
-                    math.max(0.0, (constraints.maxWidth - 52) / 2));
-                return ListView.separated(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  scrollDirection: Axis.horizontal,
-                  itemCount: math.min(guests.length, 2),
-                  separatorBuilder: (_, __) => const SizedBox(width: 12),
-                  itemBuilder: (_, index) {
-                    final target = guests[index];
-                    return SizedBox(
-                      width: cardWidth,
-                      child: _card(target, () => unawaited(_open(target))),
-                    );
-                  },
-                );
-              }),
-            ),
-          ),
-        ],
-        if (monitors.isEmpty && guests.isEmpty)
-          const SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.all(20),
-              child: MirpgSurface(
-                child: Text('No screens found yet. Refresh to discover the PC and BlueStacks instances.'),
-              ),
-            ),
-          ),
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-            child: Text(
-              '${monitors.length} Windows displays · ${guests.length} BlueStacks instances',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-        ),
-      ],
+  /// Keeps the pull-to-refresh spinner until the PC answers the list request
+  /// (the model's own 25 s list timeout ends it at the latest).
+  Future<void> _pullToRefresh() async {
+    _subscription = '';
+    // A list already in flight (the 10 s refresh) is awaited, not repeated.
+    if (!model.loading) await model.refresh();
+    if (!mounted || !model.loading) return;
+    final done = Completer<void>();
+    void check() {
+      if (!model.loading && !done.isCompleted) done.complete();
+    }
+
+    model.addListener(check);
+    try {
+      await done.future
+          .timeout(const Duration(seconds: 30), onTimeout: () {});
+    } finally {
+      model.removeListener(check);
+    }
+  }
+
+  /// Play: every emulator as a tile.
+  Widget _homeBody(String hostName) {
+    return LayoutBuilder(builder: (context, constraints) {
+      final rowExtent = playTabRowExtent(
+          constraints.maxWidth, MediaQuery.textScalerOf(context));
+      if (rowExtent != _playRowExtent) {
+        _playRowExtent = rowExtent;
+        WidgetsBinding.instance.addPostFrameCallback((_) => _subscribe());
+      }
+      return AnimatedBuilder(
+        animation: Listenable.merge([widget.ffi.imageModel, model, _labels]),
+        builder: (context, _) {
+          final tiles = _playTiles();
+          return PlayTabBody(
+            tiles: tiles,
+            hostName: hostName,
+            firstLoad: !_listSeen && tiles.isEmpty,
+            listError: model.listError,
+            scrollController: _playScroll,
+            onRefresh: _pullToRefresh,
+            onRetryList: () {
+              _subscription = '';
+              unawaited(model.refresh());
+            },
+            onOpen: _openGuest,
+            onMore: _showGuestActions,
+          );
+        },
       );
     });
   }
 
-  Widget _toolsBody({
-    required bool hostManagementAvailable,
-    required bool filesAvailable,
-    required bool powershellAvailable,
-  }) {
-    return Builder(builder: (context) {
-      final items = <Widget>[
-      if (hostManagementAvailable)
-        ListTile(
-          leading: const Icon(Icons.monitor_heart_outlined),
-          title: const Text('System and host'),
-          subtitle: const Text('PC status, processes and host controls'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _openToolsSection(_ConnectedPcSection.system),
+  /// Screens: one card per PC monitor, nothing else.
+  Widget _screensBody(String hostName) {
+    final displays = widget.ffi.ffiModel.pi.displays;
+    ScreensTabCard cardFor(int index) {
+      final display = displays[index];
+      return ScreensTabCard(
+        aspectRatio: display.width > 0 && display.height > 0
+            ? display.width / display.height
+            : 16 / 9,
+        child: _monitorCard(
+          _Target.monitor(index),
+          () => unawaited(_open(_Target.monitor(index))),
+          windows: () => unawaited(_monitorWindows(index)),
         ),
-      if (filesAvailable)
-        ListTile(
-          leading: const Icon(Icons.folder_outlined),
-          title: const Text('Files'),
-          subtitle: const Text('Browse and transfer files'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _openToolsSection(_ConnectedPcSection.files),
-        ),
-      if (powershellAvailable)
-        ListTile(
-          leading: const Icon(Icons.terminal_outlined),
-          title: const Text('PowerShell'),
-          subtitle: const Text('Open the authenticated remote terminal'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _openToolsSection(_ConnectedPcSection.powershell),
-        ),
-      ListTile(
-        leading: const Icon(Icons.network_check_outlined),
-        title: const Text('Quality and connection'),
-        subtitle: const Text('Direct or relay route, latency and stream health'),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: () => unawaited(_showQualityConnection()),
-      ),
-      ListTile(
-        leading: const Icon(Icons.settings_outlined),
-        title: const Text('Appearance and settings'),
-        subtitle: const Text('System, light or dark mode and more'),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: _openSettings,
-      ),
-    ];
-      return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        const MirpgSectionHeader(
-          title: 'Workspace tools',
-          subtitle: 'Manage Jarvis without leaving your connection.',
-        ),
-        const SizedBox(height: 20),
-        MirpgSurface(
-          padding: EdgeInsets.zero,
-          child: Column(children: [
-            for (var i = 0; i < items.length; i++) ...[
-              items[i],
-              if (i < items.length - 1) const Divider(height: 1),
-            ],
-          ]),
-        ),
-      ],
+      );
+    }
+
+    return LayoutBuilder(builder: (context, constraints) {
+      final cards = [for (var i = 0; i < displays.length; i++) cardFor(i)];
+      final cardWidth = math.max(
+          0.0, constraints.maxWidth - 2 * MirpgRemoteTheme.pageMargin);
+      final extents = [
+        for (final card in cards)
+          screensTabCardExtent(
+              cardWidth, card.aspectRatio, MediaQuery.textScalerOf(context))
+      ];
+      if (!listEquals(extents, _screensExtents)) {
+        _screensExtents = extents;
+        WidgetsBinding.instance.addPostFrameCallback((_) => _subscribe());
+      }
+      return ScreensTabBody(
+        cards: cards,
+        hostName: hostName,
+        scrollController: _scroll,
+        tr: translate,
       );
     });
   }
 
-  Widget _devicesBody() {
-    return Builder(builder: (context) {
-      final palette = MirpgStudioPalette.of(context);
-      final desktopTargets = targets
-        .where((target) => target.display != null)
-        .toList(growable: false);
-    final androidTargets = targets
-        .where((target) => target.instance != null)
-        .toList(growable: false);
-      return Column(children: [
-      Expanded(child: LayoutBuilder(builder: (context, box) {
-        // Compact V4 screen rows make both monitors and multiple emulators
-        // accessible without scrolling through full-size video cards.
-        const columns = 1;
-        const extent = 100.0;
-        if (_viewport != box.maxHeight ||
-            _extent != extent ||
-            _columns != columns) {
-          _viewport = box.maxHeight;
-          _extent = extent;
-          _columns = columns;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            _subscription = '';
-            _subscribe();
-          });
-        }
-        final slivers = <Widget>[
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
-              child: MirpgSectionHeader(
-                title: 'All screens',
-                subtitle: '${targets.length} available targets · Windows and Android',
-                trailing: model.loading
-                    ? const SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : MirpgStatusChip(
-                        label: switch (widget.ffi.ffiModel.direct) {
-                          true => 'Direct',
-                          false => 'Relay',
-                          null => 'Connecting',
-                        },
-                        tone: widget.ffi.ffiModel.direct == true
-                            ? MirpgStatusTone.good
-                            : MirpgStatusTone.neutral,
-                      ),
-              ),
-            ),
-          ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-              child: MirpgSurface(
-                padding: const EdgeInsets.all(4),
-                child: Row(children: [
-                  for (final filter in _ScreenFilter.values)
-                    Expanded(
-                      child: Semantics(
-                        button: true,
-                        selected: _screenFilter == filter,
-                        label: switch (filter) {
-                          _ScreenFilter.all => 'Show all screens',
-                          _ScreenFilter.windows => 'Show Windows screens',
-                          _ScreenFilter.android => 'Show Android screens',
-                        },
-                        child: Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(12),
-                            onTap: () {
-                              if (_screenFilter == filter) return;
-                              setState(() => _screenFilter = filter);
-                              if (_scroll.hasClients) _scroll.jumpTo(0);
-                              _subscription = '';
-                              _subscribe();
-                            },
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 160),
-                              alignment: Alignment.center,
-                              constraints: const BoxConstraints(minHeight: 48),
-                              padding: const EdgeInsets.symmetric(horizontal: 4),
-                              decoration: BoxDecoration(
-                                color: _screenFilter == filter
-                                    ? palette.accent.withOpacity(0.14)
-                                    : Colors.transparent,
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                switch (filter) {
-                                  _ScreenFilter.all => 'All (${targets.length})',
-                                  _ScreenFilter.windows => 'Windows',
-                                  _ScreenFilter.android => 'Android',
-                                },
-                                textAlign: TextAlign.center,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                                      color: _screenFilter == filter
-                                          ? palette.accent
-                                          : palette.textSecondary,
-                                    ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ]),
-              ),
-            ),
-          ),
-          if (model.error.isNotEmpty)
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                child: MirpgSurface(
-                  color: palette.error.withOpacity(0.08),
-                  borderColor: palette.error.withOpacity(0.45),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(Icons.error_outline, color: palette.error),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('Needs your attention',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleSmall
-                                    ?.copyWith(color: palette.error)),
-                            const SizedBox(height: 4),
-                            Text(model.error,
-                                style: Theme.of(context).textTheme.bodySmall),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-        ];
-
-        void addTargetGroup(
-            String title, String subtitle, List<_Target> group,
-            {Widget? trailing}) {
-          if (group.isEmpty && trailing == null) return;
-          slivers.add(SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-              child: MirpgSectionHeader(
-                  title: title, subtitle: subtitle, trailing: trailing),
-            ),
-          ));
-          slivers.add(SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            sliver: SliverList(
-              delegate: SliverChildBuilderDelegate((_, index) {
-                final target = group[index];
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: _card(target, () => unawaited(_open(target)), row: true),
-                );
-              }, childCount: group.length),
-            ),
-          ));
-        }
-
-        if (_screenFilter != _ScreenFilter.android) {
-          addTargetGroup(
-            'Windows · ${desktopTargets.length}',
-            'Live PC monitors',
-            desktopTargets,
-          );
-        }
-        if (_screenFilter != _ScreenFilter.windows) {
-          addTargetGroup(
-            'Android · ${androidTargets.length}',
-            'BlueStacks instances and boot controls',
-            androidTargets,
-            trailing: model.canManageAvds
-                ? TextButton.icon(
-                    onPressed: () => unawaited(_newAvd()),
-                    icon: const Icon(Icons.add, size: 18),
-                    label: const Text('New'),
-                  )
-                : null,
-          );
-        }
-
-        if (targets.isEmpty ||
-            (_screenFilter == _ScreenFilter.android && androidTargets.isEmpty) ||
-            (_screenFilter == _ScreenFilter.windows && desktopTargets.isEmpty)) {
-          slivers.add(SliverFillRemaining(
-            hasScrollBody: false,
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: MirpgSurface(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.devices_outlined,
-                          size: 36, color: palette.textSecondary),
-                      const SizedBox(height: 12),
-                      Text('No views available',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Refresh after a Windows display or BlueStacks instance becomes available.',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ));
-        }
-
-        return CustomScrollView(
-          controller: _scroll,
-          slivers: slivers,
-        );
-      })),
-      ]);
-    });
-  }
-
-  Widget _card(_Target target, VoidCallback onOpen, {bool row = false}) =>
+  /// A PC monitor as a preview card, on Screens (with [windows]) or in the
+  /// view switcher.
+  Widget _monitorCard(_Target target, VoidCallback onOpen,
+          {VoidCallback? windows}) =>
       AnimatedBuilder(
         animation: Listenable.merge([widget.ffi.imageModel, model]),
         builder: (_, __) {
-          final preview = model.previews[target.id];
-          final activeGuest = _fullscreen?.id == target.id &&
-              model.targetId == target.id &&
-              model.streaming;
-          final channel = target.display ??
-              (activeGuest ? model.videoChannel : preview?.channel);
-          final image = channel == null
-              ? null
-              : widget.ffi.imageModel.dashboardImage(channel);
-          final stopped = target.instance?.state == 'stopped';
-          final shuttingDown = target.instance != null && model.isEmulatorShuttingDown(target.id);
-          final shutdownFailed = target.instance?.state == 'shutdown_failed';
-          final shutdownAction = target.instance?.provider == 'bluestacks' && !stopped &&
-                  model.emulatorShutdownCapability == CapabilityStatus.supported &&
-                  widget.ffi.ffiModel.keyboard && !widget.ffi.ffiModel.viewOnly
-              ? () => unawaited(_shutdownEmulator(target)) : null;
-          final instance = target.instance;
-          final cloning = instance?.state == 'cloning';
-          final avdActions = instance != null &&
-                  instance.provider == 'avd' &&
-                  model.canManageAvds &&
-                  widget.ffi.ffiModel.keyboard &&
-                  !widget.ffi.ffiModel.viewOnly
-              ? AvdCardActions(
-                  cloningLabel: cloning ? instance.runtimeLabel : null,
-                  running: !stopped && !cloning,
-                  windowVisible: instance.windowVisible,
-                  blocker: model.avdActionBlocker(target.id, 'avd_delete'),
-                  onToggleWindow: () => unawaited(_toggleAvdWindow(target)),
-                  onStop: model.canShutdownEmulator(target.id)
-                      ? () => unawaited(_shutdownEmulator(target))
-                      : null,
-                  onClone: () => unawaited(_cloneAvd(target)),
-                  onRename: () => unawaited(_renameAvd(target)),
-                  onDelete: () => unawaited(_deleteAvd(target)),
-                )
-              : null;
-          final updatedAt = channel == null
-              ? null
-              : widget.ffi.imageModel.dashboardImageUpdatedAt(channel);
+          final display = target.display!;
+          final image = widget.ffi.imageModel.dashboardImage(display);
+          final updatedAt =
+              widget.ffi.imageModel.dashboardImageUpdatedAt(display);
           final frameAge =
               updatedAt == null ? null : DateTime.now().difference(updatedAt);
-          final guestFrameCurrent = image != null &&
+          final live = image != null &&
               frameAge != null &&
               !frameAge.isNegative &&
               frameAge < const Duration(seconds: 8) &&
-              (activeGuest
-                  ? model.guestFrameFresh
-                  : preview?.state == 'streaming' &&
-                      model.previewsAcknowledged &&
-                      widget.ffi.imageModel
-                              .dashboardImagePreviewRequest(channel!) ==
-                          model.previewRequest);
-          final monitorFrameCurrent = target.display != null &&
-              image != null &&
-              frameAge != null &&
-              !frameAge.isNegative &&
-              frameAge < const Duration(seconds: 8) &&
-              _monitorPreviewFrameIsCurrent(target.display!);
-          final live = !shutdownFailed && (target.display != null
-              ? monitorFrameCurrent
-              : guestFrameCurrent);
-          final streamDisconnected = !stopped && !shuttingDown && !shutdownFailed &&
-              !live &&
-              target.instance != null &&
-              (preview?.state == 'failed' ||
-                  model.guestFailures.containsKey(target.id));
-          final streamStalled = !stopped && !shuttingDown && !shutdownFailed &&
-              !live &&
-              target.instance != null &&
-              preview?.state == 'streaming' &&
-              !streamDisconnected;
-          final type = target.display != null
-              ? 'Windows'
-              : 'Android ${target.instance!.androidVersion}';
-          final error = shutdownFailed ? target.instance!.error : preview?.error.isNotEmpty == true
-              ? preview!.error
-              : (streamDisconnected
-                  ? model.guestFailures[target.id] ?? ''
-                  : target.instance?.error ?? '');
-          // A managed emulator's last failure (e.g. a copy of it that failed).
-          final stoppedNote =
-              stopped && instance?.provider == 'avd' ? instance!.error : '';
-          final openAction = model.connecting || cloning ||
-                  (target.instance != null &&
-                      (!widget.ffi.ffiModel.keyboard ||
-                          widget.ffi.ffiModel.viewOnly))
-              ? null
-              : onOpen;
-          final launchAction = target.instance?.defaultPackage.isNotEmpty == true &&
-                  !model.connecting &&
-                  widget.ffi.ffiModel.keyboard &&
-                  !widget.ffi.ffiModel.viewOnly
-              ? () => unawaited(_open(target, launchDefaultApp: true))
+              _monitorPreviewFrameIsCurrent(display);
+          final info = display < widget.ffi.ffiModel.pi.displays.length
+              ? widget.ffi.ffiModel.pi.displays[display]
               : null;
-          void retry() {
-            _subscription = '';
-            _subscribe();
-          }
-          if (row) {
-            return TargetScreenRow(
-              name: target.name,
-              type: type,
-              stopped: stopped,
-              live: live,
-              streamDisconnected: streamDisconnected,
-              streamStalled: streamStalled,
-              image: image,
-              error: error,
-              onOpen: openAction,
-              onLaunchGame: launchAction,
-              onRetry: retry,
-              onShutdown: shutdownAction,
-              shuttingDown: shuttingDown,
-              stoppedNote: stoppedNote,
-              avd: avdActions,
-            );
-          }
           return TargetPreviewCard(
             name: target.name,
-            type: type,
-            stopped: stopped,
+            detail: info == null || info.width <= 0 || info.height <= 0
+                ? ''
+                : '${info.width} × ${info.height}',
             live: live,
-            instanceState: target.instance?.runtimeLabel ?? '',
-            streamDisconnected: streamDisconnected,
-            streamStalled: streamStalled,
             image: image,
-            error: error,
-            onOpen: openAction,
-            onLaunchGame: launchAction,
-            onRetry: retry,
-            onShutdown: shutdownAction,
-            shuttingDown: shuttingDown,
-            stoppedNote: stoppedNote,
-            avd: avdActions,
+            onOpen: model.connecting ? null : onOpen,
+            onRetry: () {
+              _subscription = '';
+              _subscribe();
+            },
+            onWindows: windows,
+          );
+        },
+      );
+
+  /// An emulator in the view switcher; tapping picks it.
+  Widget _guestSwitcherTile(_Target target, VoidCallback onPick) =>
+      AnimatedBuilder(
+        animation: Listenable.merge([widget.ffi.imageModel, model, _labels]),
+        builder: (_, __) {
+          final data = _guestTile(target);
+          return EmulatorTile(
+            data: data,
+            onOpen: data.state.canOpen && _canControl && !model.connecting
+                ? onPick
+                : null,
           );
         },
       );
@@ -2108,6 +2195,7 @@ class ConnectedPcTabBar extends StatelessWidget {
     this.hostManagementAvailable = false,
     this.powershellAvailable = false,
     required this.onDestinationSelected,
+    this.tr = translate,
   });
 
   final int currentIndex;
@@ -2115,24 +2203,25 @@ class ConnectedPcTabBar extends StatelessWidget {
   final bool hostManagementAvailable;
   final bool powershellAvailable;
   final ValueChanged<int> onDestinationSelected;
+  final String Function(String) tr;
 
   @override
   Widget build(BuildContext context) {
     final destinations = <NavigationDestination>[
-      const NavigationDestination(
-        icon: Icon(Icons.home_outlined),
-        selectedIcon: Icon(Icons.home_rounded),
-        label: 'Home',
+      NavigationDestination(
+        icon: const Icon(Icons.layers_outlined),
+        selectedIcon: const Icon(Icons.layers_rounded),
+        label: tr('Screens'),
       ),
-      const NavigationDestination(
-        icon: Icon(Icons.layers_outlined),
-        selectedIcon: Icon(Icons.layers_rounded),
-        label: 'Screens',
+      NavigationDestination(
+        icon: const Icon(Icons.sports_esports_outlined),
+        selectedIcon: const Icon(Icons.sports_esports_rounded),
+        label: tr('Play'),
       ),
-      const NavigationDestination(
-        icon: Icon(Icons.tune_outlined),
-        selectedIcon: Icon(Icons.tune_rounded),
-        label: 'Tools',
+      NavigationDestination(
+        icon: const Icon(Icons.computer_outlined),
+        selectedIcon: const Icon(Icons.computer_rounded),
+        label: tr('PC'),
       ),
     ];
     if (destinations.length <= 1) return const SizedBox.shrink();
@@ -2142,114 +2231,6 @@ class ConnectedPcTabBar extends StatelessWidget {
       destinations: destinations,
     );
   }
-}
-
-enum _ConnectedPcSessionAction {
-  qualityConnection,
-  privacyControls,
-  trustPhone,
-  forgetPairing,
-  settings,
-  endSession,
-}
-
-class ConnectedPcSessionMenu extends StatelessWidget {
-  const ConnectedPcSessionMenu({
-    super.key,
-    this.onQualityConnection,
-    this.onPrivacyControls,
-    this.pairingState = '',
-    this.onTrustPhone,
-    this.onForgetPairing,
-    required this.onSettings,
-    required this.onEndSession,
-  });
-
-  final VoidCallback? onQualityConnection;
-  final VoidCallback? onPrivacyControls;
-  final String pairingState;
-  final VoidCallback? onTrustPhone;
-  final VoidCallback? onForgetPairing;
-  final VoidCallback onSettings;
-  final VoidCallback onEndSession;
-
-  @override
-  Widget build(BuildContext context) =>
-      PopupMenuButton<_ConnectedPcSessionAction>(
-        tooltip: 'Session menu',
-        icon: const Icon(Icons.more_vert),
-        onSelected: (action) {
-          switch (action) {
-            case _ConnectedPcSessionAction.qualityConnection:
-              onQualityConnection?.call();
-            case _ConnectedPcSessionAction.privacyControls:
-              onPrivacyControls?.call();
-            case _ConnectedPcSessionAction.trustPhone:
-              onTrustPhone?.call();
-            case _ConnectedPcSessionAction.forgetPairing:
-              onForgetPairing?.call();
-            case _ConnectedPcSessionAction.settings:
-              onSettings();
-            case _ConnectedPcSessionAction.endSession:
-              onEndSession();
-          }
-        },
-        itemBuilder: (context) => [
-          const PopupMenuItem(
-            value: _ConnectedPcSessionAction.qualityConnection,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.network_check),
-              title: Text('Quality & connection'),
-            ),
-          ),
-          if (onPrivacyControls != null)
-            const PopupMenuItem(
-              value: _ConnectedPcSessionAction.privacyControls,
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.privacy_tip_outlined),
-                title: Text('Privacy & host controls'),
-              ),
-            ),
-          if (pairingState == 'can-pair' && onTrustPhone != null)
-            const PopupMenuItem(
-              value: _ConnectedPcSessionAction.trustPhone,
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.phonelink_lock_outlined),
-                title: Text('Trust this phone'),
-              ),
-            ),
-          if (pairingState == 'paired' && onForgetPairing != null)
-            const PopupMenuItem(
-              value: _ConnectedPcSessionAction.forgetPairing,
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.link_off),
-                title: Text('Forget pairing'),
-                subtitle: Text('This phone connects without a password at home'),
-              ),
-            ),
-          const PopupMenuItem(
-            value: _ConnectedPcSessionAction.settings,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.settings_outlined),
-              title: Text('App settings'),
-            ),
-          ),
-          const PopupMenuDivider(),
-          const PopupMenuItem(
-            value: _ConnectedPcSessionAction.endSession,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.logout),
-              title: Text('End session'),
-            ),
-          ),
-        ],
-      );
 }
 
 class _Target {
@@ -2264,694 +2245,55 @@ class _Target {
   String get name => instance?.name ?? 'Monitor ${display! + 1}';
 }
 
-/// Shows two fully visible previews per switcher page, including their actions.
-/// A landscape grid of four cards clipped the bottom of each card on phones.
-class TargetSwitcherCards extends StatelessWidget {
-  const TargetSwitcherCards({super.key, required this.cards});
-
-  final List<Widget> cards;
-
-  @override
-  Widget build(BuildContext context) => LayoutBuilder(
-        builder: (_, constraints) {
-          final horizontal = constraints.maxWidth > constraints.maxHeight;
-          return Padding(
-            padding: const EdgeInsets.all(12),
-            child: Flex(
-              direction: horizontal ? Axis.horizontal : Axis.vertical,
-              children: [
-                for (var i = 0; i < cards.length; i++)
-                  Expanded(
-                    child: Padding(
-                      padding: EdgeInsets.only(
-                        right: horizontal && i == 0 && cards.length > 1 ? 6 : 0,
-                        left: horizontal && i > 0 ? 6 : 0,
-                        bottom:
-                            !horizontal && i == 0 && cards.length > 1 ? 6 : 0,
-                        top: !horizontal && i > 0 ? 6 : 0,
-                      ),
-                      child: cards[i],
-                    ),
-                  ),
-              ],
-            ),
-          );
-        },
-      );
-}
-
-/// Managed Android emulator actions shown in a card's overflow menu.
-class AvdCardActions {
-  const AvdCardActions({
-    this.cloningLabel,
-    this.running = false,
-    this.windowVisible = false,
-    this.blocker,
-    this.onToggleWindow,
-    this.onStop,
-    this.onClone,
-    this.onRename,
-    this.onDelete,
-  });
-
-  /// Set while the emulator is being copied; the card then has no menu.
-  final String? cloningLabel;
-  final bool running;
-  final bool windowVisible;
-
-  /// Why clone, rename and delete are unavailable right now, if they are.
-  final String? blocker;
-  final VoidCallback? onToggleWindow;
-  final VoidCallback? onStop;
-  final VoidCallback? onClone;
-  final VoidCallback? onRename;
-  final VoidCallback? onDelete;
-
-  bool get hasMenu => cloningLabel == null;
-
-  List<PopupMenuEntry<String>> menuEntries(BuildContext context, bool shuttingDown) {
-    PopupMenuItem<String> item(String value, String label, VoidCallback? action,
-            {String? subtitle}) =>
-        PopupMenuItem<String>(
-          value: value,
-          enabled: !shuttingDown && action != null && subtitle == null,
-          child: subtitle == null
-              ? Text(label)
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(label),
-                    Text(subtitle,
-                        style: Theme.of(context).textTheme.bodySmall),
-                  ],
-                ),
-        );
-    return [
-      if (running && onToggleWindow != null)
-        item('avd_window', windowVisible ? 'Hide on PC' : 'Show on PC', onToggleWindow),
-      if (running) item('avd_stop', 'Stop', onStop),
-      item('avd_clone', 'Clone', onClone, subtitle: blocker),
-      item('avd_rename', 'Rename', onRename, subtitle: blocker),
-      item('avd_delete', 'Delete', onDelete, subtitle: blocker),
-    ];
-  }
-
-  void select(String value) {
-    switch (value) {
-      case 'avd_window':
-        onToggleWindow?.call();
-      case 'avd_stop':
-        onStop?.call();
-      case 'avd_clone':
-        onClone?.call();
-      case 'avd_rename':
-        onRename?.call();
-      case 'avd_delete':
-        onDelete?.call();
-    }
-  }
-}
-
-/// A dense, accessible screen-picker row for Studio V4's All screens page.
-/// The full preview card remains available on Home and in the view switcher.
-class TargetScreenRow extends StatelessWidget {
-  const TargetScreenRow({
-    super.key,
-    required this.name,
-    required this.type,
-    required this.stopped,
-    required this.live,
-    this.streamDisconnected = false,
-    this.streamStalled = false,
-    this.image,
-    this.error = '',
-    this.onOpen,
-    this.onLaunchGame,
-    this.onRetry,
-    this.onShutdown,
-    this.shuttingDown = false,
-    this.stoppedNote = '',
-    this.avd,
-  });
-
-  final AvdCardActions? avd;
-
-  /// Shown on a stopped card, e.g. why a copy of this emulator failed.
-  final String stoppedNote;
-  final String name;
-  final String type;
-  final bool stopped;
-  final bool live;
-  final bool streamDisconnected;
-  final bool streamStalled;
-  final ui.Image? image;
-  final String error;
-  final VoidCallback? onOpen;
-  final VoidCallback? onLaunchGame;
-  final VoidCallback? onRetry;
-  final VoidCallback? onShutdown;
-  final bool shuttingDown;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = MirpgStudioPalette.of(context);
-    final failure = streamDisconnected || streamStalled || error.isNotEmpty;
-    final actionLabel = stopped
-        ? 'Boot'
-        : streamDisconnected || streamStalled
-            ? 'Reconnect'
-            : 'Open';
-    final status = shuttingDown
-        ? 'Shutting down…'
-        : avd?.cloningLabel != null
-        ? avd!.cloningLabel!
-        : stopped
-        ? 'Stopped'
-        : streamDisconnected
-            ? 'Stream disconnected'
-            : streamStalled
-                ? 'Stream stalled'
-                : live
-                    ? 'Live'
-                    : failure
-                        ? 'Needs attention'
-                        : 'Waiting for preview';
-    final statusColor = shuttingDown ? palette.textSecondary : failure
-        ? palette.error
-        : live
-            ? palette.good
-            : palette.textSecondary;
-    return MirpgSurface(
-      padding: EdgeInsets.zero,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(MirpgRemoteTheme.surfaceRadius),
-        onTap: shuttingDown ? null : onOpen,
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: SizedBox(
-                  width: 76,
-                  height: 62,
-                  child: ColoredBox(
-                    color: image == null ? palette.raised : Colors.black,
-                    child: image != null
-                        ? RawImage(image: image, fit: BoxFit.contain)
-                        : Icon(
-                            type == 'Windows'
-                                ? Icons.desktop_windows_outlined
-                                : stopped
-                                    ? Icons.power_settings_new_rounded
-                                    : Icons.android_outlined,
-                            color: palette.accent,
-                            size: 28,
-                          ),
-                  ),
-                ),
+/// A two-button confirmation whose confirming button is the destructive red.
+Future<bool> showDestructiveConfirmation(
+  BuildContext context, {
+  required String title,
+  required String body,
+  required String confirmLabel,
+  required String cancelLabel,
+}) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: Text(cancelLabel)),
+          FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: MirpgRemoteTheme.destructiveFill,
+                foregroundColor: Colors.white,
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleSmall),
-                    const SizedBox(height: 2),
-                    Text(type,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall),
-                    const SizedBox(height: 2),
-                    Text(status,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: statusColor, fontWeight: FontWeight.w600)),
-                    if (stopped && stoppedNote.isNotEmpty)
-                      Text(stoppedNote,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context)
-                              .textTheme
-                              .bodySmall
-                              ?.copyWith(color: palette.error)),
-                  ],
-                ),
-              ),
-              if ((!stopped && type != 'Windows' && onShutdown != null) || onLaunchGame != null ||
-                  (!stopped && !live && onRetry != null) || avd?.hasMenu == true)
-                PopupMenuButton<String>(
-                  tooltip: 'More $name actions',
-                  icon: const Icon(Icons.more_vert_rounded),
-                  onSelected: (value) {
-                    if (shuttingDown) return;
-                    if (value == 'shutdown') onShutdown?.call();
-                    if (value == 'game') onLaunchGame?.call();
-                    if (value == 'retry') onRetry?.call();
-                    avd?.select(value);
-                  },
-                  itemBuilder: (_) => [
-                    if (onLaunchGame != null)
-                      PopupMenuItem(
-                          value: 'game', enabled: !shuttingDown, child: Text('Launch game')),
-                    if (!stopped && !live && onRetry != null)
-                      PopupMenuItem(
-                          value: 'retry', enabled: !shuttingDown, child: Text('Retry preview')),
-                    if (avd?.hasMenu == true) ...avd!.menuEntries(context, shuttingDown),
-                    if (!stopped && type != 'Windows' && onShutdown != null)
-                      PopupMenuItem(value: 'shutdown', enabled: !shuttingDown,
-                        child: Text(shuttingDown ? 'Shutting down…' : 'Shut down emulator')),
-                  ],
-                ),
-              IconButton(
-                tooltip: actionLabel,
-                onPressed: shuttingDown ? null : onOpen,
-                icon: Icon(stopped
-                    ? Icons.power_settings_new_rounded
-                    : streamDisconnected || streamStalled
-                        ? Icons.refresh_rounded
-                        : Icons.arrow_forward_rounded),
-              ),
-            ],
-          ),
-        ),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: Text(confirmLabel)),
+        ],
       ),
+    ) ??
+    false;
+
+Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name,
+        {String Function(String) tr = translate}) =>
+    showDestructiveConfirmation(
+      context,
+      title: tr('Stop {$name}?'),
+      body: tr('Apps running in it will close.'),
+      confirmLabel: tr('Stop'),
+      cancelLabel: tr('Cancel'),
     );
-  }
-}
 
-class TargetPreviewCard extends StatelessWidget {
-  const TargetPreviewCard(
-      {super.key,
-      required this.name,
-      required this.type,
-      required this.stopped,
-      required this.live,
-      this.instanceState = '',
-      this.streamDisconnected = false,
-      this.streamStalled = false,
-      this.image,
-      this.error = '',
-      this.onOpen,
-      this.onLaunchGame,
-      this.onRetry,
-      this.onShutdown,
-      this.shuttingDown = false,
-      this.stoppedNote = '',
-      this.avd});
-  final AvdCardActions? avd;
-
-  /// Shown on a stopped card, e.g. why a copy of this emulator failed.
-  final String stoppedNote;
-  final String name;
-  final String type;
-  final bool stopped;
-  final bool live;
-  final String instanceState;
-  final bool streamDisconnected;
-  final bool streamStalled;
-  final ui.Image? image;
-  final String error;
-  final VoidCallback? onOpen;
-  final VoidCallback? onLaunchGame;
-  final VoidCallback? onRetry;
-  final VoidCallback? onShutdown;
-  final bool shuttingDown;
-
-  @override
-  Widget build(BuildContext context) {
-    final runtime = instanceState.isEmpty
-        ? 'Emulator'
-        : '${instanceState[0].toUpperCase()}${instanceState.substring(1)}';
-    final stateLabel = shuttingDown
-        ? 'Shutting down…'
-        : avd?.cloningLabel != null
-        ? avd!.cloningLabel!
-        : stopped
-        ? 'Stopped'
-        : streamDisconnected
-            ? 'Disconnected'
-            : streamStalled
-                ? 'Stalled'
-                : live
-                    ? 'Live'
-                    : error.isNotEmpty
-                        ? 'Attention'
-                        : 'Connecting';
-    final stateTone = stopped || shuttingDown || avd?.cloningLabel != null
-        ? MirpgStatusTone.neutral
-        : streamDisconnected || streamStalled
-            ? MirpgStatusTone.error
-            : live
-                ? MirpgStatusTone.good
-                : error.isNotEmpty
-                    ? MirpgStatusTone.error
-                    : MirpgStatusTone.warning;
-    final videoOverlayPalette = MirpgStudioPalette.dark;
-
-    return Card(
-      margin: EdgeInsets.zero,
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: shuttingDown ? null : onOpen,
-        child: Column(
-          children: [
-            Expanded(
-              child: ColoredBox(
-                color: Colors.black,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (image != null)
-                      RawImage(
-                        image: image,
-                        fit: BoxFit.contain,
-                        filterQuality: FilterQuality.low,
-                      ),
-                    if (image == null && !stopped && error.isEmpty)
-                      const Center(
-                        child: Icon(Icons.live_tv_outlined,
-                            color: Color(0xFF69757A), size: 38),
-                      ),
-                    if (stopped)
-                      Center(
-                        child: LayoutBuilder(
-                          builder: (context, bounds) => bounds.maxWidth <
-                                  MediaQuery.textScalerOf(context).scale(180)
-                              ? FilledButton(
-                                  onPressed: shuttingDown ? null : onOpen,
-                                  child: const Text('Boot'),
-                                )
-                              : FilledButton.icon(
-                                  onPressed: shuttingDown ? null : onOpen,
-                                  icon: const Icon(Icons.power_settings_new_rounded),
-                                  label: const Text('Boot'),
-                                ),
-                        ),
-                      )
-                    else if (streamDisconnected || streamStalled)
-                      LayoutBuilder(builder: (context, constraints) {
-                        // The footer and status badge already explain failures
-                        // on tiny cards; don't squeeze a full notice underneath.
-                        if (constraints.maxHeight < 135) {
-                          return const SizedBox.shrink();
-                        }
-                        return Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: SingleChildScrollView(
-                              child: MirpgSurface(
-                                color: videoOverlayPalette.background
-                                    .withOpacity(0.94),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text(
-                                      streamDisconnected
-                                          ? 'Stream disconnected'
-                                          : 'Stream stalled',
-                                      textAlign: TextAlign.center,
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .titleSmall
-                                          ?.copyWith(color: videoOverlayPalette.textPrimary),
-                                    ),
-                                    if (error.isNotEmpty) ...[
-                                      const SizedBox(height: 4),
-                                      Text(error,
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          textAlign: TextAlign.center,
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .bodySmall
-                                              ?.copyWith(color: videoOverlayPalette.textSecondary)),
-                                    ],
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      })
-                    else if (error.isNotEmpty)
-                      Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: SingleChildScrollView(
-                            child: MirpgSurface(
-                              padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-                              color: videoOverlayPalette.background.withOpacity(0.94),
-                              borderColor: videoOverlayPalette.error.withOpacity(0.45),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    error,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    textAlign: TextAlign.center,
-                                    style:
-                                        Theme.of(context).textTheme.bodySmall?.copyWith(
-                                            color: videoOverlayPalette.textPrimary),
-                                  ),
-                                  TextButton(
-                                    onPressed: onRetry,
-                                    child: const Text('Retry preview'),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    if (stopped && stoppedNote.isNotEmpty)
-                      Positioned(
-                        left: 8,
-                        right: 8,
-                        bottom: 8,
-                        child: Text(
-                          stoppedNote,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: videoOverlayPalette.textPrimary),
-                        ),
-                      ),
-                    if (!stopped) Positioned(
-                      left: 10,
-                      right: 10,
-                      top: 10,
-                      child: LayoutBuilder(builder: (context, constraints) {
-                        final showType = constraints.maxWidth >=
-                            MediaQuery.textScalerOf(context).scale(260);
-                        return Row(
-                          children: [
-                            if (showType)
-                              Flexible(
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: MirpgStatusChip(
-                                    label: type,
-                                    onDarkSurface: true,
-                                    icon: type == 'Windows'
-                                        ? Icons.desktop_windows_outlined
-                                        : Icons.android_outlined,
-                                  ),
-                                ),
-                              ),
-                            if (showType) const SizedBox(width: 8),
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.centerRight,
-                                child: MirpgStatusChip(
-                                  label: stateLabel,
-                                  onDarkSurface: true,
-                                  icon: live ? Icons.circle : null,
-                                  tone: stateTone,
-                                ),
-                              ),
-                            ),
-                          ],
-                        );
-                      }),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
-              child: LayoutBuilder(builder: (context, constraints) {
-                final narrow = constraints.maxWidth < 192;
-                final compact = constraints.maxWidth <
-                    MediaQuery.textScalerOf(context).scale(280);
-                final actionLabel = type == 'Windows'
-                    ? 'Open'
-                    : streamDisconnected || streamStalled
-                        ? 'Reconnect'
-                        : 'Resume';
-                if (narrow) {
-                  final palette = MirpgStudioPalette.of(context);
-                  final caption = shuttingDown
-                      ? 'Shutting down…'
-                      : stopped
-                      ? 'Tap to boot'
-                      : streamDisconnected || streamStalled
-                          ? 'Reconnect'
-                          : live
-                              ? 'Live · open'
-                              : 'Waiting for preview';
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleSmall),
-                      Row(children: [
-                        Expanded(
-                          child: Text(caption,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .labelSmall
-                                  ?.copyWith(
-                                      color: live
-                                          ? palette.good
-                                          : palette.textSecondary)),
-                        ),
-                        if (avd?.hasMenu == true || (!stopped && type != 'Windows' && onShutdown != null))
-                          _EmulatorShutdownMenu(name: name, shuttingDown: shuttingDown,
-                            onShutdown: onShutdown, onLaunchGame: onLaunchGame, avd: avd)
-                        else if (onLaunchGame != null)
-                          IconButton(
-                            onPressed: onLaunchGame,
-                            icon: const Icon(Icons.sports_esports_outlined),
-                            tooltip: 'Launch game',
-                          ),
-                      ]),
-                    ],
-                  );
-                }
-                return Row(children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          stopped
-                              ? 'Ready to boot'
-                              : streamDisconnected || streamStalled
-                                  ? '$runtime · ${streamDisconnected ? 'Stream disconnected' : 'Stream stalled'}'
-                                  : live
-                                      ? 'Tap to control'
-                                      : 'Waiting for a usable preview',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (avd?.hasMenu == true || (!stopped && type != 'Windows' && onShutdown != null))
-                    _EmulatorShutdownMenu(name: name, shuttingDown: shuttingDown,
-                      onShutdown: onShutdown, onLaunchGame: onLaunchGame, avd: avd)
-                  else if (onLaunchGame != null)
-                    if (compact)
-                      IconButton(
-                        onPressed: onLaunchGame,
-                        icon: const Icon(Icons.sports_esports_outlined),
-                        tooltip: 'Launch game',
-                      )
-                    else
-                      TextButton.icon(
-                        onPressed: onLaunchGame,
-                        icon:
-                            const Icon(Icons.sports_esports_outlined, size: 18),
-                        label: const Text('Launch game'),
-                      ),
-                  if (!stopped)
-                    if (compact)
-                      IconButton(
-                        onPressed: shuttingDown ? null : onOpen,
-                        icon: Icon(type == 'Windows'
-                            ? Icons.open_in_full_rounded
-                            : streamDisconnected || streamStalled
-                                ? Icons.refresh_rounded
-                                : Icons.play_arrow_rounded),
-                        tooltip: actionLabel,
-                      )
-                    else
-                      TextButton.icon(
-                        onPressed: shuttingDown ? null : onOpen,
-                        icon: Icon(type == 'Windows'
-                            ? Icons.open_in_full_rounded
-                            : Icons.play_arrow_rounded),
-                        label: Text(actionLabel),
-                      ),
-                ]);
-              }),
-            ),
-          ],
-        ),
-      ),
+Future<bool> showEmulatorRebootConfirmation(BuildContext context, String name,
+        {String Function(String) tr = translate}) =>
+    showDestructiveConfirmation(
+      context,
+      title: tr('Reboot {$name}?'),
+      body: tr(
+          'Android restarts and apps running in it close. The emulator stays on.'),
+      confirmLabel: tr('Reboot'),
+      cancelLabel: tr('Cancel'),
     );
-  }
-}
-
-Future<bool> showEmulatorShutdownConfirmation(BuildContext context, String name) async =>
-    await showDialog<bool>(context: context, builder: (dialogContext) => AlertDialog(
-      title: Text('Shut down $name?'),
-      content: const Text('This closes the apps running in this emulator. You can boot it again later.'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
-        FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Shut down')),
-      ],
-    )) ?? false;
-
-class _EmulatorShutdownMenu extends StatelessWidget {
-  const _EmulatorShutdownMenu({required this.name, required this.onShutdown,
-    required this.shuttingDown, this.onLaunchGame, this.avd});
-  final String name;
-  final AvdCardActions? avd;
-  final VoidCallback? onShutdown;
-  final VoidCallback? onLaunchGame;
-  final bool shuttingDown;
-  @override
-  Widget build(BuildContext context) => PopupMenuButton<String>(
-    tooltip: 'More $name actions',
-    onSelected: (value) {
-      if (shuttingDown) return;
-      if (value == 'shutdown') onShutdown?.call();
-      if (value == 'game') onLaunchGame?.call();
-      avd?.select(value);
-    },
-    itemBuilder: (context) => [
-      if (onLaunchGame != null) PopupMenuItem(value: 'game', enabled: !shuttingDown, child: const Text('Launch game')),
-      if (avd?.hasMenu == true) ...avd!.menuEntries(context, shuttingDown),
-      if (onShutdown != null)
-        PopupMenuItem(value: 'shutdown', enabled: !shuttingDown,
-          child: Text(shuttingDown ? 'Shutting down…' : 'Shut down emulator')),
-    ],
-  );
-}
 
 class _MonitorMoveSlot {
   _MonitorMoveSlot(this.point, this.index);

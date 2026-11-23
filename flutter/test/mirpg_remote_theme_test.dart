@@ -33,11 +33,11 @@ void main() {
       expect(theme.cardTheme.color, palette.raised);
       expect(theme.cardTheme.shape, isA<RoundedRectangleBorder>());
       expect(theme.navigationBarTheme.backgroundColor, palette.surface);
-      expect(theme.navigationBarTheme.height, 72);
+      expect(theme.navigationBarTheme.height, 64);
       expect(theme.navigationBarTheme.indicatorColor,
           palette.accent.withOpacity(0.14));
       expect(theme.appBarTheme.centerTitle, isFalse);
-      expect(theme.appBarTheme.toolbarHeight, 64);
+      expect(theme.appBarTheme.toolbarHeight, 56);
       expect(theme.dividerColor, palette.divider);
       expect(theme.inputDecorationTheme.filled, isTrue);
       expect(theme.inputDecorationTheme.fillColor, palette.surface);
@@ -45,10 +45,15 @@ void main() {
       expect(theme.textTheme.bodyLarge?.color, palette.textPrimary);
       expect(theme.textTheme.bodyMedium?.color, palette.textPrimary);
       expect(theme.textTheme.bodySmall?.color, palette.textSecondary);
-      expect(theme.textTheme.titleLarge?.fontSize, 24);
-      expect(theme.textTheme.titleMedium?.fontSize, 18);
-      expect(theme.textTheme.bodyMedium?.fontSize, 16);
-      expect(theme.textTheme.bodySmall?.fontSize, 14);
+      expect(theme.textTheme.titleLarge?.fontSize, 20);
+      expect(theme.textTheme.titleMedium?.fontSize, 16);
+      expect(theme.textTheme.bodyMedium?.fontSize, 14);
+      expect(theme.textTheme.bodySmall?.fontSize, 12);
+      expect(theme.textTheme.titleSmall?.fontSize, 14);
+      expect(theme.textTheme.labelMedium?.fontSize, 12);
+      expect(theme.textTheme.bodyLarge?.fontSize, 15);
+      expect(theme.floatingActionButtonTheme.extendedSizeConstraints?.minHeight,
+          40);
       expect(theme.textTheme.labelSmall?.fontSize, 12);
     }
   });

@@ -8,9 +8,23 @@ import '../../common.dart';
 import '../../common/widgets/chat_page.dart';
 import '../../models/platform_model.dart';
 import '../../models/state_model.dart';
+import '../../models/chat_model.dart';
 import '../widgets/mirpg_remote_theme.dart';
 import '../../common/widgets/aperture_brand.dart';
 import 'connection_page.dart';
+
+enum MobileRootTab { computers, share, settings }
+
+List<MobileRootTab> mobileRootTabs({
+  required bool android,
+  required bool incomingOnly,
+  required bool outgoingOnly,
+}) =>
+    [
+      if (!incomingOnly) MobileRootTab.computers,
+      if (android && !outgoingOnly) MobileRootTab.share,
+      MobileRootTab.settings,
+    ];
 
 abstract class PageShape extends Widget {
   final String title = "";
@@ -31,10 +45,30 @@ class HomePageState extends State<HomePage> {
   var _selectedIndex = 0;
   int get selectedIndex => _selectedIndex;
   final List<PageShape> _pages = [];
-  int _chatPageTabIndex = -1;
-  bool get isChatPageCurrentTab => isAndroid
-      ? _selectedIndex == _chatPageTabIndex
-      : false; // change this when ios have chat page
+  bool _chatOpen = false;
+  // Name kept: chat_model.dart reads it. True while the chat route is open.
+  bool get isChatPageCurrentTab => _chatOpen;
+
+  Future<void> openChat({MessageKey? key}) async {
+    if (_chatOpen) return;
+    if (key != null) {
+      gFFI.chatModel.changeCurrentKey(key);
+    }
+    gFFI.chatModel.hideChatIconOverlay();
+    gFFI.chatModel.hideChatWindowOverlay();
+    gFFI.chatModel.mobileClearClientUnread(gFFI.chatModel.currentKey.connId);
+    _chatOpen = true;
+    try {
+      await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => Scaffold(
+          appBar: AppBar(title: const MobileChatTitle()),
+          body: ChatPage(type: ChatPageType.mobileMain),
+        ),
+      ));
+    } finally {
+      _chatOpen = false;
+    }
+  }
 
   void refreshPages() {
     setState(() {
@@ -61,104 +95,56 @@ class HomePageState extends State<HomePage> {
 
   void initPages() {
     _pages.clear();
-    if (!bind.isIncomingOnly()) {
-      _pages.add(ConnectionPage(
-        appBarActions: [],
-      ));
+    for (final tab in mobileRootTabs(
+      android: isAndroid,
+      incomingOnly: bind.isIncomingOnly(),
+      outgoingOnly: bind.isOutgoingOnly(),
+    )) {
+      switch (tab) {
+        case MobileRootTab.computers:
+          _pages.add(ConnectionPage(appBarActions: []));
+        case MobileRootTab.share:
+          _pages.add(ServerPage());
+        case MobileRootTab.settings:
+          _pages.add(SettingsPage());
+      }
     }
-    if (isAndroid && !bind.isOutgoingOnly()) {
-      _chatPageTabIndex = _pages.length;
-      _pages.addAll([ChatPage(type: ChatPageType.mobileMain), ServerPage()]);
-    }
-    _pages.add(SettingsPage());
   }
 
   @override
   Widget build(BuildContext context) {
-    return Theme(
-      data: MirpgRemoteTheme.build(Theme.of(context)),
-      child: WillPopScope(
-          onWillPop: () async {
-            if (_selectedIndex != 0) {
-              setState(() {
-                _selectedIndex = 0;
-              });
-            } else {
-              return true;
-            }
-            return false;
-          },
-          child: Scaffold(
-            appBar: AppBar(
-              automaticallyImplyLeading: false,
-              title: appTitle(),
-              actions: _pages.elementAt(_selectedIndex).appBarActions,
-            ),
-            bottomNavigationBar: MobileHomeNavigationBar(
-              key: navigationBarKey,
-              pages: _pages,
-              currentIndex: _selectedIndex,
-              onDestinationSelected: (index) => setState(() {
-                if (_selectedIndex != index) {
-                  _selectedIndex = index;
-                  if (isChatPageCurrentTab) {
-                    gFFI.chatModel.hideChatIconOverlay();
-                    gFFI.chatModel.hideChatWindowOverlay();
-                    gFFI.chatModel.mobileClearClientUnread(
-                        gFFI.chatModel.currentKey.connId);
-                  }
-                }
-              }),
-            ),
-            body: _pages.elementAt(_selectedIndex),
-          )),
-    );
+    return WillPopScope(
+        onWillPop: () async {
+          if (_selectedIndex != 0) {
+            setState(() {
+              _selectedIndex = 0;
+            });
+          } else {
+            return true;
+          }
+          return false;
+        },
+        child: Scaffold(
+          appBar: AppBar(
+            automaticallyImplyLeading: false,
+            title: appTitle(),
+            actions: _pages.elementAt(_selectedIndex).appBarActions,
+          ),
+          bottomNavigationBar: MobileHomeNavigationBar(
+            key: navigationBarKey,
+            pages: _pages,
+            currentIndex: _selectedIndex,
+            onDestinationSelected: (index) => setState(() {
+              if (_selectedIndex != index) {
+                _selectedIndex = index;
+              }
+            }),
+          ),
+          body: _pages.elementAt(_selectedIndex),
+        ));
   }
 
   Widget appTitle() {
-    final currentUser = gFFI.chatModel.currentUser;
-    final currentKey = gFFI.chatModel.currentKey;
-    if (isChatPageCurrentTab &&
-        currentUser != null &&
-        currentKey.peerId.isNotEmpty) {
-      final connected =
-          gFFI.serverModel.clients.any((e) => e.id == currentKey.connId);
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Tooltip(
-            message: currentKey.isOut
-                ? translate('Outgoing connection')
-                : translate('Incoming connection'),
-            child: Icon(
-              currentKey.isOut
-                  ? Icons.call_made_rounded
-                  : Icons.call_received_rounded,
-            ),
-          ),
-          Expanded(
-            child: Center(
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    "${currentUser.firstName}   ${currentUser.id}",
-                  ),
-                  if (connected)
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Color.fromARGB(255, 133, 246, 199)),
-                    ).marginSymmetric(horizontal: 2),
-                ],
-              ),
-            ),
-          ),
-        ],
-      );
-    }
     final pageTitle =
         _pages.isEmpty ? 'Computers' : _pages[_selectedIndex].title;
     return Column(
@@ -172,6 +158,56 @@ class HomePageState extends State<HomePage> {
                 color: MirpgRemoteTheme.textSecondary,
                 fontWeight: FontWeight.w500,
               ),
+        ),
+      ],
+    );
+  }
+}
+
+class MobileChatTitle extends StatelessWidget {
+  const MobileChatTitle({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final currentUser = gFFI.chatModel.currentUser;
+    final currentKey = gFFI.chatModel.currentKey;
+    if (currentUser == null || currentKey.peerId.isEmpty) {
+      return Text(translate('Chat'));
+    }
+    final connected =
+        gFFI.serverModel.clients.any((e) => e.id == currentKey.connId);
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Tooltip(
+          message: currentKey.isOut
+              ? translate('Outgoing connection')
+              : translate('Incoming connection'),
+          child: Icon(
+            currentKey.isOut
+                ? Icons.call_made_rounded
+                : Icons.call_received_rounded,
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  "${currentUser.firstName}   ${currentUser.id}",
+                ),
+                if (connected)
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Color.fromARGB(255, 133, 246, 199)),
+                  ).marginSymmetric(horizontal: 2),
+              ],
+            ),
+          ),
         ),
       ],
     );

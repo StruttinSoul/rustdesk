@@ -28,6 +28,18 @@ void main() {
     expect(attempt(0, ready: false), isNull);
     expect(attempt(0, foreground: false), isNull);
     expect(attempt(0, canControl: false), isNull);
+    // Opened on another device: never taken back by itself.
+    expect(
+        guestAutoReconnectDelay(
+          sessionFailed: true,
+          guestWasLive: true,
+          emulatorRunning: true,
+          foreground: true,
+          canControl: true,
+          attempts: 0,
+          superseded: true,
+        ),
+        isNull);
     expect(
         const RemoteEmulator(
                 id: 'x', name: 'x', provider: 'bluestacks', state: 'stopped')
@@ -47,6 +59,7 @@ void main() {
           width: 384,
           height: 832,
           child: GuestControlStage(
+            legacyLayout: true,
             controlsVisible: true,
             onToggleControls: () {},
             video: const SizedBox.expand(
@@ -89,6 +102,7 @@ void main() {
           width: 384,
           height: 700,
           child: GuestControlStage(
+            legacyLayout: true,
             controlsVisible: true,
             onToggleControls: () {},
             video: const SizedBox.expand(
@@ -124,6 +138,7 @@ void main() {
             width: 384,
             height: screenHeight,
             child: GuestControlStage(
+              legacyLayout: true,
               controlsVisible: true,
               onToggleControls: () {},
               video: LayoutBuilder(
@@ -163,6 +178,73 @@ void main() {
           Offset(frame.left + frame.width / 4, frame.top + frame.height / 4));
       expect(touches.single, (x: 180, y: 320));
 
+      touches.clear();
+      await tester.tapAt(viewport.topLeft +
+          (screenHeight == 832 ? const Offset(192, 1) : const Offset(1, 322)));
+      expect(touches.single, isNull,
+          reason: 'Black bars must not inject guest input');
+    });
+  }
+
+  for (final screenHeight in [832.0, 700.0]) {
+    testWidgets(
+        'dashboard bar under the game keeps touch coordinates at '
+        '$screenHeight dp', (tester) async {
+      tester.view.physicalSize = Size(384, screenHeight);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final touches = <({int x, int y})?>[];
+      await tester.pumpWidget(MaterialApp(
+        home: Center(
+          child: SizedBox(
+            width: 384,
+            height: screenHeight,
+            child: GuestControlStage(
+              video: LayoutBuilder(
+                builder: (_, constraints) => Listener(
+                  key: const Key('touch-surface'),
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: (event) => touches.add(mapEmulatorTouch(
+                    localX: event.localPosition.dx,
+                    localY: event.localPosition.dy,
+                    viewportWidth: constraints.maxWidth,
+                    viewportHeight: constraints.maxHeight,
+                    guestWidth: 720,
+                    guestHeight: 1280,
+                  )),
+                  child: const ColoredBox(color: Colors.black),
+                ),
+              ),
+              controls: const SizedBox(key: Key('rail'), height: 48),
+            ),
+          ),
+        ),
+      ));
+
+      final viewport = tester.getRect(find.byKey(const Key('touch-surface')));
+      expect(viewport.size, Size(384, screenHeight - 48),
+          reason: 'The game takes everything the 48 dp bar leaves');
+      expect(
+          tester.getRect(find.byKey(const Key('rail'))).bottom, screenHeight);
+      final frame = containedGuestFrame(
+        viewportWidth: viewport.width,
+        viewportHeight: viewport.height,
+        guestWidth: 720,
+        guestHeight: 1280,
+      )!;
+      await tester.tapAt(viewport.topLeft +
+          Offset(frame.left + frame.width / 2, frame.top + frame.height / 2));
+      expect(touches.single, (x: 360, y: 640));
+
+      touches.clear();
+      await tester.tapAt(viewport.topLeft +
+          Offset(frame.left + frame.width / 4, frame.top + frame.height / 4));
+      expect(touches.single, (x: 180, y: 320));
+
+      // A 9:16 guest leaves a black bar at the top (tall phone) or at the
+      // left (short phone).
       touches.clear();
       await tester.tapAt(viewport.topLeft +
           (screenHeight == 832 ? const Offset(192, 1) : const Offset(1, 322)));
