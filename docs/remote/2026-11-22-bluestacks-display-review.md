@@ -90,7 +90,7 @@ These need the user because they involve watching the screen or pressing the KVM
 - 2026-11-12 19:59:42: `"C:\Program Files\RustDesk\RustDesk.exe" --server` installed `usbmmidd` from `C:\Program Files\RustDesk\usbmmidd_v2\`. This is upstream RustDesk's "no display, plug in a headless one" path.
 - 20:00:18: `usbmmIdd.dll` crashed (UMDF event 10121).
 - 20:07:43: `pnputil /remove-device ROOT\DISPLAY\0000`.
-- 20:07:43: `"C:\Users\gregr\Documents\Codex\2026-11-12\open-aperture-please\aperture-display-driver\usbmmidd_v2\deviceinstaller64.exe" install C:\VirtualDisplayDriver\MttVDD.inf Root\MttVDD`.
+- 20:07:43: `"C:\Users\<user>\Documents\Codex\2026-11-12\open-aperture-please\aperture-display-driver\usbmmidd_v2\deviceinstaller64.exe" install C:\VirtualDisplayDriver\MttVDD.inf Root\MttVDD`.
 - Aperture's own code never installs MttVDD. It only restarts it when it has failed: `src/headless_vdd.rs` (`pnputil /restart-device`, at most once per 60 s), called from the watchdog every 20 s and at login when there is no screen (`src/server/display_service.rs:918-956`). See `docs/remote/2026-11-13-headless-screen-recovery.md`.
 
 **Driver settings** (`C:\VirtualDisplayDriver\vdd_settings.xml`, last written 2026-11-12 20:07): 1 monitor, bound to the RTX 3080, modes 800x600, 1366x768, 1920x1080, 2560x1440, 3840x2160, refresh rates 30/60/90/120/144/165/244, hardware cursor on, HDR off, logging off.

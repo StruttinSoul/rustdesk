@@ -1,6 +1,6 @@
 # Marquee Gateway runtime supervisor mirror
 
-This directory is the reproducible source mirror for the Windows Gateway supervisor that MIRPG's RustDesk integration inspects and controls. The deployed runtime remains owned by `C:\Users\gregr\MarqueeGatewayRuntime`; these files are source/evidence, not a second supervisor and are never launched from this repository.
+This directory is the reproducible source mirror for the Windows Gateway supervisor that MIRPG's RustDesk integration inspects and controls. The deployed runtime remains owned by `C:\Users\<user>\MarqueeGatewayRuntime`; these files are source/evidence, not a second supervisor and are never launched from this repository.
 
 Mirrored from the deployed runtime source on 2026-10-06:
 

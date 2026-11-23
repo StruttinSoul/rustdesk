@@ -32,8 +32,8 @@ The user selected automatic reconnection to the last PC, subject to normal RustD
 
 ## Evidence on Hand
 
-- User reference: `C:/Users/gregr/Downloads/1000026833.jpg`, showing the game view and controls that currently cover game content.
-- User reference: `C:/Users/gregr/Downloads/1000026835.jpg`, showing the desired OSLink-style live overview and Boot workflow.
+- User reference: `C:/Users/<user>/Downloads/1000026833.jpg`, showing the game view and controls that currently cover game content.
+- User reference: `C:/Users/<user>/Downloads/1000026835.jpg`, showing the desired OSLink-style live overview and Boot workflow.
 - The existing emulator integration supplies guest capture, touch control, Android navigation, discovery, and startup.
 - Preview performance and actual LAN routing of the final implementation require testing; no OSLink-equivalent performance measurement has been established.
 

@@ -123,6 +123,6 @@ Pre-existing means not introduced by the current MIRPG redesign/latency work; th
 - Window picker: Windows platform seam exists; dedicated typed route remains unverified for WP9.
 - Privacy: privacy_mode and Windows platform seams; WP11 capability/ack/recovery work remains.
 - Phone Workspace: virtual_display_manager and display_service candidates; WP10 owned lifecycle remains unverified.
-- Gateway: no RustDesk integration found; WP15 must inspect and reuse C:\Users\gregr\MarqueeGatewayRuntime.
+- Gateway: no RustDesk integration found; WP15 must inspect and reuse C:\Users\<user>\MarqueeGatewayRuntime.
 
 Ledger status partial_candidate means useful machinery exists but the full placement, gesture, state, accessibility, failure and recovery gate has not passed. No row is marked complete from source presence alone.

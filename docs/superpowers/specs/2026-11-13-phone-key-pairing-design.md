@@ -95,9 +95,9 @@ The ID part already works: the Android home page auto-connects to the last remot
 
 ### Reaching atlas over WireGuard
 
-- When a LAN fast-path connection succeeds, the phone stores that address (e.g. `10.0.4.93:21120`) in the peer's config, next to the verified identity it already stores.
+- When a LAN fast-path connection succeeds, the phone stores that address (e.g. `<atlas-ip>:21120`) in the peer's config, next to the verified identity it already stores.
 - When discovery finds no candidate, the phone also tries that stored address within the existing budget (250 ms per candidate, 750 ms total). It is still identity-pinned and must be secured, so a wrong host at that address is rejected exactly like today.
-- This works as-is if WireGuard ends on the router and routes the tunnel into the home LAN: the phone reaches `10.0.4.93:21120` from a private tunnel address, which the listener already accepts.
+- This works as-is if WireGuard ends on the router and routes the tunnel into the home LAN: the phone reaches `<atlas-ip>:21120` from a private tunnel address, which the listener already accepts.
 - If WireGuard ends on atlas itself, it may not: `serve_secure` binds only the default interface's private IPv4 (`src/lan.rs:366-369`), and Windows can drop packets that arrive on the WireGuard adapter addressed to the LAN adapter's IP. That case needs the listener to also bind the WireGuard address, which belongs to the separate WireGuard task, not this one.
 
 ### Compatibility

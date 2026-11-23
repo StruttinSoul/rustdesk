@@ -17,8 +17,8 @@ All times are local (MST, UTC-7); the phone and atlas clocks agree to within abo
 2. **Atlas was busy.** A second emulator (the dev AVD `SmartTubeModern_API36`) was running, and two
    Gradle/Kotlin build daemons started at 15:07:58 and 15:08:38, in the middle of your session.
 3. **Your phone talks to atlas through the WireGuard VPN even at home.** Both are on the same Wi-Fi
-   network (10.0.4.x), but the phone sends everything to the router's VPN endpoint first
-   (`10.0.4.93 dev tun0 src 10.5.5.2`, MTU 1280). That adds delay and jitter to every frame and tap.
+   network (<lan-ip>), but the phone sends everything to the router's VPN endpoint first
+   (`<atlas-ip> dev tun0 src <vpn-ip>`, MTU 1280). That adds delay and jitter to every frame and tap.
 4. **The phone draws each frame the slow way.** It decodes H.264 in software and hands a full
    uncompressed picture (about 2.9 MB) to Flutter per frame. Frames the UI cannot keep up with are
    dropped without being counted, so the real on-screen frame rate is unknown.
@@ -85,7 +85,7 @@ RustDesk service PID 4976 and server PID 5904 have run since 13:47:02.
 | 15:08:47.8 | First guest frame of stream 2 | phone log |
 | 15:08:47-15:08:53 | 46 frames in 5.9 s; gap p50 19.8, p90 51.3, max 2238 ms | phone log |
 | 15:08:53-15:08:58 | 160 frames in 5.1 s (31 fps); gap p50 21.2, p90 45.8, max 490 ms | phone log |
-| 15:08:57.2 | Phone cannot reach the ID server `10.0.4.93:21116` (hbbs down) | phone log |
+| 15:08:57.2 | Phone cannot reach the ID server `<atlas-ip>:21116` (hbbs down) | phone log |
 | 15:08:58-15:09:04 | 135 frames in 5.5 s (25 fps); gap p50 19.2, p90 44.5, max 617 ms | phone log |
 | 15:09:02.5 | Last touch on the phone | logcat |
 | 15:09:04 | hbbs restarted by its watchdog (PID 8064) | process list |
@@ -144,10 +144,10 @@ close. Confidence: medium.
 ### The reset: candidate B (path injected it)
 
 Facts:
-- `adb shell ip route get 10.0.4.93` on the phone: `dev tun0 table 1095 src 10.5.5.2`. The phone's
-  Wi-Fi address is 10.0.4.23/24, the same subnet as atlas (10.0.4.93).
-- Atlas has no WireGuard interface. `10.5.5.1` answers ping from atlas in under 1 ms, as does the
-  router `10.0.4.1`. So the tunnel ends on the router (or a box next to it), and every packet
+- `adb shell ip route get <atlas-ip>` on the phone: `dev tun0 table 1095 src <vpn-ip>`. The phone's
+  Wi-Fi address is <lan-subnet>, the same subnet as atlas (<atlas-ip>).
+- Atlas has no WireGuard interface. `<vpn-ip>` answers ping from atlas in under 1 ms, as does the
+  router `<lan-ip>`. So the tunnel ends on the router (or a box next to it), and every packet
   hairpins through it.
 - Atlas -> phone Wi-Fi address ping (phone idle, so power-save inflates this): 23/25 replies,
   6-125 ms, average 59 ms, 8% loss.
@@ -196,7 +196,7 @@ UI worktree during this investigation, so numbers would not have been representa
 
 | # | Change | Expected effect | Risk | Verify |
 |---|---|---|---|---|
-| 1 | **Stop the VPN hairpin at home** (user decision, see open questions). Options: turn the tunnel off automatically on the home SSID; or exclude the Aperture apps from the VPN and let them use Wi-Fi at home | Lower and steadier round trip; removes the router from the video path; removes candidate B | Away-from-home access relies on the tunnel, so a blanket exclusion breaks it. Per-app exclusion needs the app to reach atlas another way when away | `adb shell ip route get 10.0.4.93` shows `dev wlan0`; "LAN connection ready" under about 15 ms; phone `arrival_gap` p90 near 20 ms on a fresh guest |
+| 1 | **Stop the VPN hairpin at home** (user decision, see open questions). Options: turn the tunnel off automatically on the home SSID; or exclude the Aperture apps from the VPN and let them use Wi-Fi at home | Lower and steadier round trip; removes the router from the video path; removes candidate B | Away-from-home access relies on the tunnel, so a blanket exclusion breaks it. Per-app exclusion needs the app to reach atlas another way when away | `adb shell ip route get <atlas-ip>` shows `dev wlan0`; "LAN connection ready" under about 15 ms; phone `arrival_gap` p90 near 20 ms on a fresh guest |
 | 2 | **Read the host log once** with the command above | Turns the reset from a hypothesis into a fact | None (read-only, needs elevation) | The `#462 Connection closed` line |
 | 3 | **Auto-reconnect and resume.** On an unexpected close during an emulator session, the phone reconnects (same secured LAN path) and reopens the same target, with a short "Reconnecting" overlay instead of an error | A reset becomes a 1-2 s hiccup | Must not loop on real refusals (wrong key, host stopping); cap retries | Kill the host cm process, or drop the TCP connection, mid-stream: the picture returns without user action |
 | 4 | **Do not let the cm take a session down** (if A is confirmed). For an authorized connection on Windows, restart the cm on `CmErr` instead of closing; and have a closing cm refuse new IPC clients | Removes the quick-reconnect reset | Touches stock RustDesk connection code; the close-on-cm-loss rule exists for unattended-consent safety, so keep it for unauthorized connections | Swipe the app away and reopen within 2 s, ten times: no reset within the next minute |

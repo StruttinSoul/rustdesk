@@ -35,7 +35,7 @@ Vendor references:
 | Host ADB | Pre-existing separate ADB servers at 5037 and 5041; not contacted |
 | RustDesk / Aperture | RustDesk service running, automatic startup, unchanged by this work |
 | Capture | Guest scrcpy helper's 30-FPS capture ceiling is **not** the BlueStacks emulator's 60-FPS normal target |
-| Prior preservation | Local 19-file config/input/boot snapshot `C:\Users\gregr\AppData\Local\BlueStacks-Optimization\preserve-20261015T155011`; **not** a full Android data backup |
+| Prior preservation | Local 19-file config/input/boot snapshot `C:\Users\<user>\AppData\Local\BlueStacks-Optimization\preserve-20261015T155011`; **not** a full Android data backup |
 
 `bluestacks.conf` had SHA-256 `F1C63B8097D1C5C871F0DEC9207DB15AF7C578769B18FB2D3B75571BDEB6538D` when re-read at 2026-10-15 16:26 PDT. The file is ordinarily updated by BlueStacks; **do not treat this hash as an immutable activation pin**. Capture a fresh baseline immediately before any separately approved trial. The config's `eco_mode_max_fps=5` reflects a stored preference, **not proof that Eco is currently enabled or disabled**.
 

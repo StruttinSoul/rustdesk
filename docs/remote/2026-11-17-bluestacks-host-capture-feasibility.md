@@ -69,7 +69,7 @@ Capture CPU without the pipe was 5–16 % of one core across runs.
 
 Window capture of the top-level window, cropped to the `BlueStacksApp` child, read back to RAM, fed to `HostEncoder`. Numbers are in the table above. The scratch tool and outputs are in:
 
-`C:\Users\gregr\AppData\Local\Temp\claude\47ce7e92dc5b7241\61a1e1b7-a213-44a4-bc15-d0a8c4664a44\scratchpad\bluestacks-capture\`
+`C:\Users\<user>\AppData\Local\Temp\claude\47ce7e92dc5b7241\61a1e1b7-a213-44a4-bc15-d0a8c4664a44\scratchpad\bluestacks-capture\`
 
 - `wgcprobe\src\main.rs` — the probe (fps, gap percentiles, readback time, CPU, optional raw frames on stdout)
 - `win.ps1` — window state reader and the brief reversible state changes

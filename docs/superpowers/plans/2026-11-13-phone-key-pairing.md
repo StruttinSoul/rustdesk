@@ -50,7 +50,7 @@
   - `pub fn public_key_b64(pk: &[u8]) -> String` (the existing `crate::encode64`).
 
 - [ ] **Step 1: Write the failing tests** in `src/aperture_device_proof.rs` `mod tests`:
-  - `valid_proof_verifies`: generate a key pair, `sign_proof(sk, "373491561", &Hash{salt:"s",challenge:"c"}, 0)`, then `verify_proof(...) == true`.
+  - `valid_proof_verifies`: generate a key pair, `sign_proof(sk, "<rustdesk-id>", &Hash{salt:"s",challenge:"c"}, 0)`, then `verify_proof(...) == true`.
   - `proof_does_not_verify_for_other_challenge_or_host`: the same proof verified with challenge `"c2"`, host `"999"`, or conn_type `1` → `false` in each case.
   - `fields_cannot_run_together`: `proof_message("ab","c","d",0) != proof_message("a","bc","d",0)`.
   - `wrong_version_or_lengths_rejected`: version 2, a 31-byte key or a 63-byte signature → `false`.
@@ -152,9 +152,9 @@
   - `start` reports that the LAN path won (e.g. it returns the address or a bool alongside the existing tuple); the caller sets `lc.via_secure_lan = true`. Every other route leaves it `false`.
 
 - [ ] **Step 1: Write the failing tests** (extend the existing tests in this file):
-  - `stored_address_is_tried_when_discovery_is_empty`: empty discovery, `last = 10.0.4.93:21120` → `[10.0.4.93:21120]`.
+  - `stored_address_is_tried_when_discovery_is_empty`: empty discovery, `last = <atlas-ip>:21120` → `[<atlas-ip>:21120]`.
   - `stored_address_not_duplicated_and_respects_cap`
-  - `public_or_wrong_port_stored_address_ignored`: `8.8.8.8:21120` or `10.0.4.93:21118` → not included.
+  - `public_or_wrong_port_stored_address_ignored`: `8.8.8.8:21120` or `<atlas-ip>:21118` → not included.
   - `stored_address_with_wrong_identity_is_rejected`: reuse the `controlled_peer` helper and the `wrong_host_key_is_rejected_before_application_data` pattern with the address coming from `last`.
 - [ ] **Step 2: Run** `FOCUSED lan_fast_path`. Expected: the new tests fail.
 - [ ] **Step 3: Implement.**

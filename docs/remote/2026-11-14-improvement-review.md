@@ -18,7 +18,7 @@ Read-only review of branch `feature/android-emulator-remote` at `48ef7d9b1` (Ape
 - Pin atlas's ID and log loudly when it changes (finding 1, Aperture-side guard).
 - Retry the last known address with a longer timeout; try it first (finding 3).
 - Log the listener bind failure once per state change, not once per second (finding 5).
-- Stop the posts to `http://10.0.4.93:21114` (finding 9).
+- Stop the posts to `http://<atlas-ip>:21114` (finding 9).
 - Carry held Ctrl/Alt/Shift/Win on mouse events (finding 7).
 - Move only the picture under the per-frame rebuild; use `FilterQuality.low` (finding 4a).
 - Replace "Manage Jarvis…" with the connected PC's name (finding 18).
@@ -35,12 +35,12 @@ Read-only review of branch `feature/android-emulator-remote` at `48ef7d9b1` (Ape
 - `target/own-id-server-20261114/isolate-id-server.ps1:1-2` states it: hbbs "as SYSTEM … uses the Aperture service's own config folder … and rewrote RustDesk.toml". `isolate-result.txt` records `RustDesk.toml lastwrite 2026-11-14T11:31:43`, during the first hbbs starts.
 - `target/own-id-server-20261114/watchdog-id-server.ps1:13-22`: both tasks were then put **back to SYSTEM** ("NetworkService never got to listening"). Only the database moved (`DB_URL`). So hbbs and hbbr still load `LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml` and `RustDesk2.toml` on every start, and the watchdog restarts hbbs after each 10054.
 - The file on disk was last written by old code. `diag2.txt` and `isolate-result.txt` show `enc_id` with a 40-character value (quotes included). This fork always writes the newer nonce format (`libs/hbb_common/src/password_security.rs:212-228`, added upstream 2026-05-26), which gives about 72 characters for a 9–10 digit ID. 40 characters is the older format. Aperture cannot have written it.
-- What old code does when it cannot read `enc_id`: `Config::load` declares the ID invalid and regenerates it from the MAC address (`libs/hbb_common/src/config.rs:609-650`, `1046-1069`), then stores the file. The MAC-derived ID is deterministic; on atlas it is the old `373491561` (the server log of 2026-10-21 shows `id updated from 373491561 to 1984606088`, `target/shell-restart-20261114/diag4.txt`).
+- What old code does when it cannot read `enc_id`: `Config::load` declares the ID invalid and regenerates it from the MAC address (`libs/hbb_common/src/config.rs:609-650`, `1046-1069`), then stores the file. The MAC-derived ID is deterministic; on atlas it is the old `<rustdesk-id>` (the server log of 2026-10-21 shows `id updated from <rustdesk-id> to <rustdesk-id>`, `target/shell-restart-20261114/diag4.txt`).
 - The 2026-10-21 change itself has a plain cause: atlas was moved to a new Windows install that day (`docs/remote/2026-10-21-windows-tools.md`), so the MAC-derived ID met a different machine UUID on RustDesk's public server (`UUID_MISMATCH`, `src/rendezvous_mediator.rs:1287-1298`).
 
 **Not verified:** hbbs 1.1.16's source (which hbb_common revision it carries); the service folder itself (needs admin). The "two Aperture processes" theory was checked: the session-0 service loop (`src/platform/windows.rs:665-816`) calls no config setter, so it is unlikely.
 
-**Effect:** the running service kept `1984606088` in memory; the file said `373491561`. The next service restart loaded the old ID and the phone lost the PC. It will repeat whenever Aperture next writes a new-format `enc_id` (any ID change), because hbbs restarts several times a day. `password`, `salt` and `RustDesk2.toml` (trusted phones, `aperture-secure-lan`, server key) are exposed to the same whole-file rewrite by an older schema.
+**Effect:** the running service kept `<rustdesk-id>` in memory; the file said `<rustdesk-id>`. The next service restart loaded the old ID and the phone lost the PC. It will repeat whenever Aperture next writes a new-format `enc_id` (any ID change), because hbbs restarts several times a day. `password`, `salt` and `RustDesk2.toml` (trusted phones, `aperture-secure-lan`, server key) are exposed to the same whole-file rewrite by an older schema.
 
 **Fix**
 1. Isolate the ID server: run hbbs/hbbr under a dedicated local account (not SYSTEM) with rights only on `C:\ProgramData\Aperture\id-server`, or move them off Windows (also removes the 10054 problem, finding 17). Find out why the NetworkService attempt never listened before retrying it.
@@ -142,7 +142,7 @@ For the other two keyboard leftovers: clear the strip whenever input is reset or
 
 ### 9. Observability — atlas keeps posting to an API server that does not exist
 
-**Evidence:** `get_api_server_` derives `http://10.0.4.93:21114` from the custom ID server (`src/common.rs:1148-1168`). `diag2.txt` shows sysinfo, heartbeat and audit posts failing, each followed by an 18 s "TCP proxy fallback" wait.
+**Evidence:** `get_api_server_` derives `http://<atlas-ip>:21114` from the custom ID server (`src/common.rs:1148-1168`). `diag2.txt` shows sysinfo, heartbeat and audit posts failing, each followed by an 18 s "TCP proxy fallback" wait.
 
 **Fix:** return an empty API server when no `api-server` option is set, next to the existing Aperture switch `software_update_check_allowed` in `common.rs` (account sign-in is already disabled, commit `36d9f6c08`). Avoid the builtin `register-device=N` route: it also changes the `RegisterPk` message (`rendezvous_mediator.rs:1279`).
 
@@ -244,7 +244,7 @@ For the other two keyboard leftovers: clear the strip whenever input is reset or
 
 ## Smaller notes
 
-- Config writes are write-temp-then-rename with no retry (confy `do_store`). A failed rename leaves the temp file and only logs an error. One such orphan is in the user's folder: `C:\Users\gregr\AppData\Roaming\RustDesk\config\RustDesk.45876_ThreadId(22)_…` (2026-10-22). Check the service folder for the same.
+- Config writes are write-temp-then-rename with no retry (confy `do_store`). A failed rename leaves the temp file and only logs an error. One such orphan is in the user's folder: `C:\Users\<user>\AppData\Roaming\RustDesk\config\RustDesk.45876_ThreadId(22)_…` (2026-10-22). Check the service folder for the same.
 - A share-sheet target ("Share to Aperture") would make phone-to-PC file sending one step; the manifest has no `ACTION_SEND` filter. M, optional.
 - `printer service init failed` is logged at error on every start (`diag2.txt`); harmless noise.
 
