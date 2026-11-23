@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:auto_size_text_field/auto_size_text_field.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_hbb/common/formatter/id_formatter.dart';
 import 'package:flutter_hbb/common/widgets/connection_page_title.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -16,6 +17,9 @@ import '../../common/widgets/autocomplete.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
+import '../widgets/computers_hero.dart';
+import '../widgets/mirpg_remote_theme.dart';
+import '../widgets/trust_phone_sheet.dart' show pairedFlagKey;
 import 'home_page.dart';
 
 /// Connection page for connecting to a remote peer.
@@ -23,10 +27,10 @@ class ConnectionPage extends StatefulWidget implements PageShape {
   ConnectionPage({Key? key, required this.appBarActions}) : super(key: key);
 
   @override
-  final icon = const Icon(Icons.connected_tv);
+  final icon = const Icon(Icons.computer_outlined);
 
   @override
-  final title = translate("Connection");
+  final title = 'Computers';
 
   @override
   final List<Widget> appBarActions;
@@ -48,6 +52,18 @@ class _ConnectionPageState extends State<ConnectionPage> {
 
   StreamSubscription? _uniLinksSubscription;
 
+  /// The last-used PC; empty on a fresh install or after history is cleared.
+  String _lastId = '';
+
+  /// Online state of the last-used PC from the latest query; null if unknown.
+  bool? _heroOnline;
+
+  /// "Add another computer" starts folded away.
+  bool _addExpanded = false;
+
+  static const _onlineEvent = 'callback_query_onlines';
+  static const _onlineHandlerKey = 'ComputersHero';
+
   // https://github.com/flutter/flutter/issues/157244
   Iterable<Peer> _autocompleteOpts = [];
 
@@ -64,36 +80,138 @@ class _ConnectionPageState extends State<ConnectionPage> {
     super.initState();
     _allPeersLoader.init(setState);
     _idFocusNode.addListener(onFocusChanged);
-    if (_idController.text.isEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        final lastRemoteId = await bind.mainGetLastRemoteId();
-        if (lastRemoteId != _idController.id) {
-          setState(() {
-            _idController.id = lastRemoteId;
-          });
-        }
+    ConnectAttemptTracker.shared.addListener(_onAttemptChanged);
+    platformFFI.registerEventHandler(_onlineEvent, _onlineHandlerKey,
+        (evt) async => _onOnlineEvent(evt));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadLastId());
+    Get.put<TextEditingController>(_idEditingController);
+  }
+
+  /// Reads the last-used PC, then its name and whether it is online.
+  Future<void> _loadLastId() async {
+    final id = await bind.mainGetLastRemoteId();
+    if (!mounted) return;
+    if (id != _lastId) {
+      setState(() {
+        _lastId = id;
+        _heroOnline = null;
       });
     }
-    Get.put<TextEditingController>(_idEditingController);
+    if (id.isEmpty) return;
+    await _allPeersLoader.getAllPeers();
+    if (!mounted || id != _lastId) return;
+    _allPeersLoader.queryOnlines([_heroPeer()]);
+  }
+
+  Peer _heroPeer() {
+    for (final peer in _allPeersLoader.peers) {
+      if (peer.id == _lastId) return peer;
+    }
+    return Peer.fromJson({'id': _lastId});
+  }
+
+  void _onOnlineEvent(Map<String, dynamic> evt) {
+    if (!mounted || _lastId.isEmpty) return;
+    bool listed(String key) {
+      final ids = evt[key];
+      return ids is String && ids.split(',').contains(_lastId);
+    }
+
+    final online = listed('onlines')
+        ? true
+        : listed('offlines')
+            ? false
+            : null;
+    if (online != null && online != _heroOnline) {
+      setState(() => _heroOnline = online);
+    }
+  }
+
+  /// A connect attempt started, reached the PC or ended. `RemotePage` reports
+  /// from its own initState and dispose, which run while the tree is built.
+  void _onAttemptChanged() {
+    if (!mounted) return;
+    void apply() {
+      if (!mounted) return;
+      setState(() {});
+      _loadLastId();
+    }
+
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => apply());
+    } else {
+      apply();
+    }
+  }
+
+  ComputerHeroData _heroData() {
+    final peer = _heroPeer();
+    final name = peer.alias.isNotEmpty
+        ? peer.alias
+        : peer.hostname.isNotEmpty
+            ? peer.hostname
+            : formatID(_lastId);
+    return ComputerHeroData(
+      id: _lastId,
+      name: name,
+      online: _heroOnline ?? (peer.online ? true : null),
+      trusted: bind.getLocalFlutterOption(k: pairedFlagKey(_lastId)) == 'Y',
+    );
+  }
+
+  void _openSavedComputers() {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => Scaffold(
+        appBar: AppBar(title: Text(translate('Saved computers'))),
+        body: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(MirpgRemoteTheme.pageMargin, 0,
+                MirpgRemoteTheme.pageMargin, MirpgRemoteTheme.pageMargin),
+            child: MirpgSurface(
+              padding: const EdgeInsets.fromLTRB(10, 12, 10, 8),
+              child: PeerTabPage(),
+            ),
+          ),
+        ),
+      ),
+    ));
   }
 
   @override
   Widget build(BuildContext context) {
     Provider.of<FfiModel>(context);
-    return CustomScrollView(
-      slivers: [
-        SliverList(
-            delegate: SliverChildListDelegate([
-          if (!bind.isCustomClient() && !isIOS)
-            Obx(() => _buildUpdateUI(stateGlobal.updateUrl.value)),
-          _buildRemoteIDTextField(),
-        ])),
-        SliverFillRemaining(
-          hasScrollBody: true,
-          child: PeerTabPage(),
-        )
+    final hasHero = _lastId.isNotEmpty;
+    return ListView(
+      children: [
+        if (!bind.isCustomClient() && !isIOS)
+          Obx(() => _buildUpdateUI(stateGlobal.updateUrl.value)),
+        Padding(
+          padding: const EdgeInsets.all(MirpgRemoteTheme.pageMargin),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (hasHero) ...[
+                ComputerHeroCard(
+                  data: _heroData(),
+                  attempt: ConnectAttemptTracker.shared.value,
+                  onConnect: () => connect(context, _lastId),
+                ),
+                const SizedBox(height: MirpgRemoteTheme.pageMargin),
+              ],
+              AddComputerSection(
+                hasHero: hasHero,
+                expanded: _addExpanded,
+                onExpandedChanged: (v) => setState(() => _addExpanded = v),
+                idField: _buildRemoteIDTextField(),
+                onSavedComputers: _openSavedComputers,
+              ),
+            ],
+          ),
+        ),
       ],
-    ).marginOnly(top: 2, left: 10, right: 10);
+    );
   }
 
   /// Callback for the connect button.
@@ -138,213 +256,208 @@ class _ConnectionPageState extends State<ConnectionPage> {
             child: Container(
                 alignment: AlignmentDirectional.center,
                 width: double.infinity,
-                color: Colors.pinkAccent,
-                padding: const EdgeInsets.symmetric(vertical: 12),
+                color: MirpgRemoteTheme.warning.withOpacity(0.12),
+                padding:
+                    const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
                 child: Text(translate('Download new version'),
-                    style: const TextStyle(
-                        color: Colors.white, fontWeight: FontWeight.bold))));
+                    style: Theme.of(context)
+                        .textTheme
+                        .labelLarge
+                        ?.copyWith(color: MirpgRemoteTheme.warning))));
   }
 
   /// UI for the remote ID TextField.
   /// Search for a peer and connect to it if the id exists.
   Widget _buildRemoteIDTextField() {
     final w = SizedBox(
-      height: 84,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
-        child: Ink(
-          decoration: BoxDecoration(
-            color: Theme.of(context).cardColor,
-            borderRadius: BorderRadius.all(Radius.circular(13)),
-          ),
-          child: Row(
-            children: <Widget>[
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.only(left: 16, right: 16),
-                  child: RawAutocomplete<Peer>(
-                    optionsBuilder: (TextEditingValue textEditingValue) {
-                      if (textEditingValue.text == '') {
-                        _autocompleteOpts = const Iterable<Peer>.empty();
-                      } else if (_allPeersLoader.peers.isEmpty &&
-                          !_allPeersLoader.isPeersLoaded) {
-                        Peer emptyPeer = Peer(
-                          id: '',
-                          username: '',
-                          hostname: '',
-                          alias: '',
-                          platform: '',
-                          tags: [],
-                          hash: '',
-                          password: '',
-                          forceAlwaysRelay: false,
-                          rdpPort: '',
-                          rdpUsername: '',
-                          loginName: '',
-                          device_group_name: '',
-                          note: '',
-                        );
-                        _autocompleteOpts = [emptyPeer];
-                      } else {
-                        String textWithoutSpaces =
-                            textEditingValue.text.replaceAll(" ", "");
-                        if (int.tryParse(textWithoutSpaces) != null) {
-                          textEditingValue = TextEditingValue(
-                            text: textWithoutSpaces,
-                            selection: textEditingValue.selection,
-                          );
-                        }
-                        String textToFind = textEditingValue.text.toLowerCase();
-
-                        _autocompleteOpts = _allPeersLoader.peers
-                            .where((peer) =>
-                                peer.id.toLowerCase().contains(textToFind) ||
-                                peer.username
-                                    .toLowerCase()
-                                    .contains(textToFind) ||
-                                peer.hostname
-                                    .toLowerCase()
-                                    .contains(textToFind) ||
-                                peer.alias.toLowerCase().contains(textToFind))
-                            .toList();
-                        _allPeersLoader.queryOnlines(_autocompleteOpts);
-                      }
-                      return _autocompleteOpts;
-                    },
-                    focusNode: _idFocusNode,
-                    textEditingController: _idEditingController,
-                    fieldViewBuilder: (BuildContext context,
-                        TextEditingController fieldTextEditingController,
-                        FocusNode fieldFocusNode,
-                        VoidCallback onFieldSubmitted) {
-                      updateTextAndPreserveSelection(
-                          fieldTextEditingController, _idController.text);
-                      return AutoSizeTextField(
-                        controller: fieldTextEditingController,
-                        focusNode: fieldFocusNode,
-                        minFontSize: 18,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        keyboardType: TextInputType.visiblePassword,
-                        // keyboardType: TextInputType.number,
-                        onChanged: (String text) {
-                          _idController.id = text;
-                        },
-                        style: const TextStyle(
-                          fontFamily: 'WorkSans',
-                          fontWeight: FontWeight.bold,
-                          fontSize: 30,
-                          color: MyTheme.idColor,
-                        ),
-                        decoration: InputDecoration(
-                          labelText: translate('Remote ID'),
-                          // hintText: 'Enter your remote ID',
-                          border: InputBorder.none,
-                          helperStyle: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                            color: MyTheme.darkGray,
-                          ),
-                          labelStyle: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 16,
-                            letterSpacing: 0.2,
-                            color: MyTheme.darkGray,
-                          ),
-                        ),
-                        inputFormatters: [IDTextInputFormatter()],
-                        onSubmitted: (_) {
-                          onConnect();
-                        },
+      height: 72,
+      child: MirpgSurface(
+        padding: const EdgeInsets.fromLTRB(4, 4, 6, 4),
+        radius: MirpgRemoteTheme.controlRadius,
+        child: Row(
+          children: <Widget>[
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.only(left: 12, right: 8),
+                child: RawAutocomplete<Peer>(
+                  optionsBuilder: (TextEditingValue textEditingValue) {
+                    if (textEditingValue.text == '') {
+                      _autocompleteOpts = const Iterable<Peer>.empty();
+                    } else if (_allPeersLoader.peers.isEmpty &&
+                        !_allPeersLoader.isPeersLoaded) {
+                      Peer emptyPeer = Peer(
+                        id: '',
+                        username: '',
+                        hostname: '',
+                        alias: '',
+                        platform: '',
+                        tags: [],
+                        hash: '',
+                        password: '',
+                        forceAlwaysRelay: false,
+                        rdpPort: '',
+                        rdpUsername: '',
+                        loginName: '',
+                        device_group_name: '',
+                        note: '',
                       );
-                    },
-                    onSelected: (option) {
-                      setState(() {
-                        _idController.id = option.id;
-                        FocusScope.of(context).unfocus();
-                      });
-                    },
-                    optionsViewBuilder: (BuildContext context,
-                        AutocompleteOnSelected<Peer> onSelected,
-                        Iterable<Peer> options) {
-                      options = _autocompleteOpts;
-                      double maxHeight = options.length * 50;
-                      if (options.length == 1) {
-                        maxHeight = 52;
-                      } else if (options.length == 3) {
-                        maxHeight = 146;
-                      } else if (options.length == 4) {
-                        maxHeight = 193;
+                      _autocompleteOpts = [emptyPeer];
+                    } else {
+                      String textWithoutSpaces =
+                          textEditingValue.text.replaceAll(" ", "");
+                      if (int.tryParse(textWithoutSpaces) != null) {
+                        textEditingValue = TextEditingValue(
+                          text: textWithoutSpaces,
+                          selection: textEditingValue.selection,
+                        );
                       }
-                      maxHeight = maxHeight.clamp(0, 200);
-                      return Align(
-                          alignment: Alignment.topLeft,
-                          child: Container(
-                              decoration: BoxDecoration(
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withOpacity(0.3),
-                                    blurRadius: 5,
-                                    spreadRadius: 1,
-                                  ),
-                                ],
-                              ),
-                              child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(5),
-                                  child: Material(
-                                      elevation: 4,
-                                      child: ConstrainedBox(
-                                          constraints: BoxConstraints(
-                                            maxHeight: maxHeight,
-                                            maxWidth: 320,
-                                          ),
-                                          child: _allPeersLoader
-                                                      .peers.isEmpty &&
-                                                  !_allPeersLoader.isPeersLoaded
-                                              ? Container(
-                                                  height: 80,
-                                                  child: Center(
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                    strokeWidth: 2,
-                                                  )))
-                                              : ListView(
-                                                  padding:
-                                                      EdgeInsets.only(top: 5),
-                                                  children: options
-                                                      .map((peer) =>
-                                                          AutocompletePeerTile(
-                                                              onSelect: () =>
-                                                                  onSelected(
-                                                                      peer),
-                                                              peer: peer))
-                                                      .toList(),
-                                                ))))));
-                    },
+                      String textToFind = textEditingValue.text.toLowerCase();
+
+                      _autocompleteOpts = _allPeersLoader.peers
+                          .where((peer) =>
+                              peer.id.toLowerCase().contains(textToFind) ||
+                              peer.username
+                                  .toLowerCase()
+                                  .contains(textToFind) ||
+                              peer.hostname
+                                  .toLowerCase()
+                                  .contains(textToFind) ||
+                              peer.alias.toLowerCase().contains(textToFind))
+                          .toList();
+                      _allPeersLoader.queryOnlines(_autocompleteOpts);
+                    }
+                    return _autocompleteOpts;
+                  },
+                  focusNode: _idFocusNode,
+                  textEditingController: _idEditingController,
+                  fieldViewBuilder: (BuildContext context,
+                      TextEditingController fieldTextEditingController,
+                      FocusNode fieldFocusNode,
+                      VoidCallback onFieldSubmitted) {
+                    updateTextAndPreserveSelection(
+                        fieldTextEditingController, _idController.text);
+                    return AutoSizeTextField(
+                      controller: fieldTextEditingController,
+                      focusNode: fieldFocusNode,
+                      minFontSize: 15,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      keyboardType: TextInputType.visiblePassword,
+                      onChanged: (String text) {
+                        _idController.id = text;
+                      },
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w500,
+                          ),
+                      decoration: const InputDecoration(
+                        labelText: 'Computer ID',
+                        hintText: 'Enter ID',
+                        filled: false,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        contentPadding: EdgeInsets.symmetric(vertical: 8),
+                      ),
+                      inputFormatters: [IDTextInputFormatter()],
+                      onSubmitted: (_) {
+                        onConnect();
+                      },
+                    );
+                  },
+                  onSelected: (option) {
+                    setState(() {
+                      _idController.id = option.id;
+                      FocusScope.of(context).unfocus();
+                    });
+                  },
+                  optionsViewBuilder: (BuildContext context,
+                      AutocompleteOnSelected<Peer> onSelected,
+                      Iterable<Peer> options) {
+                    options = _autocompleteOpts;
+                    double maxHeight = options.length * 50;
+                    if (options.length == 1) {
+                      maxHeight = 52;
+                    } else if (options.length == 3) {
+                      maxHeight = 146;
+                    } else if (options.length == 4) {
+                      maxHeight = 193;
+                    }
+                    maxHeight = maxHeight.clamp(0, 200);
+                    return Align(
+                        alignment: Alignment.topLeft,
+                        child: Container(
+                            decoration: BoxDecoration(
+                              color: MirpgRemoteTheme.raised,
+                              borderRadius: BorderRadius.circular(
+                                  MirpgRemoteTheme.controlRadius),
+                              border:
+                                  Border.all(color: MirpgRemoteTheme.outline),
+                            ),
+                            child: ClipRRect(
+                                borderRadius: BorderRadius.circular(
+                                    MirpgRemoteTheme.controlRadius),
+                                child: Material(
+                                    color: MirpgRemoteTheme.raised,
+                                    elevation: 0,
+                                    child: ConstrainedBox(
+                                        constraints: BoxConstraints(
+                                          maxHeight: maxHeight,
+                                          maxWidth: 320,
+                                        ),
+                                        child: _allPeersLoader.peers.isEmpty &&
+                                                !_allPeersLoader.isPeersLoaded
+                                            ? const SizedBox(
+                                                height: 80,
+                                                child: Center(
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                )))
+                                            : ListView(
+                                                padding: const EdgeInsets.only(
+                                                    top: 5),
+                                                children: options
+                                                    .map((peer) =>
+                                                        AutocompletePeerTile(
+                                                            onSelect: () =>
+                                                                onSelected(
+                                                                    peer),
+                                                            peer: peer))
+                                                    .toList(),
+                                              ))))));
+                  },
+                ),
+              ),
+            ),
+            Obx(() => Offstage(
+                  offstage: _idEmpty.value,
+                  child: IconButton(
+                      tooltip: 'Clear',
+                      onPressed: () {
+                        setState(() {
+                          _idController.clear();
+                        });
+                      },
+                      icon: const Icon(Icons.close,
+                          color: MirpgRemoteTheme.textSecondary)),
+                )),
+            SizedBox(
+              width: 52,
+              height: 52,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(
+                        MirpgRemoteTheme.controlRadius - 2),
                   ),
                 ),
+                onPressed: onConnect,
+                child: const Icon(Icons.arrow_forward_rounded),
               ),
-              Obx(() => Offstage(
-                    offstage: _idEmpty.value,
-                    child: IconButton(
-                        onPressed: () {
-                          setState(() {
-                            _idController.clear();
-                          });
-                        },
-                        icon: Icon(Icons.clear, color: MyTheme.darkGray)),
-                  )),
-              SizedBox(
-                width: 60,
-                height: 60,
-                child: IconButton(
-                  icon: const Icon(Icons.arrow_forward,
-                      color: MyTheme.darkGray, size: 45),
-                  onPressed: onConnect,
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -362,6 +475,8 @@ class _ConnectionPageState extends State<ConnectionPage> {
   @override
   void dispose() {
     _uniLinksSubscription?.cancel();
+    ConnectAttemptTracker.shared.removeListener(_onAttemptChanged);
+    platformFFI.unregisterEventHandler(_onlineEvent, _onlineHandlerKey);
     _idController.dispose();
     _idFocusNode.removeListener(onFocusChanged);
     _allPeersLoader.clear();

@@ -22,12 +22,19 @@ if (localPropertiesFile.exists()) {
     }
 }
 
-def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+def apertureRelease = project.findProperty('apertureRelease') == 'true'
+def apertureBranding = apertureRelease || project.findProperty('mirpgTestApk') == 'true'
+// Side-by-side test build: its own app ID and name, so it installs next to the
+// release-signed Aperture without replacing it or touching its data.
+def apertureSideBySide = !apertureRelease && project.findProperty('apertureSideBySide') == 'true'
+def apertureVersion = apertureRelease ? new JsonSlurper().parse(rootProject.file('../../tools/aperture-release.json')) : null
+
+def flutterVersionCode = apertureRelease ? apertureVersion.versionCode.toString() : localProperties.getProperty('flutter.versionCode')
 if (flutterVersionCode == null) {
     flutterVersionCode = '1'
 }
 
-def flutterVersionName = localProperties.getProperty('flutter.versionName')
+def flutterVersionName = apertureRelease ? apertureVersion.version : localProperties.getProperty('flutter.versionName')
 if (flutterVersionName == null) {
     flutterVersionName = '1.0'
 }
@@ -100,6 +107,13 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId "com.carriez.flutter_hbb"
+        manifestPlaceholders.rustdeskAppLabel = apertureSideBySide ? 'Aperture Test' : (apertureBranding ? 'Aperture' : 'RustDesk')
+        manifestPlaceholders.rustdeskAppIcon = apertureBranding ? '@mipmap/aperture_launcher' : '@mipmap/ic_launcher'
+        if (apertureSideBySide) {
+            applicationIdSuffix ".aperturetest"
+        } else if (apertureBranding) {
+            applicationIdSuffix ".mirpgtest"
+        }
         minSdkVersion 22
         targetSdkVersion 36
         versionCode flutterVersionCode.toInteger()
@@ -117,9 +131,8 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig signingConfigs.release
+            // Aperture's release wrapper signs with its private key and upgrade lineage.
+            signingConfig apertureRelease ? null : (project.findProperty('mirpgTestApk') == 'true' ? signingConfigs.debug : signingConfigs.release)
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules'
         }
     }

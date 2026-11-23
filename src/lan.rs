@@ -350,3 +350,56 @@ async fn handle_received_peers(mut rx: UnboundedReceiver<config::DiscoveryPeer>)
     crate::flutter_ffi::main_load_lan_peers();
     Ok(())
 }
+
+pub(crate) const SECURE_LAN_PORT: u16 = 21120;
+#[cfg(target_os = "windows")]
+const SECURE_LAN_OPTION: &str = "aperture-secure-lan";
+
+#[cfg(target_os = "windows")]
+pub(crate) async fn serve_secure(server: crate::server::ServerPtr) {
+    use hbb_common::tokio::{net::TcpListener, time::{sleep, Duration}};
+    let mut listener: Option<TcpListener> = None;
+    let mut bound = None;
+    loop {
+        let enabled = Config::get_option(SECURE_LAN_OPTION) == "Y"
+            && !config::option2bool("stop-service", &Config::get_option("stop-service"));
+        let wanted = if enabled {
+            default_net::get_default_interface().ok()
+                .and_then(|interface| interface.ipv4.into_iter().find(|ip| ip.addr.is_private()))
+                .map(|ip| SocketAddr::from((ip.addr, SECURE_LAN_PORT)))
+        } else { None };
+        if wanted != bound { listener = None; bound = None; }
+        if listener.is_none() {
+            if let Some(address) = wanted {
+                match TcpListener::bind(address).await {
+                    Ok(socket) => {
+                        log::info!("Aperture encrypted LAN listener ready on {}", address);
+                        listener = Some(socket);
+                        bound = Some(address);
+                    },
+                    Err(error) => log::debug!("Aperture LAN listener unavailable: {}", error),
+                }
+            }
+        }
+        let Some(socket) = listener.as_ref() else {
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        };
+        if let Ok(Ok((stream, peer))) = hbb_common::timeout(1000, socket.accept()).await {
+            let Some(local) = bound else { continue; };
+            if !peer.ip().is_loopback() && !matches!(peer.ip(), IpAddr::V4(ip) if ip.is_private()) {
+                continue;
+            }
+            let _ = stream.set_nodelay(true);
+            let server = server.clone();
+            tokio::spawn(async move {
+                allow_err!(crate::server::create_tcp_connection(server,
+                    hbb_common::Stream::from(stream, local), peer, true,
+                    crate::server::ConnectionMeta {
+                        secure_lan: true,
+                        ..Default::default()
+                    }).await);
+            });
+        }
+    }
+}

@@ -52,6 +52,10 @@ pub trait FileManager: Interface {
         self.send(Data::CancelJob(id));
     }
 
+    fn pause_job(&self, id: i32) {
+        self.send(Data::PauseJob(id));
+    }
+
     fn read_empty_dirs(&self, path: String, include_hidden: bool) {
         let mut msg_out = Message::new();
         let mut file_action = FileAction::new();
@@ -153,6 +157,34 @@ pub trait FileManager: Interface {
             file_num,
             include_hidden,
             is_remote,
+            None,
+        )));
+    }
+
+    fn add_job_with_ownership_token(
+        &self,
+        id: i32,
+        r#type: i32,
+        path: String,
+        to: String,
+        file_num: i32,
+        include_hidden: bool,
+        is_remote: bool,
+        ownership_token: String,
+    ) {
+        self.send(Data::AddJob((
+            id,
+            r#type.into(),
+            path,
+            to,
+            file_num,
+            include_hidden,
+            is_remote,
+            if ownership_token.is_empty() {
+                None
+            } else {
+                Some(ownership_token)
+            },
         )));
     }
 
@@ -167,6 +199,7 @@ pub trait FileManager: Interface {
         need_override: bool,
         remember: bool,
         is_upload: bool,
+        conflict_token: String,
     ) {
         log::info!(
             "confirm file transfer, job: {}, need_override: {}",
@@ -179,6 +212,22 @@ pub trait FileManager: Interface {
             need_override,
             remember,
             is_upload,
+            conflict_token,
+        )));
+    }
+
+    fn set_confirm_keep_both_file(
+        &self,
+        id: i32,
+        file_num: i32,
+        is_upload: bool,
+        conflict_token: String,
+    ) {
+        self.send(Data::SetConfirmKeepBothFile((
+            id,
+            file_num,
+            is_upload,
+            conflict_token,
         )));
     }
 

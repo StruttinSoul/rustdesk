@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#F5F7FA">
+  <title>MIRPG Remote · Studio V4 design preview</title>
+  <style>
+    :root{--paper:#f5f7fa;--surface:#fff;--ink:#192431;--muted:#5e6d7f;--rule:#dce3ea;--blue:#2855cc;--blue-bg:#eaf0ff;--green:#0c795d;--preview-bg:#e9edf2;--button-blue:#2855cc}
+    :root[data-theme="dark"]{color-scheme:dark;--paper:#101923;--surface:#1c2938;--ink:#f0f5fc;--muted:#bbc8d8;--rule:#36475b;--blue:#a4bcff;--blue-bg:#273b60;--green:#70d8b0;--preview-bg:#15212e;--button-blue:#3964cf}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}
+    body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 Inter,Segoe UI,Arial,sans-serif}
+    a{color:inherit}main{max-width:1480px;margin:auto;padding:28px clamp(18px,4vw,64px) 100px}
+    .top{display:flex;align-items:center;justify-content:space-between;gap:24px;padding-bottom:20px;border-bottom:1px solid var(--rule)}
+    .top-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end}
+    .theme-toggle{border:1px solid var(--rule);background:var(--surface);color:var(--ink);border-radius:11px;padding:10px 14px;min-height:44px;cursor:pointer;font:700 13px/1 Inter,Segoe UI,Arial,sans-serif}
+    .theme-toggle:focus-visible,.button:focus-visible,.meta a:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+    .brand{font-weight:800;font-size:19px;letter-spacing:-.04em}.brand span{display:inline-grid;place-items:center;background:var(--blue);color:white;width:33px;height:33px;border-radius:9px;margin-right:9px}
+    .version{background:var(--blue-bg);padding:7px 12px;border-radius:99px;font-size:12px;font-weight:700;color:var(--blue)}
+    h1{font-size:clamp(34px,6vw,70px);line-height:1.07;letter-spacing:-.06em;margin:62px 0 18px;max-width:940px}
+    h2{font-size:27px;letter-spacing:-.04em;margin:0 0 8px}p{max-width:750px;color:var(--muted);margin:0 0 18px}
+    .tag{display:inline-block;color:var(--blue);font-size:12px;letter-spacing:.08em;font-weight:800;text-transform:uppercase}
+    .actions{display:flex;flex-wrap:wrap;gap:10px;margin:28px 0 44px}
+    .button{display:inline-block;padding:13px 20px;text-decoration:none;border-radius:11px;background:var(--surface);font-weight:700;border:1px solid var(--rule)}
+    .button.primary{background:var(--button-blue);color:white;border-color:var(--button-blue)}
+    .focus{background:var(--surface);border:1px solid var(--rule);border-radius:23px;padding:18px;box-shadow:0 14px 55px rgba(23,40,68,.045);overflow:auto}
+    .focus img{display:block;width:100%;min-width:780px;height:auto}
+    .section-head{display:flex;align-items:end;justify-content:space-between;gap:16px;margin:64px 0 21px}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px}
+    .screen{background:var(--surface);border:1px solid var(--rule);border-radius:18px;overflow:hidden}
+    .screen .picture{background:var(--preview-bg);padding:18px 18px 8px;text-align:center}
+    .screen img{display:block;width:min(100%,350px);height:auto;margin:auto;filter:drop-shadow(0 6px 15px rgba(17,35,51,.12))}
+    .meta{display:flex;justify-content:space-between;align-items:start;gap:10px;padding:17px 18px 20px}
+    .meta b{font-size:17px}.meta small{display:block;color:var(--muted);font-size:13px;margin-top:4px}
+    .meta a{white-space:nowrap;color:var(--blue);font-size:13px;font-weight:700;text-decoration:none}
+    .key{display:flex;gap:14px;flex-wrap:wrap;padding:18px 0 0}
+    .key span{border:1px solid var(--rule);padding:7px 13px;border-radius:8px;background:var(--surface);font-size:12px;font-weight:600}
+    footer{color:var(--muted);border-top:1px solid var(--rule);padding-top:22px;margin-top:65px;font-size:13px}
+    @media(max-width:1050px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:620px){.grid{grid-template-columns:1fr}.top{gap:12px;align-items:flex-start;flex-wrap:wrap}.top-actions{gap:7px}.version{font-size:11px}h1{margin-top:38px}.focus img{min-width:680px}}
+  </style>
+</head>
+<body><main>
+  <div class="top"><div class="brand"><span>M</span>MIRPG Remote</div><div class="top-actions"><div class="version">STUDIO V4 · OPENPENCIL</div><button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to dark mode" aria-pressed="false">☾ Dark mode</button></div></div>
+  <div class="tag" style="margin-top:54px">Interaction-led remote control</div>
+  <h1>Designed to make remote work feel effortless.</h1>
+  <p>Professional light and dark themes for Jarvis, Windows monitors, BlueStacks instances, and Codex. Blue shows actions, green shows connectivity, and the remote screen stays the visual priority.</p>
+  <div class="actions"><a id="fig-link" class="button primary" href="MIRPG-Studio-V4.fig">Open editable design (.fig)</a><a class="button" href="exports/MIRPG-Studio-V4-all.png" download>Download six-screen overview</a><a class="button" href="qa/MIRPG-STUDIO-V4-REVIEW.md">Review notes</a></div>
+  <div class="focus"><img src="exports/MIRPG-Studio-V4-all.png" alt="Side by side preview of six MIRPG Remote Studio V4 screens"></div>
+  <div class="section-head"><div><div class="tag">Six editable artboards per theme</div><h2>Explore each screen</h2></div><p>393 × 852 reference layouts, exported at 2× resolution.</p></div>
+  <div class="grid">
+    <div class="screen"><div class="picture"><img src="exports/MIRPG-Studio-V4-home.png" alt="Home dashboard design"></div><div class="meta"><div><b>01 · Home</b><small>Monitors and emulator preview tiles.</small></div><a href="exports/MIRPG-Studio-V4-home.png">PNG ↗</a></div></div>
+    <div class="screen"><div class="picture"><img src="exports/MIRPG-Studio-V4-screens.png" alt="Screen switcher design"></div><div class="meta"><div><b>02 · All screens</b><small>Two Windows and three Android targets.</small></div><a href="exports/MIRPG-Studio-V4-screens.png">PNG ↗</a></div></div>
+    <div class="screen"><div class="picture"><img src="exports/MIRPG-Studio-V4-android.png" alt="Immersive Android remote design"></div><div class="meta"><div><b>03 · Android session</b><small>Right-side buttons and left-side switcher.</small></div><a href="exports/MIRPG-Studio-V4-android.png">PNG ↗</a></div></div>
+    <div class="screen"><div class="picture"><img src="exports/MIRPG-Studio-V4-windows.png" alt="Readable Windows desktop design"></div><div class="meta"><div><b>04 · Windows session</b><small>Readable zoom and precise controls.</small></div><a href="exports/MIRPG-Studio-V4-windows.png">PNG ↗</a></div></div>
+    <div class="screen"><div class="picture"><img src="exports/MIRPG-Studio-V4-codex.png" alt="Codex tab design"></div><div class="meta"><div><b>05 · Codex</b><small>Focused conversation with quiet tool activity.</small></div><a href="exports/MIRPG-Studio-V4-codex.png">PNG ↗</a></div></div>
+    <div class="screen"><div class="picture"><img src="exports/MIRPG-Studio-V4-recovery.png" alt="Connection recovery design"></div><div class="meta"><div><b>06 · Recovery</b><small>Fix one stalled stream without losing the host.</small></div><a href="exports/MIRPG-Studio-V4-recovery.png">PNG ↗</a></div></div>
+  </div>
+  <div class="section-head"><div><div class="tag">Guiding principles</div><h2>Familiar control, distinctive clarity.</h2></div></div>
+  <div class="key"><span>LAN-first connectivity</span><span>One-tap screen switching</span><span>Live-preview layout</span><span>Accessible, visible controls</span><span>Recovery without disconnecting</span></div>
+  <footer>Design proposal only. Game and desktop preview illustrations are static examples, not captured video. Editable light/dark .fig files and high-resolution PNGs are included; runtime behavior, automatic OS theme selection, and live preview performance still require implementation and device testing.</footer>
+</main>
+<script>
+  (() => {
+    const toggle = document.getElementById('theme-toggle');
+    const assets = [...document.querySelectorAll('.focus img, .screen img, .meta a, a[download]')];
+    for (const element of assets) {
+      const field = element.tagName === 'IMG' ? 'src' : 'href';
+      element.dataset.lightAsset = element.getAttribute(field);
+    }
+    const stored = (() => {try {return localStorage.getItem('mirpg-studio-v4-theme');} catch {return null;}})();
+    const preference = window.matchMedia?.('(prefers-color-scheme: dark)');
+    const apply = dark => {
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      document.querySelector('meta[name="theme-color"]').content = dark ? '#101923' : '#f5f7fa';
+      document.getElementById('fig-link').href = dark ? 'MIRPG-Studio-V4-dark.fig' : 'MIRPG-Studio-V4.fig';
+      toggle.textContent = dark ? '☀ Light mode' : '☾ Dark mode';
+      toggle.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
+      toggle.setAttribute('aria-pressed',String(dark));
+      for (const element of assets) {
+        const field = element.tagName === 'IMG' ? 'src' : 'href';
+        const path = element.dataset.lightAsset;
+        element.setAttribute(field, dark ? path.replace(/\.png$/i, '-dark.png') : path);
+      }
+    };
+    apply(stored === 'dark' || (stored === null && Boolean(preference?.matches)));
+    toggle.addEventListener('click', () => {
+      const dark = document.documentElement.dataset.theme !== 'dark';
+      try {localStorage.setItem('mirpg-studio-v4-theme', dark ? 'dark' : 'light');} catch {}
+      apply(dark);
+    });
+    preference?.addEventListener?.('change', event => {
+      try {if(localStorage.getItem('mirpg-studio-v4-theme') !== null) return;} catch {}
+      apply(event.matches);
+    });
+  })();
+</script>
+</body></html>

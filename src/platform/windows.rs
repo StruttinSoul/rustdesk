@@ -1105,7 +1105,12 @@ pub fn is_physical_console_session() -> Option<bool> {
 pub fn get_active_username() -> String {
     // get_active_user will give console username higher priority
     if let Some(name) = get_current_session_username() {
-        return name;
+        // Services run in session 0, where WTSUserName is commonly empty. An
+        // empty session-0 result must fall through to the active console/RDP
+        // lookup so LocalSystem-hosted features can resolve the signed-in user.
+        if !name.is_empty() {
+            return name;
+        }
     }
     if !is_root() {
         return crate::username();
@@ -2757,7 +2762,11 @@ pub fn send_message_to_hnwd(
     unsafe {
         let class_name_utf16 = wide_string(class_name);
         let window_name_utf16 = wide_string(window_name);
-        let window = FindWindowW(class_name_utf16.as_ptr(), window_name_utf16.as_ptr());
+        let mut window = FindWindowW(class_name_utf16.as_ptr(), window_name_utf16.as_ptr());
+        if window.is_null() && window_name == crate::get_app_name() {
+            let display_name = wide_string("Aperture");
+            window = FindWindowW(class_name_utf16.as_ptr(), display_name.as_ptr());
+        }
         if window.is_null() {
             log::warn!("no such window {}:{}", class_name, window_name);
             return false;

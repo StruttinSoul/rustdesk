@@ -15,6 +15,8 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
+import 'package:flutter_hbb/models/clipboard_transfer_model.dart';
+import 'package:flutter_hbb/models/emulator_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:flutter_hbb/models/group_model.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
@@ -41,6 +43,7 @@ import '../common.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'input_model.dart';
+import 'session_reconnect.dart';
 import 'platform_model.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
@@ -104,6 +107,30 @@ class CachedPeerData {
 }
 
 class FfiModel with ChangeNotifier {
+  FfiModel(
+    this.parent, {
+    void Function()? onConnectionInvalidated,
+    void Function()? onClipboardContextChanged,
+  })  : _onConnectionInvalidated = onConnectionInvalidated,
+        _onClipboardContextChanged = onClipboardContextChanged {
+    clear();
+    sessionId = parent.target!.sessionId;
+    cachedPeerData.permissions = _permissions;
+    virtualMouseMode = VirtualMouseMode(this);
+  }
+
+  final void Function()? _onConnectionInvalidated;
+  final void Function()? _onClipboardContextChanged;
+  bool authenticatedPeer = false;
+  /// Text of the last connection error msgbox; the Computers card shows it.
+  String lastConnectionError = '';
+  int peerInfoGeneration = 0;
+  int _reconnectGeneration = 0;
+
+  /// Reconnects a dropped dashboard session on its own. Set by the dashboard
+  /// page while it is open; null everywhere else, so other sessions keep the
+  /// stock error dialog.
+  SessionReconnectController? sessionReconnect;
   CachedPeerData cachedPeerData = CachedPeerData();
   PeerInfo _pi = PeerInfo();
   int? lastUserDisplay;
@@ -172,13 +199,6 @@ class FfiModel with ChangeNotifier {
     _inputBlocked = v;
   }
 
-  FfiModel(this.parent) {
-    clear();
-    sessionId = parent.target!.sessionId;
-    cachedPeerData.permissions = _permissions;
-    virtualMouseMode = VirtualMouseMode(this);
-  }
-
   Rect? globalDisplaysRect() => _getDisplaysRect(_pi.displays, true);
   Rect? displaysRect() => _getDisplaysRect(_pi.getCurDisplays(), false);
   Rect? _getDisplaysRect(List<Display> displays, bool useDisplayScale) {
@@ -240,11 +260,22 @@ class FfiModel with ChangeNotifier {
       }
     }
 
+    _onClipboardContextChanged?.call();
+
     debugPrint('updatePermission: $_permissions');
     notifyListeners();
   }
 
   bool get keyboard => _permissions['keyboard'] != false;
+
+  int get reconnectGeneration => _reconnectGeneration;
+
+  void markReconnectStarted() {
+    _reconnectGeneration++;
+    _onConnectionInvalidated?.call();
+    _onClipboardContextChanged?.call();
+    notifyListeners();
+  }
 
   clear() {
     _pi = PeerInfo();
@@ -252,6 +283,9 @@ class FfiModel with ChangeNotifier {
     _cancelPendingMonitorRestore();
     _secure = null;
     _direct = null;
+    authenticatedPeer = false;
+    _onConnectionInvalidated?.call();
+    _onClipboardContextChanged?.call();
     _inputBlocked = false;
     _timer?.cancel();
     _timer = null;
@@ -355,7 +389,9 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'cursor_position') {
         await parent.target?.cursorModel.updateCursorPosition(evt, peerId);
       } else if (name == 'clipboard') {
-        Clipboard.setData(ClipboardData(text: evt['content']));
+        if (!_pi.features.manualClipboard) {
+          Clipboard.setData(ClipboardData(text: evt['content']));
+        }
       } else if (name == 'permission') {
         updatePermission(evt, peerId);
       } else if (name == 'chat_client_mode') {
@@ -366,12 +402,37 @@ class FfiModel with ChangeNotifier {
             .receive(int.parse(evt['id'] as String), evt['text'] ?? '');
       } else if (name == 'terminal_response') {
         parent.target?.routeTerminalResponse(evt);
+      } else if (name == 'emulator_response') {
+        final model = parent.target?.emulatorModel;
+        final previousId = model?.guestSessionId;
+        final previousWidth = model?.width;
+        final previousHeight = model?.height;
+        model?.handleResponse(evt);
+        if (model != null &&
+            !model.dashboardActive &&
+            (previousId != model.guestSessionId ||
+                previousWidth != model.width ||
+                previousHeight != model.height ||
+                (model.selected && !model.streaming))) {
+          parent.target?.imageModel.disposeImage();
+        }
+      } else if (name == 'aperture_pair_device_result') {
+        final target = parent.target;
+        if (target != null) {
+          target.aperturePairResult.value = Map<String, dynamic>.from(evt);
+        }
+      } else if (name == 'manual_clipboard_response') {
+        parent.target?.clipboardTransferModel.handleResponse(evt);
       } else if (name == 'file_dir') {
         parent.target?.fileModel.receiveFileDir(evt);
       } else if (name == 'empty_dirs') {
         parent.target?.fileModel.receiveEmptyDirs(evt);
       } else if (name == 'job_progress') {
         parent.target?.fileModel.jobController.tryUpdateJobProgress(evt);
+      } else if (name == 'job_paused') {
+        parent.target?.fileModel.jobController.jobPaused(evt);
+      } else if (name == 'job_cancelled') {
+        parent.target?.fileModel.jobController.jobCancelled(evt);
       } else if (name == 'job_done') {
         bool? refresh =
             await parent.target?.fileModel.jobController.jobDone(evt);
@@ -394,6 +455,10 @@ class FfiModel with ChangeNotifier {
         parent.target?.serverModel.onClientRemove(evt);
       } else if (name == 'update_quality_status') {
         parent.target?.qualityMonitorModel.updateQualityStatus(evt);
+      } else if (name == 'update_stream_liveness') {
+        parent.target?.qualityMonitorModel.updateStreamLiveness(evt);
+      } else if (name == 'update_decoder_health') {
+        parent.target?.qualityMonitorModel.updateDecoderHealth(evt);
       } else if (name == 'update_block_input_state') {
         updateBlockInputState(evt, peerId);
       } else if (name == 'update_privacy_mode') {
@@ -887,6 +952,18 @@ class FfiModel with ChangeNotifier {
     final text = evt['text'];
     final link = evt['link'];
 
+    if (title == 'Connection Error' ||
+        (type is String && type.contains('error'))) {
+      lastConnectionError = text?.toString() ?? '';
+    }
+
+    final connectionInterrupted = title == 'Connection Error' ||
+        type == 'restarting' ||
+        (type == 'restarting-show' && title == 'Connecting...');
+    if (connectionInterrupted) {
+      _onConnectionInvalidated?.call();
+    }
+
     // The peer-gone detector reconnects under `restarting-show` rather than an error title, so
     // it needs naming here too. By its own title, not the type: an explicitly restarted remote
     // device reaches the same type from a path this change does not touch.
@@ -897,6 +974,12 @@ class FfiModel with ChangeNotifier {
       _androidDocumentPickerInterruptedConnection = true;
       return;
     }
+
+    // A dropped dashboard session reconnects on its own and shows a small
+    // "Reconnecting…" state instead of the error dialog. It hands the box back
+    // when it gives up, and for refusals and password or 2FA prompts.
+    final autoReconnect = sessionReconnect;
+    if (autoReconnect != null && autoReconnect.onMessage(evt)) return;
 
     // Disable relative mouse mode on any error-type message to ensure cursor is released.
     // This includes connection errors, session-ending messages, elevation errors, etc.
@@ -927,6 +1010,7 @@ class FfiModel with ChangeNotifier {
       if (_restartReconnectDelayTimer == null) {
         parent.target?.inputModel.setRelativeMouseMode(false);
         _cancelPendingMonitorRestore();
+        markReconnectStarted();
         bind.sessionReconnect(sessionId: sessionId, forceRelay: false);
         clearPermissions();
         // Retry once more after the silent window so restart reconnect attempts
@@ -1107,11 +1191,24 @@ class FfiModel with ChangeNotifier {
     _pendingRestoreTimer = null;
   }
 
+  /// One automatic reconnect attempt: the same session restart as above, but
+  /// without the blocking "Connecting..." dialog (the dashboard shows a small
+  /// "Reconnecting…" state instead).
+  void reconnectQuietly() {
+    if (parent.target?.closed == true) return;
+    parent.target?.inputModel.setRelativeMouseMode(false);
+    _cancelPendingMonitorRestore();
+    markReconnectStarted();
+    bind.sessionReconnect(sessionId: sessionId, forceRelay: false);
+    clearPermissions();
+  }
+
   void reconnect(OverlayDialogManager dialogManager, SessionID sessionId,
       bool forceRelay) {
     // Disable relative mouse mode before reconnecting to ensure cursor is released.
     parent.target?.inputModel.setRelativeMouseMode(false);
     _cancelPendingMonitorRestore();
+    markReconnectStarted();
     bind.sessionReconnect(sessionId: sessionId, forceRelay: forceRelay);
     clearPermissions();
     dialogManager.dismissAll();
@@ -1453,6 +1550,14 @@ class FfiModel with ChangeNotifier {
       }
       Map<String, dynamic> features = json.decode(evt['features']);
       _pi.features.privacyMode = features['privacy_mode'] == true;
+      _pi.features.terminal = features['terminal'] == true;
+      _pi.features.emulator = features['emulator'] == true;
+      _pi.features.targetDashboard = features['target_dashboard'] == true;
+      _pi.features.hostManagement = features['host_management'] == true;
+      _pi.features.manualClipboard = features['manual_clipboard'] == true;
+      _pi.features.filePause = features['file_pause'] == true;
+      _pi.features.fileKeepBoth = features['file_keep_both'] == true;
+      _pi.features.fileCancelAck = features['file_cancel_ack'] == true;
       if (!isCache) {
         handleResolutions(peerId, evt["resolutions"]);
       }
@@ -1477,6 +1582,12 @@ class FfiModel with ChangeNotifier {
       }
     }
 
+    if (!isCache) {
+      authenticatedPeer = true;
+      peerInfoGeneration++;
+      sessionReconnect?.onConnected();
+      _onClipboardContextChanged?.call();
+    }
     _pi.isSet.value = true;
     stateGlobal.resetLastResolutionGroupValues(peerId);
 
@@ -1910,6 +2021,25 @@ class VirtualMouseMode with ChangeNotifier {
 
 class ImageModel with ChangeNotifier {
   ui.Image? _image;
+  final Map<int, ui.Image> _dashboardImages = {};
+  final Stopwatch _presentationClock = Stopwatch()..start();
+  final Map<int, DateTime> _dashboardImageUpdatedAt = {};
+  final Map<int, int> _dashboardImagePreviewRequest = {};
+  ui.Image? dashboardImage(int channel) => _dashboardImages[channel];
+  DateTime? dashboardImageUpdatedAt(int channel) =>
+      _dashboardImageUpdatedAt[channel];
+  int? dashboardImagePreviewRequest(int channel) =>
+      _dashboardImagePreviewRequest[channel];
+
+  void retainDashboardImages(Set<int> channels) {
+    for (final channel in _dashboardImages.keys.toList()) {
+      if (!channels.contains(channel)) {
+        _dashboardImages.remove(channel)?.dispose();
+        _dashboardImageUpdatedAt.remove(channel);
+        _dashboardImagePreviewRequest.remove(channel);
+      }
+    }
+  }
 
   ui.Image? get image => _image;
 
@@ -1970,6 +2100,20 @@ class ImageModel with ChangeNotifier {
   }
 
   decodeAndUpdate(int display, Uint8List rgba) async {
+    final emulator = parent.target?.emulatorModel;
+    if (emulator != null &&
+        !emulator.framePacer.shouldPresent(display, _presentationClock.elapsed)) {
+      return;
+    }
+    if (parent.target?.emulatorModel.dashboardActive == true) {
+      await _decodeDashboard(display, rgba);
+      return;
+    }
+    if (display >= 0x40000000) {
+      await _decodeGuest(display, rgba);
+      return;
+    }
+    if (parent.target?.emulatorModel.selected == true) return;
     final pid = parent.target?.id;
     final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
     final image = await img.decodeImageFromPixels(
@@ -1984,7 +2128,91 @@ class ImageModel with ChangeNotifier {
       image?.dispose();
       return;
     }
-    await update(image);
+    await update(image,
+        isCurrentSession: () => parent.target?.emulatorModel.selected != true);
+  }
+
+  Future<void> _decodeGuest(int channel, Uint8List rgba) async {
+    final model = parent.target?.emulatorModel;
+    if (model == null || !model.streaming || channel != model.videoChannel) {
+      return;
+    }
+    final id = model.guestSessionId;
+    final width = model.width;
+    final height = model.height;
+    if (rgba.length != width * height * 4) return;
+    final image = await img.decodeImageFromPixels(
+        rgba,
+        width,
+        height,
+        isWeb | isWindows | isLinux
+            ? ui.PixelFormat.rgba8888
+            : ui.PixelFormat.bgra8888);
+    if (image == null) return;
+    await update(image,
+        isCurrentSession: () =>
+            model.streaming &&
+            model.guestSessionId == id &&
+            model.width == width &&
+            model.height == height);
+    if (model.streaming &&
+        model.guestSessionId == id &&
+        model.width == width &&
+        model.height == height) {
+      model.noteGuestFrameDecoded(
+        sessionId: id,
+        frameWidth: width,
+        frameHeight: height,
+      );
+    }
+  }
+
+  Future<void> _decodeDashboard(int channel, Uint8List rgba) async {
+    final ffi = parent.target;
+    if (ffi == null) return;
+    final model = ffi.emulatorModel;
+    final previewRequest = model.previewAcknowledgedRequest;
+    final preview = model.previewForChannel(channel);
+    final active = model.streaming && channel == model.videoChannel;
+    final rect =
+        channel < 0x40000000 ? ffi.ffiModel.pi.getDisplayRect(channel) : null;
+    final w =
+        preview?.width ?? (active ? model.width : rect?.width.toInt() ?? 0);
+    final h =
+        preview?.height ?? (active ? model.height : rect?.height.toInt() ?? 0);
+    if (w <= 0 || h <= 0 || rgba.length != w * h * 4) return;
+    final image = await img.decodeImageFromPixels(
+        rgba,
+        w,
+        h,
+        isWeb | isWindows | isLinux
+            ? ui.PixelFormat.rgba8888
+            : ui.PixelFormat.bgra8888);
+    if (image == null) return;
+    if (parent.target != ffi ||
+        model.previewAcknowledgedRequest != previewRequest ||
+        !model.dashboardActive ||
+        (channel >= 0x40000000 &&
+            model.previewForChannel(channel)?.sessionId != preview?.sessionId &&
+            !(model.streaming && model.videoChannel == channel)) ||
+        (channel >= 0x40000000 &&
+            preview == null &&
+            !(model.streaming && model.videoChannel == channel))) {
+      image.dispose();
+      return;
+    }
+    _dashboardImages.remove(channel)?.dispose();
+    _dashboardImages[channel] = image;
+    _dashboardImageUpdatedAt[channel] = DateTime.now();
+    _dashboardImagePreviewRequest[channel] = previewRequest;
+    if (active && model.streaming && model.videoChannel == channel) {
+      model.noteGuestFrameDecoded(
+        sessionId: model.guestSessionId,
+        frameWidth: model.width,
+        frameHeight: model.height,
+      );
+    }
+    notifyListeners();
   }
 
   Future<void> update(ui.Image? image,
@@ -2047,6 +2275,7 @@ class ImageModel with ChangeNotifier {
   void disposeImage() {
     _image?.dispose();
     _image = null;
+    retainDashboardImages({});
   }
 }
 
@@ -3890,6 +4119,31 @@ class QualityMonitorData {
   String? targetBitrate;
   String? codecFormat;
   String? chroma;
+
+  DateTime? speedUpdatedAt;
+  DateTime? fpsUpdatedAt;
+  DateTime? delayUpdatedAt;
+  DateTime? targetBitrateUpdatedAt;
+  DateTime? codecFormatUpdatedAt;
+  DateTime? chromaUpdatedAt;
+  DateTime? transportHeartbeatUpdatedAt;
+  final Map<int, DateTime> streamHeartbeatUpdatedAt = {};
+  final Map<int, int> streamHeartbeatSequence = {};
+  final Map<int, bool> decoderHealthy = {};
+  final Map<int, DateTime> decoderUpdatedAt = {};
+
+  DateTime? get latestUpdatedAt {
+    final values = <DateTime?>[
+      speedUpdatedAt,
+      fpsUpdatedAt,
+      delayUpdatedAt,
+      targetBitrateUpdatedAt,
+      codecFormatUpdatedAt,
+      chromaUpdatedAt,
+    ].whereType<DateTime>();
+    if (values.isEmpty) return null;
+    return values.reduce((a, b) => a.isAfter(b) ? a : b);
+  }
 }
 
 class QualityMonitorModel with ChangeNotifier {
@@ -3926,48 +4180,83 @@ class QualityMonitorModel with ChangeNotifier {
 
   updateQualityStatus(Map<String, dynamic> evt) {
     try {
-      if (evt.containsKey('speed') && (evt['speed'] as String).isNotEmpty) {
-        _data.speed = evt['speed'];
+      final receivedAt = DateTime.now();
+      _data.transportHeartbeatUpdatedAt = receivedAt;
+      if (evt.containsKey('speed')) {
+        final value = evt['speed'] as String;
+        _data.speed = value.isEmpty ? null : value;
+        _data.speedUpdatedAt = receivedAt;
       }
-      if (evt.containsKey('fps') && (evt['fps'] as String).isNotEmpty) {
-        final fps = jsonDecode(evt['fps']) as Map<String, dynamic>;
-        final pi = parent.target?.ffiModel.pi;
-        if (pi != null) {
-          final currentDisplay = pi.currentDisplay;
-          if (currentDisplay != kAllDisplayValue) {
-            final fps2 = fps[currentDisplay.toString()];
-            if (fps2 != null) {
-              _data.fps = fps2.toString();
-            }
-          } else if (fps.isNotEmpty) {
-            final fpsList = [];
-            for (var i = 0; i < pi.displays.length; i++) {
-              fpsList.add((fps[i.toString()] ?? 0).toString());
-            }
-            _data.fps = fpsList.join(' ');
-          }
-        } else {
+      if (evt.containsKey('fps')) {
+        final raw = evt['fps'] as String;
+        if (raw.isEmpty) {
           _data.fps = null;
+        } else {
+          final fps = jsonDecode(raw) as Map<String, dynamic>;
+          final pi = parent.target?.ffiModel.pi;
+          if (pi != null) {
+            final currentDisplay = pi.currentDisplay;
+            if (currentDisplay != kAllDisplayValue) {
+              final fps2 = fps[currentDisplay.toString()];
+              _data.fps = fps2?.toString();
+            } else if (fps.isNotEmpty) {
+              final fpsList = [];
+              for (var i = 0; i < pi.displays.length; i++) {
+                fpsList.add((fps[i.toString()] ?? 0).toString());
+              }
+              _data.fps = fpsList.join(' ');
+            }
+          } else {
+            _data.fps = null;
+          }
         }
+        _data.fpsUpdatedAt = receivedAt;
       }
-      if (evt.containsKey('delay') && (evt['delay'] as String).isNotEmpty) {
-        _data.delay = evt['delay'];
+      if (evt.containsKey('delay')) {
+        final value = evt['delay'] as String;
+        _data.delay = value.isEmpty ? null : value;
+        _data.delayUpdatedAt = receivedAt;
       }
-      if (evt.containsKey('target_bitrate') &&
-          (evt['target_bitrate'] as String).isNotEmpty) {
-        _data.targetBitrate = evt['target_bitrate'];
+      if (evt.containsKey('target_bitrate')) {
+        final value = evt['target_bitrate'] as String;
+        _data.targetBitrate = value.isEmpty ? null : value;
+        _data.targetBitrateUpdatedAt = receivedAt;
       }
-      if (evt.containsKey('codec_format') &&
-          (evt['codec_format'] as String).isNotEmpty) {
-        _data.codecFormat = evt['codec_format'];
+      if (evt.containsKey('codec_format')) {
+        final value = evt['codec_format'] as String;
+        _data.codecFormat = value.isEmpty ? null : value;
+        _data.codecFormatUpdatedAt = receivedAt;
       }
-      if (evt.containsKey('chroma') && (evt['chroma'] as String).isNotEmpty) {
-        _data.chroma = evt['chroma'];
+      if (evt.containsKey('chroma')) {
+        final value = evt['chroma'] as String;
+        _data.chroma = value.isEmpty ? null : value;
+        _data.chromaUpdatedAt = receivedAt;
       }
       notifyListeners();
     } catch (e) {
       //
     }
+  }
+
+  updateStreamLiveness(Map<String, dynamic> evt) {
+    final display = int.tryParse(evt['display']?.toString() ?? '');
+    final sequence = int.tryParse(evt['sequence']?.toString() ?? '');
+    if (display == null || display < 0 || sequence == null || sequence <= 0) {
+      return;
+    }
+    _data.streamHeartbeatUpdatedAt[display] = DateTime.now();
+    _data.streamHeartbeatSequence[display] = sequence;
+    notifyListeners();
+  }
+
+  updateDecoderHealth(Map<String, dynamic> evt) {
+    final display = int.tryParse(evt['display']?.toString() ?? '');
+    if (display == null || display < 0) return;
+    final value = evt['healthy']?.toString();
+    if (value != 'true' && value != 'false') return;
+    _data.decoderHealthy[display] = value == 'true';
+    _data.decoderUpdatedAt[display] = DateTime.now();
+    notifyListeners();
   }
 }
 
@@ -4037,6 +4326,13 @@ class FFI {
   late final CanvasModel canvasModel; // session
   late final ServerModel serverModel; // global
   late final ChatModel chatModel; // session
+  late final EmulatorModel emulatorModel;
+  bool _emulatorModelReady = false;
+  /// Latest `aperture_pair_device_result` event (ok/error); a new map per event.
+  final ValueNotifier<Map<String, dynamic>?> aperturePairResult =
+      ValueNotifier(null);
+  late final ClipboardTransferModel clipboardTransferModel;
+  bool _clipboardTransferReady = false;
   late final FileModel fileModel; // session
   late final AbModel abModel; // global
   late final GroupModel groupModel; // global
@@ -4061,11 +4357,37 @@ class FFI {
   FFI(SessionID? sId) {
     sessionId = sId ?? (isDesktop ? Uuid().v4obj() : _constSessionId);
     imageModel = ImageModel(WeakReference(this));
-    ffiModel = FfiModel(WeakReference(this));
+    ffiModel = FfiModel(
+      WeakReference(this),
+      onConnectionInvalidated: () {
+        if (_emulatorModelReady) {
+          emulatorModel.invalidateConnection();
+        }
+      },
+      onClipboardContextChanged: () => _onClipboardContextChanged(),
+    );
     cursorModel = CursorModel(WeakReference(this));
     canvasModel = CanvasModel(WeakReference(this));
     serverModel = ServerModel(WeakReference(this));
     chatModel = ChatModel(WeakReference(this));
+    emulatorModel = EmulatorModel(sessionId);
+    _emulatorModelReady = true;
+    clipboardTransferModel = ClipboardTransferModel(
+      sessionId,
+      contextProvider: () => ClipboardTransferContext(
+        targetIdentity: id.isEmpty ? '' : 'peer:$id',
+        generation:
+            (ffiModel.peerInfoGeneration << 32) ^ ffiModel.reconnectGeneration,
+        authenticated: ffiModel.authenticatedPeer,
+        capabilitySupported: ffiModel.pi.features.manualClipboard,
+        permissionGranted: ffiModel.permissions['clipboard'] != false &&
+            !bind.sessionGetToggleOptionSync(
+              sessionId: sessionId,
+              arg: 'disable-clipboard',
+            ),
+      ),
+    );
+    _clipboardTransferReady = true;
     fileModel = FileModel(WeakReference(this));
     userModel = UserModel(WeakReference(this));
     peerTabModel = PeerTabModel(WeakReference(this));
@@ -4089,8 +4411,16 @@ class FFI {
         name: PeersModelName.lan, loadEvent: LoadEvent.lan, getInitPeers: null);
   }
 
+  void _onClipboardContextChanged() {
+    if (_clipboardTransferReady) {
+      clipboardTransferModel.onContextChanged();
+    }
+  }
+
   /// Mobile reuse FFI
   void mobileReset() {
+    emulatorModel.reset();
+    clipboardTransferModel.clearEphemeralState();
     ffiModel.resetRestartReconnectState();
     ffiModel.waitForFirstImage.value = true;
     ffiModel.isRefreshing = false;
@@ -4337,7 +4667,7 @@ class FFI {
   void _applyPendingMonitorRestore() {
     final restore = ffiModel.pendingMonitorRestore;
     ffiModel._cancelPendingMonitorRestore();
-    if (restore == null || closed) return;
+    if (restore == null || closed || emulatorModel.dashboardActive) return;
     // The display list may have changed since the restore was queued.
     final displays = ffiModel.pi.displays;
     if ((restore == kAllDisplayValue && displays.isNotEmpty) ||
@@ -4370,6 +4700,8 @@ class FFI {
       platformFFI.clearVideoFrameCallback();
     }
     chatModel.close();
+    emulatorModel.reset();
+    clipboardTransferModel.clearEphemeralState();
     // Close all terminal models
     for (final model in _terminalModels.values) {
       model.dispose();
@@ -4496,6 +4828,14 @@ class Resolution {
 
 class Features {
   bool privacyMode = false;
+  bool terminal = false;
+  bool emulator = false;
+  bool targetDashboard = false;
+  bool hostManagement = false;
+  bool manualClipboard = false;
+  bool filePause = false;
+  bool fileKeepBoth = false;
+  bool fileCancelAck = false;
 }
 
 const kInvalidDisplayIndex = -1;

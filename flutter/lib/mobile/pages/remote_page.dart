@@ -22,8 +22,11 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../widgets/computers_hero.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
+import 'emulator_page.dart';
+import 'target_dashboard_page.dart';
 
 final initText = '1' * 1024;
 
@@ -60,6 +63,7 @@ class RemotePage extends StatefulWidget {
 
 class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Timer? _timer;
+  bool _dashboardOpened = false;
   bool _showBar = !isWebDesktop;
   bool _showGestureHelp = false;
   String _value = '';
@@ -94,6 +98,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
+    gFFI.ffiModel.addListener(_openDashboardWhenReady);
+    gFFI.ffiModel.lastConnectionError = '';
+    ConnectAttemptTracker.shared.started(widget.id);
     gFFI.start(
       widget.id,
       password: widget.password,
@@ -142,6 +149,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   @override
   Future<void> dispose() async {
+    ConnectAttemptTracker.shared.ended(widget.id,
+        authenticated: gFFI.ffiModel.authenticatedPeer || _dashboardOpened,
+        reason: gFFI.ffiModel.lastConnectionError);
+    gFFI.ffiModel.removeListener(_openDashboardWhenReady);
     WidgetsBinding.instance.removeObserver(this);
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
     // after several awaits (canvas save, image update, the `enable_soft_keyboard`
@@ -188,7 +199,32 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   // For client side
   // When swithing from other app to this app, try to sync clipboard.
   void trySyncClipboard() {
+    if (!gFFI.ffiModel.authenticatedPeer ||
+        gFFI.ffiModel.pi.features.manualClipboard) {
+      return;
+    }
     gFFI.invokeMethod("try_sync_clipboard");
+  }
+
+  void _openDashboardWhenReady() {
+    if (gFFI.ffiModel.authenticatedPeer) {
+      ConnectAttemptTracker.shared.authenticated(widget.id);
+    }
+    if (!isAndroid ||
+        !mounted ||
+        _dashboardOpened ||
+        !gFFI.ffiModel.authenticatedPeer ||
+        !gFFI.ffiModel.pi.features.targetDashboard) return;
+    _dashboardOpened = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => TargetDashboardPage(
+            ffi: gFFI,
+          ),
+        ));
+      }
+    });
   }
 
   bool _shouldGateKeyboardForWayland() {
@@ -731,38 +767,48 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   }
 
   List<TTextMenu> _getMobileActionMenus() {
-    if (gFFI.ffiModel.pi.platform != kPeerPlatformAndroid ||
-        !gFFI.ffiModel.keyboard) {
-      return [];
+    final actions = <TTextMenu>[];
+    if (gFFI.ffiModel.pi.features.emulator) {
+      actions.add(TTextMenu(
+        child: const Text('Emulators'),
+        trailingIcon: Icon(Icons.tablet_android, color: MyTheme.accent),
+        onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => gFFI.ffiModel.pi.features.targetDashboard
+                ? TargetDashboardPage(ffi: gFFI)
+                : EmulatorPage(ffi: gFFI))),
+      ));
     }
-    final enabled = versionCmp(gFFI.ffiModel.pi.version, '1.2.7') >= 0;
-    if (!enabled) return [];
-    return [
-      TTextMenu(
-        child: Text(translate('Back')),
-        onPressed: () => gFFI.inputModel.onMobileBack(),
-      ),
-      TTextMenu(
-        child: Text(translate('Home')),
-        onPressed: () => gFFI.inputModel.onMobileHome(),
-      ),
-      TTextMenu(
-        child: Text(translate('Apps')),
-        onPressed: () => gFFI.inputModel.onMobileApps(),
-      ),
-      TTextMenu(
-        child: Text(translate('Volume up')),
-        onPressed: () => gFFI.inputModel.onMobileVolumeUp(),
-      ),
-      TTextMenu(
-        child: Text(translate('Volume down')),
-        onPressed: () => gFFI.inputModel.onMobileVolumeDown(),
-      ),
-      TTextMenu(
-        child: Text(translate('Power')),
-        onPressed: () => gFFI.inputModel.onMobilePower(),
-      ),
-    ];
+    if (gFFI.ffiModel.pi.platform == kPeerPlatformAndroid &&
+        gFFI.ffiModel.keyboard &&
+        versionCmp(gFFI.ffiModel.pi.version, '1.2.7') >= 0) {
+      actions.addAll([
+        TTextMenu(
+          child: Text(translate('Back')),
+          onPressed: () => gFFI.inputModel.onMobileBack(),
+        ),
+        TTextMenu(
+          child: Text(translate('Home')),
+          onPressed: () => gFFI.inputModel.onMobileHome(),
+        ),
+        TTextMenu(
+          child: Text(translate('Apps')),
+          onPressed: () => gFFI.inputModel.onMobileApps(),
+        ),
+        TTextMenu(
+          child: Text(translate('Volume up')),
+          onPressed: () => gFFI.inputModel.onMobileVolumeUp(),
+        ),
+        TTextMenu(
+          child: Text(translate('Volume down')),
+          onPressed: () => gFFI.inputModel.onMobileVolumeDown(),
+        ),
+        TTextMenu(
+          child: Text(translate('Power')),
+          onPressed: () => gFFI.inputModel.onMobilePower(),
+        ),
+      ]);
+    }
+    return actions;
   }
 
   void showActions(String id) async {

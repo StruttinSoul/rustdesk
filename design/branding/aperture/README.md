@@ -1,0 +1,5 @@
+# Aperture artwork
+
+User selected Aperture for a full-featured Windows/Android remote-access app. Master generated with the built-in image_gen tool on2026-10-15; original retained under Codex generated_images. Runtime512px asset and Android launcher density sizes are mechanical resamples. Adaptive icon uses square artwork and a separate simplified monochrome vector. Package/service/config identities unchanged.
+
+Prompt: one finished premium Android/Windows icon for Aperture, full-featured Windows/Android remote access over LAN/internet; deep ink navy#101B29, bold interlocking open rectangular window frames in icy white and cobalt/periwinkle, large legible silhouette, balanced negative space, central adaptive-mask safe area; no lettering, arrows, Wi-Fi, camera shutter or Portal-game branding. Actual square launcher artwork, not a mockup.

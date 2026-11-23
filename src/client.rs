@@ -101,6 +101,10 @@ mod audio_playback_recovery;
 mod audio_state_tests;
 pub mod file_trait;
 pub mod helper;
+mod emulator_protocol;
+mod lan_fast_path;
+pub(crate) mod aperture_device_key;
+pub use emulator_protocol::emulator_request_from_json;
 pub mod io_loop;
 pub mod screenshot;
 
@@ -114,6 +118,7 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
 pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
 pub const LOGIN_MSG_PASSWORD_WRONG: &str = "Wrong Password";
 pub const LOGIN_MSG_2FA_WRONG: &str = "Wrong 2FA Code";
+pub const LOGIN_MSG_DEVICE_KEY_REJECTED: &str = "Device key not accepted";
 pub const REQUIRE_2FA: &'static str = "2FA Required";
 pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
 pub const LOGIN_MSG_OFFLINE: &str = "Offline";
@@ -378,7 +383,13 @@ impl Client {
         debug_assert!(peer == interface.get_id());
         interface.update_direct(None);
         interface.update_received(false);
-        match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+        {
+            let lc = interface.get_lch();
+            let mut lc = lc.write().unwrap();
+            lc.via_secure_lan = false;
+            lc.device_proof = None;
+        }
+        match lan_fast_path::start(peer, key, token, conn_type, interface.clone()).await {
             Err(err) => {
                 let err_str = err.to_string();
                 if err_str.starts_with("Failed") {
@@ -388,6 +399,7 @@ impl Client {
                 }
             }
             Ok(x) => {
+                interface.get_lch().write().unwrap().via_secure_lan = x.3;
                 // Set x.2 to true only in the connect() function to indicate that direct_failures needs to be updated; everywhere else it should be set to false.
                 if x.2 {
                     let direct_failures = interface.get_lch().read().unwrap().direct_failures;
@@ -1569,6 +1581,9 @@ impl Client {
             punch_type
         );
         let res = Self::secure_connection(peer_id, signed_id_pk.clone(), key, &mut conn).await;
+        if res.is_ok() {
+            lan_fast_path::remember_verified_peer(peer_id, &signed_id_pk, key, conn.is_secured());
+        }
         let pk: Option<Vec<u8>> = match res {
             Ok(pk) => pk,
             Err(e) if typ == "WebRTC" && !relay_server.is_empty() => {
@@ -2887,6 +2902,11 @@ pub struct LoginConfigHandler {
     pub peer_relay: bool,
     pub direct: Option<bool>,
     pub received: bool,
+    /// True only when this connection came through the encrypted LAN fast path.
+    pub via_secure_lan: bool,
+    /// The device-key proof sent with this connection's login, if any. Cleared
+    /// when the host refuses it; still set after a successful key login.
+    pub device_proof: Option<DeviceProof>,
     switch_uuid: Option<String>,
     #[cfg(feature = "flutter")]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2904,6 +2924,11 @@ pub struct LoginConfigHandler {
     pub enable_trusted_devices: bool,
     pub record_state: bool,
     pub record_permission: bool,
+    // Sensitive host-control state belongs to the current authenticated
+    // session. Persisted peer preferences must never be treated as observed
+    // state or silently replayed after reconnect.
+    session_lock_after_session_end: bool,
+    session_privacy_mode: bool,
 }
 
 impl Deref for LoginConfigHandler {
@@ -2917,6 +2942,44 @@ impl Deref for LoginConfigHandler {
 impl LoginConfigHandler {
     pub(crate) fn set_hash(&mut self, hash: Hash) {
         self.hash = hash;
+    }
+
+    /// Whether this phone paired its device key with this peer.
+    pub fn aperture_paired(&self) -> bool {
+        aperture_device_key::is_paired_value(&self.get_option(aperture_device_key::PAIRED_OPTION))
+    }
+
+    /// Goes through `set_option` so the cached config keeps the flag.
+    pub fn set_aperture_paired(&mut self, paired: bool) {
+        let value = if paired { "Y" } else { "" };
+        self.set_option(aperture_device_key::PAIRED_OPTION.to_owned(), value.to_owned());
+    }
+
+    /// `"paired"`, `"can-pair"` or `"unavailable"` for this session.
+    pub fn aperture_pairing_state(&self) -> &'static str {
+        aperture_device_key::pairing_state(
+            self.aperture_paired(),
+            self.peer_info.is_some(),
+            self.device_proof.is_some(),
+        )
+    }
+
+    /// The host refused the key: forget the pairing and drop the proof.
+    pub(crate) fn on_device_key_rejected(&mut self) -> aperture_device_key::RetryAction {
+        let mut paired = self.aperture_paired();
+        let mut proof = self.device_proof.take();
+        let action = aperture_device_key::on_device_key_rejected(&mut paired, &mut proof);
+        self.set_aperture_paired(paired);
+        action
+    }
+
+    /// The host id the host signs with: the pure peer id, as sent in the login.
+    fn pure_peer_id(&self) -> String {
+        if let Some((id, _, _)) = self.other_server.as_ref() {
+            id.clone()
+        } else {
+            self.id.clone()
+        }
     }
 
     /// Initialize the login config handler.
@@ -2977,6 +3040,7 @@ impl LoginConfigHandler {
         let config = self.load_config();
         self.remember = !config.password.is_empty();
         self.config = config;
+        self.reset_sensitive_session_state();
 
         let conn_token = conn_token
             .map(|x| serde_json::from_str::<ConnToken>(&x).ok())
@@ -3261,8 +3325,8 @@ impl LoginConfigHandler {
             })
             .into();
         } else if name == "lock-after-session-end" {
-            config.lock_after_session_end.v = !config.lock_after_session_end.v;
-            option.lock_after_session_end = (if config.lock_after_session_end.v {
+            self.session_lock_after_session_end = !self.session_lock_after_session_end;
+            option.lock_after_session_end = (if self.session_lock_after_session_end {
                 BoolOption::Yes
             } else {
                 BoolOption::No
@@ -3278,7 +3342,7 @@ impl LoginConfigHandler {
             .into();
         } else if name == "privacy-mode" {
             // try toggle privacy mode
-            option.privacy_mode = (if config.privacy_mode.v {
+            option.privacy_mode = (if self.session_privacy_mode {
                 BoolOption::No
             } else {
                 BoolOption::Yes
@@ -3314,13 +3378,14 @@ impl LoginConfigHandler {
                 option.disable_clipboard = f(true);
                 option.show_remote_cursor = f(true);
                 option.enable_file_transfer = f(false);
+                self.session_lock_after_session_end = false;
                 option.lock_after_session_end = f(false);
             } else {
                 option.disable_keyboard = f(false);
                 option.disable_clipboard = f(self.get_toggle_option("disable-clipboard"));
                 option.show_remote_cursor = f(self.get_toggle_option("show-remote-cursor"));
                 option.enable_file_transfer = f(self.config.enable_file_copy_paste.v);
-                option.lock_after_session_end = f(self.config.lock_after_session_end.v);
+                option.lock_after_session_end = f(false);
                 if config.show_my_cursor.v {
                     config.show_my_cursor.v = false;
                     option.show_my_cursor = BoolOption::No.into();
@@ -3354,7 +3419,7 @@ impl LoginConfigHandler {
             crate::clipboard::try_empty_clipboard_files(crate::clipboard::ClipboardSide::Client, 0);
         }
 
-        if !name.contains("block-input") {
+        if !name.contains("block-input") && name != "lock-after-session-end" {
             self.save_config(config);
         }
         let mut misc = Misc::new();
@@ -3435,9 +3500,9 @@ impl LoginConfigHandler {
         if self.get_toggle_option("follow-remote-window") {
             msg.follow_remote_window = BoolOption::Yes.into();
         }
-        if !view_only && self.get_toggle_option("lock-after-session-end") {
-            msg.lock_after_session_end = BoolOption::Yes.into();
-        }
+        // Host lock-on-disconnect is session-scoped. Do not replay a saved
+        // preference into a newly authenticated session; the user must
+        // explicitly enable it for the current connection.
         if self.get_toggle_option("disable-audio") {
             msg.disable_audio = BoolOption::Yes.into();
         }
@@ -3496,11 +3561,11 @@ impl LoginConfigHandler {
         if name == "show-remote-cursor" {
             self.config.show_remote_cursor.v
         } else if name == "lock-after-session-end" {
-            self.config.lock_after_session_end.v
+            self.session_lock_after_session_end
         } else if name == keys::OPTION_TERMINAL_PERSISTENT {
             self.config.terminal_persistent.v
         } else if name == "privacy-mode" {
-            self.config.privacy_mode.v
+            self.session_privacy_mode
         } else if name == keys::OPTION_ENABLE_FILE_COPY_PASTE {
             self.config.enable_file_copy_paste.v
         } else if name == "disable-audio" {
@@ -3522,6 +3587,15 @@ impl LoginConfigHandler {
         } else {
             !self.get_option(name).is_empty()
         }
+    }
+
+    pub(crate) fn set_session_privacy_mode(&mut self, on: bool) {
+        self.session_privacy_mode = on;
+    }
+
+    pub(crate) fn reset_sensitive_session_state(&mut self) {
+        self.session_lock_after_session_end = false;
+        self.session_privacy_mode = false;
     }
 
     pub fn is_privacy_mode_supported(&self) -> bool {
@@ -3869,6 +3943,7 @@ impl LoginConfigHandler {
         } else {
             Default::default()
         };
+        let password_is_empty = password.is_empty();
         let mut lr = LoginRequest {
             username: pure_id,
             password: password.into(),
@@ -3883,6 +3958,12 @@ impl LoginConfigHandler {
             avatar,
             ..Default::default()
         };
+        // A proof replaces the password; the host ignores it next to one.
+        if password_is_empty {
+            if let Some(proof) = self.device_proof.as_ref() {
+                lr.device_proof = Some(proof.clone()).into();
+            }
+        }
         match self.conn_type {
             ConnType::FILE_TRANSFER => lr.set_file_transfer(FileTransfer {
                 dir: self.get_remote_dir(),
@@ -4068,6 +4149,7 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    session.ui_handler.update_decoder_health(display, true);
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
@@ -4092,6 +4174,7 @@ pub fn start_video_thread<F, T>(
                                     );
                                 }
                                 Err(e) => {
+                                    session.ui_handler.update_decoder_health(display, false);
                                     // This is a simple workaround.
                                     //
                                     // I only see the following error:
@@ -4636,7 +4719,12 @@ pub async fn handle_hash(
     interface: &impl Interface,
     peer: &mut Stream,
 ) -> bool {
-    lc.write().unwrap().hash = hash.clone();
+    {
+        let mut lc = lc.write().unwrap();
+        lc.hash = hash.clone();
+        // A proof belongs to one hash; it is decided again below.
+        lc.device_proof = None;
+    }
     // Take care of password application order
 
     // switch_uuid
@@ -4676,6 +4764,28 @@ pub async fn handle_hash(
             allow_err!(peer.send(&msg).await);
             return false;
         }
+    }
+    // Device key: a paired phone on the encrypted LAN fast path signs the
+    // challenge instead of sending a password. Decided afresh for every hash.
+    let proof = {
+        let lc = lc.read().unwrap();
+        if aperture_device_key::should_send_proof(
+            lc.via_secure_lan,
+            lc.aperture_paired(),
+            lc.conn_type,
+        ) {
+            Some((lc.pure_peer_id(), lc.conn_type))
+        } else {
+            None
+        }
+    };
+    lc.write().unwrap().device_proof = proof.map(|(host_id, conn_type)| {
+        let sk = aperture_device_key::load_or_create_key();
+        crate::aperture_device_proof::sign_proof(&sk, &host_id, &hash, conn_type as i32)
+    });
+    if lc.read().unwrap().device_proof.is_some() {
+        send_login(lc.clone(), String::new(), String::new(), Vec::new(), peer).await;
+        return true;
     }
     // last password
     let mut password = lc.read().unwrap().password.clone();
@@ -4986,13 +5096,24 @@ pub enum Data {
     RemoveFile((i32, String, i32, bool)),
     CreateDir((i32, String, bool)),
     CancelJob(i32),
+    PauseJob(i32),
     RemovePortForward(i32),
     AddPortForward((i32, String, i32)),
     #[cfg(all(target_os = "windows", not(feature = "flutter")))]
     ToggleClipboardFile,
     NewRDP,
-    SetConfirmOverrideFile((i32, i32, bool, bool, bool)),
-    AddJob((i32, JobType, String, String, i32, bool, bool)),
+    SetConfirmOverrideFile((i32, i32, bool, bool, bool, String)),
+    SetConfirmKeepBothFile((i32, i32, bool, String)),
+    AddJob((
+        i32,
+        JobType,
+        String,
+        String,
+        i32,
+        bool,
+        bool,
+        Option<String>,
+    )),
     ResumeJob((i32, bool)),
     RecordScreen(bool),
     ElevateDirect,
@@ -5218,6 +5339,52 @@ mod port_forward_mux_tests {
         assert!(!asks(&lc));
         lc.port_forward_multiplex = true;
         assert!(asks(&lc));
+    }
+}
+
+#[cfg(test)]
+mod sensitive_session_option_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_sensitive_preferences_are_not_runtime_state() {
+        let mut lc = LoginConfigHandler::default();
+        lc.config.lock_after_session_end.v = true;
+        lc.config.privacy_mode.v = true;
+
+        assert!(!lc.get_toggle_option("lock-after-session-end"));
+        assert!(!lc.get_toggle_option("privacy-mode"));
+    }
+
+    #[test]
+    fn lock_after_session_end_is_explicit_and_session_local() {
+        let mut lc = LoginConfigHandler::default();
+        lc.id = "wp11-sensitive-session-options-test".to_owned();
+        lc.config.lock_after_session_end.v = true;
+
+        assert!(lc.toggle_option("lock-after-session-end".to_owned()).is_some());
+        assert!(lc.get_toggle_option("lock-after-session-end"));
+        assert!(lc.config.lock_after_session_end.v);
+
+        assert!(lc.toggle_option("lock-after-session-end".to_owned()).is_some());
+        assert!(!lc.get_toggle_option("lock-after-session-end"));
+        assert!(lc.config.lock_after_session_end.v);
+    }
+
+    #[test]
+    fn sensitive_runtime_state_is_cleared_for_a_new_connection_round() {
+        let mut lc = LoginConfigHandler::default();
+        lc.id = "wp11-sensitive-session-reset-test".to_owned();
+
+        assert!(lc.toggle_option("lock-after-session-end".to_owned()).is_some());
+        lc.set_session_privacy_mode(true);
+        assert!(lc.get_toggle_option("lock-after-session-end"));
+        assert!(lc.get_toggle_option("privacy-mode"));
+
+        lc.reset_sensitive_session_state();
+
+        assert!(!lc.get_toggle_option("lock-after-session-end"));
+        assert!(!lc.get_toggle_option("privacy-mode"));
     }
 }
 

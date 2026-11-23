@@ -71,7 +71,12 @@ pub mod input_service {
 mod connection;
 mod login_failure_check;
 pub(crate) mod port_forward_mux;
+pub mod aperture_trusted_phones;
 pub mod display_service;
+pub mod emulator;
+pub mod manual_clipboard;
+#[cfg(test)]
+mod manual_clipboard_tests;
 #[cfg(windows)]
 pub mod portable_service;
 mod service;
@@ -88,6 +93,8 @@ type ConnMap = HashMap<i32, ConnInner>;
 pub struct ConnectionMeta {
     pub control_permissions: Option<ControlPermissions>,
     pub controlled_context: Option<ControlledContext>,
+    /// Set only by the Aperture encrypted LAN listener (`lan::serve_secure`, TCP 21120).
+    pub secure_lan: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -671,6 +678,10 @@ pub async fn start_server(is_server: bool, no_server: bool) {
 
     if is_server {
         crate::common::set_server_running(true);
+        #[cfg(windows)]
+        emulator::boot_windows::start_if_configured();
+        #[cfg(windows)]
+        emulator::host_management::ensure_watchdog_started();
         std::thread::spawn(move || {
             if let Err(err) = crate::ipc::start("") {
                 log::error!("Failed to start ipc: {}", err);

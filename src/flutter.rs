@@ -3,6 +3,7 @@ use crate::{
     flutter_ffi::{EventToUI, SessionID},
     ui_session_interface::{io_loop, InvokeUiSession, Session},
 };
+use base::message_proto::*;
 use flutter_rust_bridge::StreamSink;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::dlopen::{
@@ -10,10 +11,9 @@ use hbb_common::dlopen::{
     Error as LibError,
 };
 use hbb_common::{
-    anyhow::anyhow, bail, config::LocalConfig, get_version_number, log,
-    rendezvous_proto::ConnType, ResultType,
+    anyhow::anyhow, bail, config::LocalConfig, get_version_number, log, rendezvous_proto::ConnType,
+    ResultType,
 };
-use base::message_proto::*;
 use serde::Serialize;
 use serde_json::json;
 #[cfg(target_os = "windows")]
@@ -25,7 +25,7 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
 };
 
@@ -111,7 +111,10 @@ pub extern "C" fn rustdesk_core_main() -> bool {
 
         // Native runners bypass Rust's startup, which normally ignores SIGPIPE.
         if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) } == libc::SIG_ERR {
-            eprintln!("Failed to ignore SIGPIPE: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "Failed to ignore SIGPIPE: {}",
+                std::io::Error::last_os_error()
+            );
             std::process::exit(1);
         }
     }
@@ -237,6 +240,7 @@ pub struct FlutterHandler {
     display_rgbas: Arc<RwLock<HashMap<usize, RgbaData>>>,
     peer_info: Arc<RwLock<PeerInfo>>,
     use_texture_render: Arc<AtomicBool>,
+    emulator_rgba_channels: Arc<Mutex<EmulatorRgbaChannels>>,
 }
 
 impl Default for FlutterHandler {
@@ -244,6 +248,7 @@ impl Default for FlutterHandler {
         Self {
             session_handlers: Default::default(),
             display_rgbas: Default::default(),
+            emulator_rgba_channels: Default::default(),
             peer_info: Default::default(),
             use_texture_render: Arc::new(
                 AtomicBool::new(crate::ui_interface::use_texture_render()),
@@ -258,6 +263,13 @@ struct RgbaData {
     // We must check the `rgba_valid` before reading [rgba].
     data: Vec<u8>,
     valid: bool,
+    retired: bool,
+}
+
+#[derive(Default)]
+struct EmulatorRgbaChannels {
+    selected: usize,
+    previews: Vec<usize>,
 }
 
 pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
@@ -681,7 +693,8 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     /// unused in flutter, use switch_display or set_peer_info
-    fn set_display(&self, _x: i32, _y: i32, _w: i32, _h: i32, _cursor_embedded: bool, _scale: f64) {}
+    fn set_display(&self, _x: i32, _y: i32, _w: i32, _h: i32, _cursor_embedded: bool, _scale: f64) {
+    }
 
     fn update_privacy_mode(&self) {
         self.push_event::<&str>("update_privacy_mode", &[], &[]);
@@ -695,25 +708,28 @@ impl InvokeUiSession for FlutterHandler {
     fn close_success(&self) {}
 
     fn update_quality_status(&self, status: QualityStatus) {
-        const NULL: String = String::new();
+        let fields = quality_status_fields(status);
+        let fields: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.push_event("update_quality_status", &fields, &[]);
+    }
+
+    fn update_stream_liveness(&self, display: usize, sequence: u64) {
         self.push_event(
-            "update_quality_status",
+            "update_stream_liveness",
             &[
-                ("speed", &status.speed.map_or(NULL, |it| it)),
-                (
-                    "fps",
-                    &serde_json::ser::to_string(&status.fps).unwrap_or(NULL.to_owned()),
-                ),
-                ("delay", &status.delay.map_or(NULL, |it| it.to_string())),
-                (
-                    "target_bitrate",
-                    &status.target_bitrate.map_or(NULL, |it| it.to_string()),
-                ),
-                (
-                    "codec_format",
-                    &status.codec_format.map_or(NULL, |it| it.to_string()),
-                ),
-                ("chroma", &status.chroma.map_or(NULL, |it| it.to_string())),
+                ("display", &display.to_string()),
+                ("sequence", &sequence.to_string()),
+            ],
+            &[],
+        );
+    }
+
+    fn update_decoder_health(&self, display: usize, healthy: bool) {
+        self.push_event(
+            "update_decoder_health",
+            &[
+                ("display", &display.to_string()),
+                ("healthy", &healthy.to_string()),
             ],
             &[],
         );
@@ -751,6 +767,31 @@ impl InvokeUiSession for FlutterHandler {
         self.push_event(
             "job_done",
             &[("id", &id.to_string()), ("file_num", &file_num.to_string())],
+            &[],
+        );
+    }
+
+    fn job_paused(&self, id: i32, accepted: bool, error: String) {
+        self.push_event(
+            "job_paused",
+            &[
+                ("id", &id.to_string()),
+                ("accepted", &accepted.to_string()),
+                ("error", &error),
+            ],
+            &[],
+        );
+    }
+
+    fn job_cancelled(&self, id: i32, applied: bool, confirmed: bool, error: String) {
+        self.push_event(
+            "job_cancelled",
+            &[
+                ("id", &id.to_string()),
+                ("applied", &applied.to_string()),
+                ("confirmed", &confirmed.to_string()),
+                ("error", &error),
+            ],
             &[],
         );
     }
@@ -816,6 +857,7 @@ impl InvokeUiSession for FlutterHandler {
         to: String,
         is_upload: bool,
         is_identical: bool,
+        conflict_token: String,
     ) {
         self.push_event(
             "override_file_confirm",
@@ -825,6 +867,7 @@ impl InvokeUiSession for FlutterHandler {
                 ("read_path", &to),
                 ("is_upload", &is_upload.to_string()),
                 ("is_identical", &is_identical.to_string()),
+                ("conflict_token", &conflict_token),
             ],
             &[],
         );
@@ -882,6 +925,14 @@ impl InvokeUiSession for FlutterHandler {
         let mut features: HashMap<&str, bool> = Default::default();
         for ref f in pi.features.iter() {
             features.insert("privacy_mode", f.privacy_mode);
+            features.insert("terminal", f.terminal);
+            features.insert("emulator", f.emulator);
+            features.insert("target_dashboard", f.target_dashboard);
+            features.insert("host_management", f.host_management);
+            features.insert("manual_clipboard", f.manual_clipboard);
+            features.insert("file_pause", f.file_pause);
+            features.insert("file_keep_both", f.file_keep_both);
+            features.insert("file_cancel_ack", f.file_cancel_ack);
         }
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {
@@ -1083,7 +1134,14 @@ impl InvokeUiSession for FlutterHandler {
 
     #[inline]
     fn next_rgba(&self, _display: usize) {
-        if let Some(rgba_data) = self.display_rgbas.write().unwrap().get_mut(&_display) {
+        let mut buffers = self.display_rgbas.write().unwrap();
+        if buffers
+            .get(&_display)
+            .map(|rgba| rgba.retired)
+            .unwrap_or(false)
+        {
+            buffers.remove(&_display);
+        } else if let Some(rgba_data) = buffers.get_mut(&_display) {
             rgba_data.valid = false;
         }
     }
@@ -1170,9 +1228,149 @@ impl InvokeUiSession for FlutterHandler {
             }
         }
     }
+
+    fn handle_emulator_response(&self, response: EmulatorResponse) {
+        if let Some(emulator_response::Union::Status(status)) = response.union.as_ref() {
+            let channel = 0x40000000 | (status.session_id as usize & 0x3fffffff);
+            let mut channels = self.emulator_rgba_channels.lock().unwrap();
+            if status.preview {
+                self.retire_emulator_rgba(|id| id == channel);
+            } else {
+                let previous = channels.selected;
+                channels.selected = if matches!(
+                    status.state.enum_value_or_default(),
+                    EmulatorSessionState::EmulatorStarting
+                        | EmulatorSessionState::EmulatorStreaming
+                ) {
+                    channel
+                } else {
+                    0
+                };
+                self.retire_emulator_rgba(|id| id == channel || id == previous);
+            }
+        }
+        let request_id = response.request_id;
+        let mut event = vec![
+            ("request_id", json!(request_id)),
+            ("protocol_version", json!(response.protocol_version)),
+        ];
+        match response.union {
+            Some(emulator_response::Union::Inventory(inventory)) => {
+                event.push(("type", json!("inventory")));
+                event.push(("instances", json!(inventory.instances.into_iter().map(|instance| json!({"target_id": instance.target_id, "provider": instance.provider, "name": instance.name, "state": instance.state, "android_version": instance.android_version, "default_package": instance.default_package, "last_error": instance.last_error, "progress_percent": instance.progress_percent, "window_visible": instance.window_visible})).collect::<Vec<_>>())));
+                event.push(("provider_errors", json!(inventory.provider_errors)));
+                event.push(("dashboard", json!(inventory.dashboard)));
+                event.push(("capabilities", json!(inventory.capabilities)));
+                event.push((
+                    "operation_session_identity",
+                    json!(inventory.operation_session_identity),
+                ));
+                event.push((
+                    "operation_generation",
+                    json!(inventory.operation_generation),
+                ));
+            }
+            Some(emulator_response::Union::Status(status)) => {
+                let state = match status.state.enum_value_or_default() {
+                    EmulatorSessionState::EmulatorStarting => "starting",
+                    EmulatorSessionState::EmulatorStreaming => "streaming",
+                    EmulatorSessionState::EmulatorDesktop => "desktop",
+                    EmulatorSessionState::EmulatorFailed => "failed",
+                    _ => "unknown",
+                };
+                event.extend([
+                    ("type", json!("status")),
+                    ("session_id", json!(status.session_id)),
+                    ("target_id", json!(status.target_id)),
+                    ("state", json!(state)),
+                    ("width", json!(status.width)),
+                    ("height", json!(status.height)),
+                    ("error", json!(status.error)),
+                    ("preview", json!(status.preview)),
+                    ("phase", json!(status.phase)),
+                ]);
+            }
+            Some(emulator_response::Union::Previews(previews)) => {
+                let channels = previews
+                    .session_ids
+                    .iter()
+                    .map(|id| 0x40000000 | (*id as usize & 0x3fffffff))
+                    .collect::<Vec<_>>();
+                let mut owned = self.emulator_rgba_channels.lock().unwrap();
+                owned.previews = channels;
+                self.retire_emulator_rgba(|channel| {
+                    channel >= 0x40000000
+                        && channel != owned.selected
+                        && !owned.previews.contains(&channel)
+                });
+                event.extend([
+                    ("type", json!("previews")),
+                    ("enabled", json!(previews.enabled)),
+                    ("session_ids", json!(previews.session_ids)),
+                ]);
+            }
+            Some(emulator_response::Union::Host(host)) => {
+                let payload = serde_json::from_str::<serde_json::Value>(&host.json)
+                    .unwrap_or_else(|error| json!({"ok": false, "error": format!("Invalid host response: {error}")}));
+                event.extend([("type", json!("host")), ("host", payload)]);
+            }
+            Some(emulator_response::Union::Error(error)) => {
+                event.extend([("type", json!("error")), ("error", json!(error))])
+            }
+            _ => return,
+        }
+        self.push_event_("emulator_response", &event, &[], &[]);
+    }
+
+    fn handle_aperture_pair_device_result(&self, ok: bool, error: String) {
+        self.push_event_(
+            "aperture_pair_device_result",
+            &[("ok", json!(ok)), ("error", json!(error))],
+            &[],
+            &[],
+        );
+    }
+
+    fn handle_manual_clipboard_response(&self, response: ManualClipboardResponse) {
+        let direction = match response.direction.enum_value_or_default() {
+            ManualClipboardDirection::ManualClipboardPhoneToHost => "phone_to_host",
+            ManualClipboardDirection::ManualClipboardHostToPhone => "host_to_phone",
+            ManualClipboardDirection::ManualClipboardUnknown => "unknown",
+        };
+        self.push_event_(
+            "manual_clipboard_response",
+            &[
+                ("request_id", json!(response.request_id)),
+                ("direction", json!(direction)),
+                ("accepted", json!(response.accepted)),
+                ("applied", json!(response.applied)),
+                ("text", json!(response.text)),
+                ("error_code", json!(response.error_code)),
+                ("error", json!(response.error)),
+                ("target_identity", json!(response.target_identity)),
+            ],
+            &[],
+            &[],
+        );
+    }
 }
 
 impl FlutterHandler {
+    fn retire_emulator_rgba(&self, retire: impl Fn(usize) -> bool) {
+        self.display_rgbas.write().unwrap().retain(|channel, rgba| {
+            if !retire(*channel) {
+                return true;
+            }
+            if rgba.valid {
+                // Dart may still be decoding this published native allocation.
+                rgba.retired = true;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     #[inline]
     fn on_rgba_soft_render(&self, display: usize, rgba: &mut scrap::ImageRgb) {
         // If the current rgba is not fetched by flutter, i.e., is valid.
@@ -1416,7 +1614,21 @@ pub fn update_text_clipboard_required() {
     let is_required = sessions::get_sessions()
         .iter()
         .filter(|s| s.connection_round_state.lock().unwrap().is_connected())
-        .any(|s| s.is_default() && s.is_text_clipboard_required());
+        .any(|s| {
+            #[cfg(target_os = "android")]
+            let manual_clipboard = s
+                .ui_handler
+                .peer_info
+                .read()
+                .unwrap()
+                .features
+                .as_ref()
+                .map(|features| features.manual_clipboard)
+                .unwrap_or(false);
+            #[cfg(not(target_os = "android"))]
+            let manual_clipboard = false;
+            s.is_default() && s.is_text_clipboard_required() && !manual_clipboard
+        });
     #[cfg(target_os = "android")]
     let _ = scrap::android::ffi::call_clipboard_manager_enable_client_clipboard(is_required);
     Client::set_is_text_clipboard_required(is_required);
@@ -1446,6 +1658,18 @@ pub fn send_clipboard_msg_to_other_sessions(msg: Message, except_session_id: u64
 fn send_clipboard_msg_impl(msg: Message, _is_file: bool, except_session_id: Option<u64>) {
     for s in sessions::get_sessions() {
         if !s.is_default() {
+            continue;
+        }
+        #[cfg(target_os = "android")]
+        if s.ui_handler
+            .peer_info
+            .read()
+            .unwrap()
+            .features
+            .as_ref()
+            .map(|features| features.manual_clipboard)
+            .unwrap_or(false)
+        {
             continue;
         }
         if let Some(except_session_id) = except_session_id {
@@ -1712,6 +1936,39 @@ pub extern "C" fn session_get_rgba(session_uuid_str: *const char, display: usize
 pub fn session_next_rgba(session_id: SessionID, display: usize) {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
         return s.ui_handler.next_rgba(display);
+    }
+}
+
+#[cfg(test)]
+mod dashboard_rgba_tests {
+    use super::*;
+
+    #[test]
+    fn retiring_dashboard_video_keeps_published_pixels_until_flutter_acknowledges() {
+        let handler = FlutterHandler::default();
+        let channel = 0x40000007;
+        handler.display_rgbas.write().unwrap().insert(
+            channel,
+            RgbaData {
+                data: vec![1, 2, 3, 4],
+                valid: true,
+                ..Default::default()
+            },
+        );
+        let pointer = handler.get_rgba(channel);
+        let mut response = EmulatorResponse::new();
+        response.set_previews(EmulatorPreviewState {
+            enabled: true,
+            ..Default::default()
+        });
+        handler.handle_emulator_response(response);
+        assert_eq!(
+            handler.get_rgba(channel),
+            pointer,
+            "The decoder still owns a published FFI buffer until next_rgba"
+        );
+        handler.next_rgba(channel);
+        assert!(handler.get_rgba(channel).is_null());
     }
 }
 
@@ -2389,5 +2646,70 @@ pub(super) mod async_tasks {
             super::APP_TYPE_MAIN,
             serde_json::ser::to_string(&data).unwrap_or("".to_owned()),
         );
+    }
+}
+
+/// Only the metrics a status actually carries. The per-second video status and
+/// the host's delay report are sent separately, and a blank field would make
+/// the app drop the value the other one last reported.
+fn quality_status_fields(status: QualityStatus) -> Vec<(&'static str, String)> {
+    let mut fields = Vec::new();
+    if let Some(speed) = status.speed {
+        fields.push(("speed", speed));
+    }
+    if !status.fps.is_empty() {
+        if let Ok(fps) = serde_json::ser::to_string(&status.fps) {
+            fields.push(("fps", fps));
+        }
+    }
+    if let Some(delay) = status.delay {
+        fields.push(("delay", delay.to_string()));
+    }
+    if let Some(bitrate) = status.target_bitrate {
+        fields.push(("target_bitrate", bitrate.to_string()));
+    }
+    if let Some(codec) = status.codec_format {
+        fields.push(("codec_format", codec.to_string()));
+    }
+    if let Some(chroma) = status.chroma {
+        fields.push(("chroma", chroma));
+    }
+    fields
+}
+
+#[cfg(test)]
+mod quality_status_tests {
+    use super::*;
+    use scrap::CodecFormat;
+    use std::collections::HashMap;
+
+    fn keys(fields: &[(&'static str, String)]) -> Vec<&'static str> {
+        fields.iter().map(|(k, _)| *k).collect()
+    }
+
+    // The per-second video status and the host's delay report arrive separately;
+    // neither may blank what only the other one carries.
+    #[test]
+    fn delay_report_leaves_video_metrics_alone() {
+        let fields = quality_status_fields(QualityStatus {
+            delay: Some(12),
+            target_bitrate: Some(4000),
+            ..Default::default()
+        });
+        assert_eq!(keys(&fields), vec!["delay", "target_bitrate"]);
+    }
+
+    #[test]
+    fn video_status_leaves_delay_alone() {
+        let fields = quality_status_fields(QualityStatus {
+            speed: Some("512.00kB/s".to_owned()),
+            fps: HashMap::from([(0, 30)]),
+            codec_format: Some(CodecFormat::H265),
+            chroma: Some("4:2:0".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(keys(&fields), vec!["speed", "fps", "codec_format", "chroma"]);
+        assert!(fields.contains(&("fps", r#"{"0":30}"#.to_owned())));
+        assert!(fields.contains(&("codec_format", "H265".to_owned())));
     }
 }

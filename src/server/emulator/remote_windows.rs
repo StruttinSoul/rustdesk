@@ -1,0 +1,2155 @@
+use super::{
+    bluestacks::BlueStacksProvider,
+    guest_protocol::{text_packet, touch_packet, H264Frames, VideoPacket},
+    guest_runtime::{
+        adb_command, helper_path, is_default_adb_server, is_jammed,
+        is_not_answering, GuestHelper, SCRCPY_CONTROL_RESET_VIDEO,
+    },
+    ldplayer::LdPlayerProvider,
+    remote::{GuestEvent, PROTOCOL_VERSION},
+    EmulatorProvider, EmulatorState, EmulatorTarget,
+};
+use base::message_proto::{
+    emulator_request, EmulatorInstance, EmulatorInventory, EmulatorNavigation, EmulatorRequest,
+    EmulatorResponse, EmulatorSessionState, EmulatorSessionStatus, EmulatorVideoFrame,
+};
+use hbb_common::{bail, log, ResultType};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+    net::{Shutdown, TcpStream},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, SyncSender},
+        Arc, Mutex, MutexGuard,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+#[path = "host_video_session.rs"]
+mod host_video_session;
+
+const GUEST_INPUT_QUEUE_SIZE: usize = 256;
+const GUEST_INPUT_MOVE_SHED_THRESHOLD: usize = 24;
+
+struct LocalTarget {
+    provider: Arc<dyn EmulatorProvider>,
+    target: EmulatorTarget,
+}
+
+fn targets() -> (Vec<LocalTarget>, Vec<String>) {
+    let mut found = Vec::new();
+    let mut errors = Vec::new();
+    let providers: [(&str, ResultType<Option<Arc<dyn EmulatorProvider>>>); 2] = [
+        (
+            "BlueStacks",
+            BlueStacksProvider::detect().map(|provider| {
+                provider.map(|provider| Arc::new(provider) as Arc<dyn EmulatorProvider>)
+            }),
+        ),
+        (
+            "LDPlayer",
+            LdPlayerProvider::detect().map(|provider| {
+                provider.map(|provider| Arc::new(provider) as Arc<dyn EmulatorProvider>)
+            }),
+        ),
+    ];
+    for (name, provider) in providers {
+        match provider {
+            Ok(Some(provider)) => match provider.discover() {
+                Ok(instances) => found.extend(instances.into_iter().map(|target| LocalTarget {
+                    provider: provider.clone(),
+                    target,
+                })),
+                Err(error) => errors.push(format!("{name}: {error}")),
+            },
+            Ok(None) => {}
+            Err(error) => errors.push(format!("{name}: {error}")),
+        }
+    }
+    (found, errors)
+}
+
+/// The provider and current listing of emulator `target_id`.
+pub(super) fn find_target(
+    target_id: &str,
+) -> ResultType<(Arc<dyn EmulatorProvider>, EmulatorTarget)> {
+    let (targets, _) = targets();
+    targets
+        .into_iter()
+        .find(|local| local.target.stable_id == target_id)
+        .map(|local| (local.provider, local.target))
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("This emulator no longer exists"))
+}
+
+pub fn inventory(
+    request_id: u64,
+    operation_session_identity: &str,
+    operation_generation: u64,
+) -> EmulatorResponse {
+    let (targets, provider_errors) = targets();
+    let instances = targets
+        .into_iter()
+        .map(|local| {
+            let mut instance = EmulatorInstance {
+            default_package: if local.target.provider.to_string() == "bluestacks" {
+                super::bluestacks::default_app_for_instance(&local.target.provider_instance_id)
+            } else {
+                String::new()
+            },
+            target_id: local.target.stable_id,
+            provider: local.target.provider.to_string(),
+            name: local.target.display_name,
+            state: format!("{:?}", local.target.state).to_lowercase(),
+            android_version: local.target.android_version.unwrap_or_default(),
+            last_error: local.target.last_error.unwrap_or_default(),
+            ..Default::default()
+            };
+            super::shutdown_windows::annotate(&mut instance);
+            instance
+        })
+        .collect();
+    let mut response = response(request_id);
+    response.set_inventory(EmulatorInventory {
+        instances,
+        provider_errors,
+        dashboard: true,
+        capabilities: vec![
+            "operation.identity.v1".to_owned(),
+            "operation.ack.v1".to_owned(),
+            "desktop.stream_liveness.v1".to_owned(),
+            "guest.text.v1".to_owned(),
+            "guest.video_refresh.v1".to_owned(),
+            "host.status".to_owned(),
+            "host.windows.list.v1".to_owned(),
+            "host.window_focus.v1".to_owned(),
+            "host.emulator_shutdown.v1".to_owned(),
+            "host.emulator_power.v1".to_owned(),
+            "host.process_end".to_owned(),
+            "host.shell_restart.v1".to_owned(),
+            "host.process_identity.v2".to_owned(),
+            "host.recover.bluestacks_adb".to_owned(),
+            "host.phone_workspace.v1".to_owned(),
+            "host.gateway.status.v1".to_owned(),
+            "host.gateway.setup.v1".to_owned(),
+            "host.gateway.imdb.v1".to_owned(),
+            "host.gateway.restart.v1".to_owned(),
+        ],
+        operation_session_identity: operation_session_identity.to_owned(),
+        operation_generation,
+        ..Default::default()
+    });
+    response
+}
+
+pub fn response(request_id: u64) -> EmulatorResponse {
+    EmulatorResponse {
+        request_id,
+        protocol_version: PROTOCOL_VERSION,
+        ..Default::default()
+    }
+}
+
+pub fn error_response(request_id: u64, error: impl Into<String>) -> EmulatorResponse {
+    let mut response = response(request_id);
+    response.set_error(error.into());
+    response
+}
+
+pub fn status_response(
+    request_id: u64,
+    session_id: u64,
+    target_id: &str,
+    state: EmulatorSessionState,
+    width: u16,
+    height: u16,
+    error: String,
+) -> EmulatorResponse {
+    let mut response = response(request_id);
+    response.set_status(EmulatorSessionStatus {
+        session_id,
+        target_id: target_id.to_owned(),
+        state: state.into(),
+        width: width as u32,
+        height: height as u32,
+        error,
+        ..Default::default()
+    });
+    response
+}
+
+pub fn with_phase(mut response: EmulatorResponse, phase: &str) -> EmulatorResponse {
+    if let Some(base::message_proto::emulator_response::Union::Status(status)) =
+        response.union.as_mut()
+    {
+        status.phase = phase.to_owned();
+    }
+    response
+}
+
+fn has_live_preview(provider: &str) -> bool {
+    provider == "bluestacks"
+}
+
+/// Providers whose emulator-N serial could be BlueStacks' port alias.
+fn may_be_bluestacks_alias(provider: &str) -> bool {
+    provider != "bluestacks"
+}
+
+/// The adb.exe of the running default (port 5037) ADB server, if any.
+pub(super) fn running_adb_server() -> Option<PathBuf> {
+    // Processes only: new_all() also queries disks, networks and components.
+    let mut system = hbb_common::sysinfo::System::new();
+    system.refresh_processes();
+    system
+        .processes()
+        .values()
+        .find_map(|process| {
+            (process.name().eq_ignore_ascii_case("adb.exe")
+                && is_default_adb_server(process.cmd())
+                && process.exe().is_file())
+            .then(|| process.exe().to_path_buf())
+        })
+}
+
+pub(super) fn adb_path() -> ResultType<PathBuf> {
+    adb_executable()
+}
+
+fn adb_executable() -> ResultType<PathBuf> {
+    if let Some(adb) = running_adb_server() {
+        return Ok(adb);
+    }
+    for root in [
+        std::env::var_os("ANDROID_SDK_ROOT"),
+        std::env::var_os("ANDROID_HOME"),
+        std::env::var_os("LOCALAPPDATA")
+            .map(|path| PathBuf::from(path).join("Android/Sdk").into_os_string()),
+        // The SYSTEM service's own LOCALAPPDATA is not the signed-in user's.
+        crate::platform::get_active_user_home()
+            .map(|home| home.join(r"AppData\Local\Android\Sdk").into_os_string()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let adb = PathBuf::from(root).join("platform-tools/adb.exe");
+        if adb.is_file() {
+            return Ok(adb);
+        }
+    }
+    bail!("A current Android platform-tools ADB installation is required for guest streaming")
+}
+
+pub struct GuestSession {
+    pub id: u64,
+    pub target_id: String,
+    pub preview: bool,
+    cancel: Arc<AtomicBool>,
+    sockets: Arc<Mutex<Vec<TcpStream>>>,
+    input: SyncSender<GuestInputCommand>,
+    pending_requests: Arc<AtomicUsize>,
+}
+
+enum GuestInputCommand {
+    Request(EmulatorRequest),
+    ReleaseAll,
+    ResetVideo,
+}
+
+/// How a `ResetVideo` request reaches the video encoder.
+enum VideoReset {
+    /// The helper encodes: send scrcpy's reset-video control message.
+    Helper,
+    /// The host encodes: raise the flag its video loop polls.
+    Host(Arc<AtomicBool>),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct GuestGeometry {
+    width: u16,
+    height: u16,
+    /// The space the helper injects touches in. The stream size on the
+    /// helper path; the device display on the host path.
+    touch_space: (u16, u16),
+    generation: u64,
+    ready: bool,
+}
+
+/// The device display size oriented like the stream (landscape when the
+/// stream is), which is the space a control-only helper injects touches in.
+fn display_touch_space(display: (u16, u16), stream: (u16, u16)) -> (u16, u16) {
+    let (short, long) = (display.0.min(display.1), display.0.max(display.1));
+    if stream.0 > stream.1 {
+        (long, short)
+    } else {
+        (short, long)
+    }
+}
+
+/// A stream coordinate scaled to the touch space (rounded, kept inside it).
+fn scale_touch(value: u32, from: u16, to: u16) -> u32 {
+    if from == to || from == 0 || to == 0 {
+        return value;
+    }
+    let scaled = (u64::from(value) * u64::from(to) + u64::from(from) / 2) / u64::from(from);
+    scaled.min(u64::from(to) - 1) as u32
+}
+
+#[derive(Default)]
+struct GuestIdleRefresh {
+    last_frame: Option<Instant>,
+    requested: bool,
+}
+
+impl GuestIdleRefresh {
+    fn note_frame(&mut self, now: Instant) {
+        self.last_frame = Some(now);
+        self.requested = false;
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        let due = self
+            .last_frame
+            .map(|last| now.saturating_duration_since(last) >= Duration::from_secs(2))
+            .unwrap_or(false);
+        if self.requested || !due {
+            return false;
+        }
+        self.requested = true;
+        true
+    }
+}
+
+// A full connection channel must not stop reading the scrcpy socket: doing
+// so buffers old frames in TCP and eventually makes the remote view jump ahead.
+// After any dropped H.264 reference, wait for a new random-access frame.
+#[derive(Default)]
+struct GuestFrameBackpressure {
+    waiting_key: bool,
+    last_refresh: Option<Instant>,
+}
+
+impl GuestFrameBackpressure {
+    fn deliver(
+        &mut self,
+        frame: EmulatorVideoFrame,
+        events: &hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+        input: &SyncSender<GuestInputCommand>,
+    ) -> ResultType<()> {
+        if self.waiting_key && !frame.key {
+            self.request_refresh(input);
+            return Ok(());
+        }
+        let key = frame.key;
+        match events.try_send(GuestEvent::Frame(frame)) {
+            Ok(()) => {
+                if key {
+                    self.waiting_key = false;
+                    self.last_refresh = None;
+                }
+            }
+            Err(hbb_common::tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.waiting_key = true;
+                hbb_common::throttled_log!(
+                    Duration::from_secs(5),
+                    warn,
+                    "Guest video transport queue saturated; discard dependent frames and request a new keyframe"
+                );
+                self.request_refresh(input);
+            }
+            Err(hbb_common::tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                bail!("Guest event transport disconnected")
+            }
+        }
+        Ok(())
+    }
+
+    fn request_refresh(&mut self, input: &SyncSender<GuestInputCommand>) {
+        if self
+            .last_refresh
+            .is_some_and(|sent| sent.elapsed() < Duration::from_secs(1))
+        {
+            return;
+        }
+        if input.try_send(GuestInputCommand::ResetVideo).is_ok() {
+            self.last_refresh = Some(Instant::now());
+        }
+    }
+}
+
+/// Delivers a session's encoded frames, for the helper and host paths alike:
+/// idle-refresh and timing bookkeeping, `stream_ready` once per geometry,
+/// then the shared backpressure.
+struct FrameSender<'a> {
+    request: &'a EmulatorRequest,
+    id: u64,
+    target_id: &'a str,
+    events: &'a hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+    capture_input: &'a SyncSender<GuestInputCommand>,
+    preview: bool,
+    geometry: &'a Mutex<GuestGeometry>,
+    idle: &'a Mutex<GuestIdleRefresh>,
+    backpressure: GuestFrameBackpressure,
+    timing: crate::frame_timing::TimingWindow,
+    last_frame: Option<Instant>,
+}
+
+impl<'a> FrameSender<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        request: &'a EmulatorRequest,
+        id: u64,
+        target_id: &'a str,
+        events: &'a hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+        capture_input: &'a SyncSender<GuestInputCommand>,
+        preview: bool,
+        geometry: &'a Mutex<GuestGeometry>,
+        idle: &'a Mutex<GuestIdleRefresh>,
+        timing_name: &'static str,
+    ) -> Self {
+        Self {
+            request,
+            id,
+            target_id,
+            events,
+            capture_input,
+            preview,
+            geometry,
+            idle,
+            backpressure: GuestFrameBackpressure::default(),
+            timing: crate::frame_timing::TimingWindow::new(
+                timing_name,
+                Duration::from_secs(5),
+                Instant::now(),
+            ),
+            last_frame: None,
+        }
+    }
+
+    /// The loading phase while a new geometry has no frame yet.
+    fn send_waiting_screen(&self) -> ResultType<()> {
+        self.events.blocking_send(GuestEvent::Response(with_phase(
+            status_response(
+                self.request.request_id,
+                self.id,
+                self.target_id,
+                EmulatorSessionState::EmulatorStarting,
+                0,
+                0,
+                String::new(),
+            ),
+            "waiting_screen",
+        )))?;
+        Ok(())
+    }
+
+    /// Delivers one encoded frame. True when it made the geometry ready
+    /// (and `stream_ready` was sent).
+    fn send(&mut self, data: Vec<u8>, key: bool, pts: i64) -> ResultType<bool> {
+        let read_at = Instant::now();
+        self.idle.lock().unwrap().note_frame(read_at);
+        if !self.preview {
+            if let Some(previous) = self.last_frame {
+                self.timing
+                    .sample("read_gap", crate::frame_timing::ms(read_at - previous));
+            }
+            self.last_frame = Some(read_at);
+            self.timing.sample("kbytes", data.len() as f64 / 1024.0);
+            if let Some(latency) = crate::frame_timing::HOST_TAPS.take_latency(read_at) {
+                self.timing
+                    .sample("tap_to_frame", crate::frame_timing::ms(latency));
+            }
+        }
+        let ready_dimensions = {
+            let mut current = self.geometry.lock().unwrap();
+            let became_ready = !current.ready;
+            current.ready = true;
+            became_ready.then_some((current.width, current.height))
+        };
+        if let Some((width, height)) = ready_dimensions {
+            self.events.blocking_send(GuestEvent::Response(with_preview(
+                with_phase(
+                    status_response(
+                        self.request.request_id,
+                        self.id,
+                        self.target_id,
+                        EmulatorSessionState::EmulatorStreaming,
+                        width,
+                        height,
+                        String::new(),
+                    ),
+                    "stream_ready",
+                ),
+                self.preview,
+            )))?;
+        }
+        self.backpressure.deliver(
+            EmulatorVideoFrame {
+                session_id: self.id,
+                data: data.into(),
+                key,
+                pts,
+                ..Default::default()
+            },
+            self.events,
+            self.capture_input,
+        )?;
+        if !self.preview {
+            self.timing
+                .sample("deliver", crate::frame_timing::ms(read_at.elapsed()));
+            if let Some(line) = self.timing.take_due(Instant::now()) {
+                log::info!("{line}");
+            }
+        }
+        Ok(ready_dimensions.is_some())
+    }
+}
+
+impl GuestGeometry {
+    fn ready(width: u16, height: u16) -> Self {
+        Self {
+            width,
+            height,
+            touch_space: (width, height),
+            generation: 1,
+            ready: true,
+        }
+    }
+
+    fn begin_stream(&mut self, width: u16, height: u16) -> bool {
+        let changed = self.generation == 0 || self.width != width || self.height != height;
+        self.width = width;
+        self.height = height;
+        self.touch_space = (width, height);
+        self.generation = self.generation.saturating_add(1).max(1);
+        self.ready = false;
+        changed
+    }
+}
+
+impl GuestSession {
+    pub fn start(
+        request: EmulatorRequest,
+        events: hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+    ) -> ResultType<Self> {
+        Self::start_with_mode(request, events, false)
+    }
+
+    pub fn start_preview(
+        request_id: u64,
+        target_id: String,
+        events: hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+    ) -> ResultType<Self> {
+        let mut request = EmulatorRequest {
+            request_id,
+            protocol_version: PROTOCOL_VERSION,
+            ..Default::default()
+        };
+        request.set_select(base::message_proto::EmulatorSelectRequest {
+            target_id,
+            ..Default::default()
+        });
+        Self::start_with_mode(request, events, true)
+    }
+
+    fn start_with_mode(
+        request: EmulatorRequest,
+        events: hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+        preview: bool,
+    ) -> ResultType<Self> {
+        let Some(emulator_request::Union::Select(selection)) = request.union.as_ref() else {
+            bail!("Expected emulator selection")
+        };
+        let target_id = selection.target_id.clone();
+        let bytes = *uuid::Uuid::new_v4().as_bytes();
+        let id = u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]) & 0x001fffffffffffff;
+        if id == 0 {
+            bail!("Could not allocate guest session identity")
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sockets = Arc::new(Mutex::new(Vec::new()));
+        let (input, receiver) = mpsc::sync_channel(GUEST_INPUT_QUEUE_SIZE);
+        let capture_input = input.clone();
+        let pending_requests = Arc::new(AtomicUsize::new(0));
+        let session_pending = pending_requests.clone();
+        let session = Self {
+            id,
+            target_id: target_id.clone(),
+            preview,
+            cancel: cancel.clone(),
+            sockets: sockets.clone(),
+            input,
+            pending_requests: session_pending,
+        };
+        let superseded = Arc::new(AtomicBool::new(false));
+        thread::Builder::new()
+            .name("emulator-guest".to_owned())
+            .spawn(move || {
+                let result = run_session(
+                    &request,
+                    id,
+                    &target_id,
+                    &events,
+                    &cancel,
+                    &sockets,
+                    receiver,
+                    &capture_input,
+                    &pending_requests,
+                    preview,
+                    &superseded,
+                );
+                if !preview {
+                    release_full_screen(&target_id, id);
+                }
+                if superseded.load(Ordering::Acquire) {
+                    log::info!("Guest session {id} ended: {target_id} was opened on another device");
+                    // Its own phase, so the phone does not open it again
+                    // and take it back from the other device.
+                    let _ = events.blocking_send(GuestEvent::Response(superseded_status(
+                        request.request_id,
+                        id,
+                        &target_id,
+                    )));
+                    return;
+                }
+                if let Err(error) = result {
+                    if !cancel.load(Ordering::Acquire) {
+                        log::warn!("Guest session {id} failed: {error}");
+                        let _ = events.blocking_send(GuestEvent::Response(with_preview(
+                            status_response(
+                                request.request_id,
+                                id,
+                                &target_id,
+                                EmulatorSessionState::EmulatorFailed,
+                                0,
+                                0,
+                                error.to_string(),
+                            ),
+                            preview,
+                        )));
+                    }
+                }
+            })?;
+        Ok(session)
+    }
+
+    pub fn input(&self, request: EmulatorRequest) -> ResultType<()> {
+        if self.preview {
+            bail!("Preview streams cannot receive input")
+        }
+        if self.cancel.load(Ordering::Acquire) {
+            bail!("Guest session is closed")
+        }
+        if sheds_under_load(&request, self.pending_requests.load(Ordering::Acquire)) {
+            log::trace!("Shedding guest touch move under input load");
+            return Ok(());
+        }
+        self.pending_requests.fetch_add(1, Ordering::AcqRel);
+        self.input
+            .try_send(GuestInputCommand::Request(request))
+            .map_err(|_| {
+                decrement_pending(&self.pending_requests);
+                hbb_common::anyhow::anyhow!("Guest input is busy or disconnected")
+            })
+    }
+
+    pub fn release_input(&self) -> ResultType<()> {
+        if self.preview || self.cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.input
+            .try_send(GuestInputCommand::ReleaseAll)
+            .map_err(|_| hbb_common::anyhow::anyhow!("Guest input is busy or disconnected"))
+    }
+
+    pub fn refresh_video(&self) -> ResultType<()> {
+        if self.cancel.load(Ordering::Acquire) {
+            bail!("Guest session is closed")
+        }
+        self.input
+            .try_send(GuestInputCommand::ResetVideo)
+            .map_err(|_| hbb_common::anyhow::anyhow!("Guest video reset is busy or disconnected"))
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Release);
+        for socket in self.sockets.lock().unwrap().drain(..) {
+            if let Err(error) = socket.shutdown(Shutdown::Both) {
+                log::trace!("Guest cancellation socket: {error}");
+            }
+        }
+    }
+}
+
+impl Drop for GuestSession {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+/// The failure phase of a full-screen session ended because the emulator was
+/// opened on another device; the phone does not reopen it by itself.
+const SUPERSEDED_PHASE: &str = "superseded";
+const SUPERSEDED_MESSAGE: &str = "This emulator was opened on another device.";
+
+fn superseded_status(request_id: u64, id: u64, target_id: &str) -> EmulatorResponse {
+    with_phase(
+        status_response(
+            request_id,
+            id,
+            target_id,
+            EmulatorSessionState::EmulatorFailed,
+            0,
+            0,
+            SUPERSEDED_MESSAGE.to_owned(),
+        ),
+        SUPERSEDED_PHASE,
+    )
+}
+
+/// A full-screen session's handles, for ending it from another connection.
+struct FullScreenEntry {
+    target_id: String,
+    id: u64,
+    cancel: Arc<AtomicBool>,
+    sockets: Arc<Mutex<Vec<TcpStream>>>,
+    superseded: Arc<AtomicBool>,
+}
+
+/// One full-screen session per emulator: opening it again ends the previous
+/// one, whose connection (a relaunched phone's) may not have closed yet. So
+/// an emulator never carries two input helpers for full screen.
+static FULL_SCREEN: Mutex<Vec<FullScreenEntry>> = Mutex::new(Vec::new());
+
+fn full_screen() -> MutexGuard<'static, Vec<FullScreenEntry>> {
+    // Handles only: a panicking holder leaves nothing half-updated.
+    FULL_SCREEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Registers a new full-screen session and ends the emulator's previous one;
+/// returns that one's id.
+fn claim_full_screen(entry: FullScreenEntry) -> Option<u64> {
+    let mut book = full_screen();
+    let previous = book
+        .iter()
+        .position(|old| old.target_id == entry.target_id)
+        .map(|index| book.swap_remove(index));
+    book.push(entry);
+    drop(book);
+    let previous = previous?;
+    previous.superseded.store(true, Ordering::Release);
+    previous.cancel.store(true, Ordering::Release);
+    let mut sockets = previous
+        .sockets
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for socket in sockets.drain(..) {
+        if let Err(error) = socket.shutdown(Shutdown::Both) {
+            log::trace!("Superseded guest session socket: {error}");
+        }
+    }
+    Some(previous.id)
+}
+
+/// The emulator's screen as captured on this PC, for host-GPU video. No
+/// provider has one until the BlueStacks host-capture work adds it; the
+/// session then streams the in-Android helper video.
+fn host_screen_source(
+    _target: &EmulatorTarget,
+) -> Option<Box<dyn host_video_session::HostScreenSource>> {
+    None
+}
+
+fn release_full_screen(target_id: &str, id: u64) {
+    full_screen().retain(|entry| !(entry.target_id == target_id && entry.id == id));
+}
+
+fn run_session(
+    request: &EmulatorRequest,
+    id: u64,
+    target_id: &str,
+    events: &hbb_common::tokio::sync::mpsc::Sender<GuestEvent>,
+    cancel: &Arc<AtomicBool>,
+    sockets: &Arc<Mutex<Vec<TcpStream>>>,
+    input: mpsc::Receiver<GuestInputCommand>,
+    capture_input: &SyncSender<GuestInputCommand>,
+    pending_requests: &Arc<AtomicUsize>,
+    preview: bool,
+    superseded: &Arc<AtomicBool>,
+) -> ResultType<()> {
+    let Some(emulator_request::Union::Select(selection)) = request.union.as_ref() else {
+        bail!("Expected emulator selection")
+    };
+    let (targets, _) = targets();
+    let local = targets
+        .into_iter()
+        .find(|target| target.target.stable_id == target_id)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("Emulator instance no longer exists"))?;
+    if preview
+        && (!has_live_preview(&local.target.provider.to_string())
+            || local.target.state == EmulatorState::Stopped)
+    {
+        bail!("Only running BlueStacks instances have live previews")
+    }
+    if !local.provider.capabilities(&local.target).adb {
+        bail!("Enable ADB debugging in this emulator instance's settings before connecting")
+    }
+    let adb = adb_executable()?;
+    let helper = helper_path()?;
+    let is_stopped = local.target.state == EmulatorState::Stopped;
+    if is_stopped && !selection.start_if_stopped {
+        bail!("Emulator instance is stopped")
+    }
+    let send_startup_phase = |phase: &str| -> ResultType<()> {
+        if !preview {
+            events.blocking_send(GuestEvent::Response(with_phase(
+                status_response(
+                    request.request_id,
+                    id,
+                    target_id,
+                    EmulatorSessionState::EmulatorStarting,
+                    0,
+                    0,
+                    String::new(),
+                ),
+                phase,
+            )))?;
+        }
+        Ok(())
+    };
+    if is_stopped {
+        send_startup_phase("boot_requested")?;
+        local.provider.start(&local.target)?;
+    }
+    send_startup_phase("starting_android")?;
+    let started = Instant::now();
+    // Only an emulator that was already running fails at its first silence.
+    let just_started = is_stopped;
+    let serial = loop {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if let Ok(endpoint) = local.provider.resolve_adb(&local.target) {
+            if endpoint.serial.starts_with("127.0.0.1:") {
+                let _ = adb_command(&adb, &endpoint.serial, &["connect", &endpoint.serial]);
+            }
+            match adb_command(
+                &adb,
+                &endpoint.serial,
+                &["shell", "getprop", "sys.boot_completed"],
+            ) {
+                Ok(value) if value.trim() == "1" => break endpoint.serial,
+                Err(error)
+                    if is_not_answering(&error) && is_jammed(&endpoint.serial) && !just_started =>
+                {
+                    return Err(error)
+                }
+                Err(error) if error.to_string().contains("device offline") => {
+                    // Reset only this stale transport, never the shared ADB server.
+                    if let Err(error) = adb_command(&adb, &endpoint.serial, &["reconnect"]) {
+                        hbb_common::throttled_log!(
+                            Duration::from_secs(5),
+                            warn,
+                            "Guest ADB reconnect failed: {error}"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        if started.elapsed() > Duration::from_secs(90) {
+            bail!("Android boot/ADB did not become ready within 90 seconds")
+        }
+        thread::sleep(Duration::from_millis(500));
+    };
+    if !preview {
+        // Only now, with Android answering: an open that cannot get this far
+        // leaves another device's session alone.
+        if let Some(previous) = claim_full_screen(FullScreenEntry {
+            target_id: target_id.to_owned(),
+            id,
+            cancel: cancel.clone(),
+            sockets: sockets.clone(),
+            superseded: superseded.clone(),
+        }) {
+            log::info!("Guest session {id} replaces full-screen session {previous} of {target_id}");
+        }
+    }
+    send_startup_phase("waiting_screen")?;
+    // Android's emulator-N aliases are port based and may belong to a different
+    // provider when both runtimes are installed. Never inject into that guest.
+    let bluestacks_marker = adb_command(
+        &adb,
+        &serial,
+        &["shell", "getprop", "ro.bst.ime_listener_port"],
+    )?;
+    if may_be_bluestacks_alias(&local.target.provider.to_string())
+        && !bluestacks_marker.trim().is_empty()
+    {
+        bail!("This emulator's ADB endpoint belongs to BlueStacks; resolve the ADB port conflict in the emulator settings")
+    }
+    if selection.launch_default_app && local.target.provider.to_string() == "bluestacks" {
+        super::bluestacks::launch_default_app(&local.target.provider_instance_id)?;
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let input = match host_screen_source(&local.target) {
+        Some(source) => {
+            let session = host_video_session::HostSession {
+                request,
+                id,
+                target_id,
+                events,
+                cancel,
+                capture_input,
+                pending_requests,
+                preview,
+                adb: &adb,
+                serial: &serial,
+                helper: &helper,
+                source: source.as_ref(),
+            };
+            match host_video_session::run(&session, input) {
+                host_video_session::HostAttempt::Finished(result) => return result,
+                host_video_session::HostAttempt::Fallback(input) => input,
+            }
+        }
+        None => input,
+    };
+    let mut helper = if preview {
+        GuestHelper::connect_preview(&adb, &serial, &helper)?
+    } else {
+        GuestHelper::connect(&adb, &serial, &helper)?
+    };
+    let control = helper.control_socket()?;
+    let stop_socket = helper.cancellation_socket()?;
+    {
+        let mut owned = sockets.lock().unwrap();
+        if cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        owned.push(stop_socket);
+    }
+    let geometry = Arc::new(Mutex::new(GuestGeometry::default()));
+    let input_geometry = geometry.clone();
+    let input_stop_flag = Arc::new(AtomicBool::new(false));
+    let input_cancel = input_stop_flag.clone();
+    let input_pending = pending_requests.clone();
+    let input_stop = helper.cancellation_socket()?;
+    let writer = thread::Builder::new()
+        .name("emulator-input".to_owned())
+        .spawn(move || {
+            if let Err(error) = input_loop(
+                control,
+                &input,
+                &input_geometry,
+                &input_cancel,
+                &input_pending,
+                &VideoReset::Helper,
+            ) {
+                log::warn!("Guest input stopped: {error}");
+            }
+            if let Err(error) = input_stop.shutdown(Shutdown::Both) {
+                log::trace!("Guest input cancellation: {error}");
+            }
+        })?;
+    let recovery_stop_flag = Arc::new(AtomicBool::new(false));
+    let recovery_stop = recovery_stop_flag.clone();
+    let recovery_timed_out = Arc::new(AtomicBool::new(false));
+    let recovery_timeout = recovery_timed_out.clone();
+    let recovery_geometry = geometry.clone();
+    let recovery_socket = helper.cancellation_socket()?;
+    let capture_idle = Arc::new(Mutex::new(GuestIdleRefresh::default()));
+    let watchdog_idle = capture_idle.clone();
+    let recovery_input = capture_input.clone();
+    let recovery_watchdog = spawn_recovery_watchdog(
+        recovery_geometry,
+        watchdog_idle,
+        recovery_input,
+        recovery_stop,
+        recovery_timeout,
+        move || {
+            if let Err(error) = recovery_socket.shutdown(Shutdown::Both) {
+                log::trace!("Guest recovery watchdog shutdown: {error}");
+            }
+        },
+    )?;
+    let mut frames = H264Frames::default();
+    let mut sender = FrameSender::new(
+        request,
+        id,
+        target_id,
+        events,
+        capture_input,
+        preview,
+        &geometry,
+        &capture_idle,
+        "Guest video (host)",
+    );
+    let result = (|| -> ResultType<()> {
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let packet = helper.read_packet()?;
+            if let VideoPacket::Session { width, height } = &packet {
+                let changed = geometry.lock().unwrap().begin_stream(*width, *height);
+                if !preview && changed {
+                    sender.send_waiting_screen()?;
+                }
+            }
+            if let Some(frame) = frames.accept(packet)? {
+                sender.send(frame.data, frame.key, frame.pts_ms)?;
+            }
+        }
+    })();
+    recovery_stop_flag.store(true, Ordering::Release);
+    if recovery_watchdog.join().is_err() {
+        log::warn!("Guest recovery watchdog panicked");
+    }
+    input_stop_flag.store(true, Ordering::Release);
+    if writer.join().is_err() {
+        log::warn!("Guest input worker panicked");
+    }
+    drop(helper);
+    if recovery_timed_out.load(Ordering::Acquire) {
+        bail!("Guest screen did not produce a current frame within 10 seconds")
+    }
+    result
+}
+
+/// Fails a stream whose new geometry has no current frame within 10 s
+/// (`on_timeout` unblocks the video reader), and asks for a fresh frame once
+/// the screen has been still for 2 s.
+fn spawn_recovery_watchdog(
+    geometry: Arc<Mutex<GuestGeometry>>,
+    idle: Arc<Mutex<GuestIdleRefresh>>,
+    input: SyncSender<GuestInputCommand>,
+    stop: Arc<AtomicBool>,
+    timed_out: Arc<AtomicBool>,
+    on_timeout: impl FnOnce() + Send + 'static,
+) -> std::io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("emulator-recovery-watchdog".to_owned())
+        .spawn(move || {
+            let mut observed_generation = 0;
+            let mut waiting_since = None;
+            while !stop.load(Ordering::Acquire) {
+                let current = *geometry.lock().unwrap();
+                if current.generation != observed_generation {
+                    observed_generation = current.generation;
+                    waiting_since = (current.generation != 0 && !current.ready).then(Instant::now);
+                } else if current.ready {
+                    waiting_since = None;
+                }
+                if waiting_since
+                    .map(|started| started.elapsed() >= Duration::from_secs(10))
+                    .unwrap_or(false)
+                {
+                    timed_out.store(true, Ordering::Release);
+                    on_timeout();
+                    break;
+                }
+                // Some emulator encoders stop repeating frames on a static screen.
+                // Probe once; only an actual new capture can rearm the probe.
+                if idle.lock().unwrap().take_due(Instant::now()) {
+                    if let Err(error) = input.try_send(GuestInputCommand::ResetVideo) {
+                        log::trace!("Idle guest refresh unavailable: {error}");
+                    }
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        })
+}
+
+pub fn with_preview(mut response: EmulatorResponse, preview: bool) -> EmulatorResponse {
+    if let Some(base::message_proto::emulator_response::Union::Status(status)) =
+        response.union.as_mut()
+    {
+        status.preview = preview;
+    }
+    response
+}
+
+fn sheds_under_load(request: &EmulatorRequest, pending: usize) -> bool {
+    pending >= GUEST_INPUT_MOVE_SHED_THRESHOLD
+        && matches!(
+            request.union.as_ref(),
+            Some(emulator_request::Union::Touch(touch)) if touch.action == 2
+        )
+}
+
+fn decrement_pending(pending: &AtomicUsize) {
+    let _ = pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        Some(count.saturating_sub(1))
+    });
+}
+
+fn input_loop(
+    mut socket: TcpStream,
+    receiver: &mpsc::Receiver<GuestInputCommand>,
+    geometry: &Mutex<GuestGeometry>,
+    cancel: &AtomicBool,
+    pending_requests: &AtomicUsize,
+    reset: &VideoReset,
+) -> ResultType<()> {
+    let mut touches = BTreeMap::new();
+    let mut keys = BTreeSet::new();
+    let mut observed_generation = 0;
+    let result = (|| -> ResultType<()> {
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                break;
+            }
+            let command = match receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok(command) => Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            if matches!(command, Some(GuestInputCommand::Request(_))) {
+                decrement_pending(pending_requests);
+            }
+            let current = *geometry.lock().unwrap();
+            if current.generation != observed_generation {
+                release_guest_input(&mut socket, &mut touches, &mut keys);
+                observed_generation = current.generation;
+            }
+            let Some(command) = command else {
+                continue;
+            };
+            if matches!(command, GuestInputCommand::ReleaseAll) {
+                release_guest_input(&mut socket, &mut touches, &mut keys);
+                continue;
+            }
+            if matches!(command, GuestInputCommand::ResetVideo) {
+                match reset {
+                    // scrcpy v4 control message 17 resets video capture/encoding. It
+                    // produces fresh codec config plus a random-access frame without
+                    // tearing down the ADB/helper session.
+                    VideoReset::Helper => socket.write_all(&[SCRCPY_CONTROL_RESET_VIDEO])?,
+                    VideoReset::Host(flag) => flag.store(true, Ordering::Release),
+                }
+                continue;
+            }
+            let GuestInputCommand::Request(request) = command else {
+                continue;
+            };
+            if !current.ready {
+                continue;
+            }
+            match request.union {
+                Some(emulator_request::Union::Navigation(navigation)) => {
+                    let key = match navigation.enum_value_or_default() {
+                        EmulatorNavigation::EmulatorBack => 4,
+                        EmulatorNavigation::EmulatorHome => 3,
+                        EmulatorNavigation::EmulatorRecents => 187,
+                        _ => bail!("Unknown Android navigation action"),
+                    };
+                    socket.write_all(&key_packet(key, true))?;
+                    socket.write_all(&key_packet(key, false))?;
+                }
+                Some(emulator_request::Union::Key(key)) => {
+                    socket.write_all(&key_packet(key.keycode, key.down))?;
+                    if key.down {
+                        keys.insert(key.keycode);
+                    } else {
+                        keys.remove(&key.keycode);
+                    }
+                }
+                Some(emulator_request::Union::Text(text)) => {
+                    socket.write_all(&text_packet(&text.text)?)?;
+                }
+                Some(emulator_request::Union::Touch(touch)) => {
+                    let (width, height) = (current.width, current.height);
+                    if (width as u32, height as u32) != (touch.width, touch.height) {
+                        release_guest_touches(&mut socket, &mut touches);
+                        log::trace!(
+                            "Ignoring stale guest touch geometry {}x{}; current is {}x{}",
+                            touch.width,
+                            touch.height,
+                            width,
+                            height
+                        );
+                        continue;
+                    }
+                    if touch.action != 0 && !touches.contains_key(&touch.pointer_id) {
+                        log::trace!(
+                            "Ignoring guest touch action {} for inactive pointer {}",
+                            touch.action,
+                            touch.pointer_id
+                        );
+                        continue;
+                    }
+                    if touch.action == 0
+                        && !touches.contains_key(&touch.pointer_id)
+                        && touches.len() >= 10
+                    {
+                        bail!("Too many Android touch pointers")
+                    }
+                    let (space_width, space_height) = current.touch_space;
+                    let x = scale_touch(touch.x, width, space_width);
+                    let y = scale_touch(touch.y, height, space_height);
+                    socket.write_all(&touch_packet(
+                        touch.action as u8,
+                        touch.pointer_id,
+                        x,
+                        y,
+                        space_width,
+                        space_height,
+                    )?)?;
+                    if touch.action == 0 {
+                        crate::frame_timing::HOST_TAPS.touch_down(Instant::now());
+                    }
+                    if touch.action == 1 || touch.action == 3 {
+                        touches.remove(&touch.pointer_id);
+                    } else {
+                        touches.insert(touch.pointer_id, (x, y, space_width, space_height));
+                    }
+                }
+                _ => bail!("Unexpected guest input request"),
+            }
+        }
+        Ok(())
+    })();
+    release_guest_input(&mut socket, &mut touches, &mut keys);
+    result
+}
+
+fn release_guest_input(
+    socket: &mut TcpStream,
+    touches: &mut BTreeMap<u64, (u32, u32, u16, u16)>,
+    keys: &mut BTreeSet<u32>,
+) {
+    release_guest_touches(socket, touches);
+    for key in std::mem::take(keys) {
+        if let Err(error) = socket.write_all(&key_packet(key, false)) {
+            log::trace!("Guest key release: {error}");
+        }
+    }
+}
+
+fn release_guest_touches(
+    socket: &mut TcpStream,
+    touches: &mut BTreeMap<u64, (u32, u32, u16, u16)>,
+) {
+    for (pointer, (x, y, width, height)) in std::mem::take(touches) {
+        if let Err(error) = touch_packet(3, pointer, x, y, width, height)
+            .and_then(|packet| socket.write_all(&packet))
+        {
+            log::trace!("Guest touch release: {error}");
+        }
+    }
+}
+
+fn key_packet(keycode: u32, down: bool) -> [u8; 14] {
+    let mut packet = [0; 14];
+    packet[1] = if down { 0 } else { 1 };
+    packet[2..6].copy_from_slice(&keycode.to_be_bytes());
+    packet
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::Read, net::TcpListener};
+
+    #[test]
+    fn only_bluestacks_gets_previews_and_others_get_the_bluestacks_alias_guard() {
+        assert!(has_live_preview("bluestacks"));
+        assert!(!has_live_preview("avd"));
+        assert!(!has_live_preview("ldplayer"));
+        assert!(!may_be_bluestacks_alias("bluestacks"));
+        assert!(may_be_bluestacks_alias("ldplayer"));
+    }
+
+    fn shed_touch(action: u32) -> EmulatorRequest {
+        let mut request = EmulatorRequest::new();
+        request.set_touch(base::message_proto::EmulatorTouch {
+            action,
+            pointer_id: 1,
+            width: 1280,
+            height: 720,
+            ..Default::default()
+        });
+        request
+    }
+
+    #[test]
+    fn touch_moves_shed_only_at_or_above_threshold() {
+        let moves = shed_touch(2);
+        assert!(!sheds_under_load(&moves, 0));
+        assert!(!sheds_under_load(
+            &moves,
+            GUEST_INPUT_MOVE_SHED_THRESHOLD - 1
+        ));
+        assert!(sheds_under_load(&moves, GUEST_INPUT_MOVE_SHED_THRESHOLD));
+        assert!(sheds_under_load(&moves, GUEST_INPUT_QUEUE_SIZE));
+    }
+
+    #[test]
+    fn non_move_input_is_never_shed() {
+        let mut key = EmulatorRequest::new();
+        key.set_key(base::message_proto::EmulatorKey {
+            keycode: 29,
+            down: true,
+            ..Default::default()
+        });
+        let mut text = EmulatorRequest::new();
+        text.set_text(base::message_proto::EmulatorText {
+            text: "a".to_owned(),
+            ..Default::default()
+        });
+        let mut navigation = EmulatorRequest::new();
+        navigation.set_navigation(EmulatorNavigation::EmulatorBack);
+        let requests = [
+            shed_touch(0),
+            shed_touch(1),
+            shed_touch(3),
+            key,
+            text,
+            navigation,
+            EmulatorRequest::new(),
+        ];
+        for request in &requests {
+            for pending in [0, GUEST_INPUT_MOVE_SHED_THRESHOLD, GUEST_INPUT_QUEUE_SIZE] {
+                assert!(!sheds_under_load(request, pending));
+            }
+        }
+    }
+
+    #[test]
+    fn opening_an_emulator_again_ends_its_previous_full_screen_session() {
+        let entry = |target: &str, id: u64| {
+            let (local, peer) = loopback_control();
+            let flags = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+            let entry = FullScreenEntry {
+                target_id: target.to_owned(),
+                id,
+                cancel: flags.0.clone(),
+                sockets: Arc::new(Mutex::new(vec![local])),
+                superseded: flags.1.clone(),
+            };
+            (entry, flags, peer)
+        };
+        let (first, (first_cancel, first_superseded), mut first_peer) =
+            entry("bluestacks:Supersede_Test_A", 1);
+        assert_eq!(claim_full_screen(first), None);
+        let (other, (other_cancel, _), _other_peer) = entry("bluestacks:Supersede_Test_B", 2);
+        assert_eq!(claim_full_screen(other), None);
+        let (second, (second_cancel, _), _second_peer) = entry("bluestacks:Supersede_Test_A", 3);
+        assert_eq!(claim_full_screen(second), Some(1));
+        assert!(first_cancel.load(Ordering::Acquire));
+        assert!(first_superseded.load(Ordering::Acquire));
+        // Its sockets were shut down, which unblocks its video reader.
+        let mut byte = [0u8; 1];
+        assert_eq!(std::io::Read::read(&mut first_peer, &mut byte).unwrap_or(0), 0);
+        assert!(!second_cancel.load(Ordering::Acquire));
+        assert!(!other_cancel.load(Ordering::Acquire));
+        // The ended session's own release does not drop its successor.
+        release_full_screen("bluestacks:Supersede_Test_A", 1);
+        let (third, _, _third_peer) = entry("bluestacks:Supersede_Test_A", 4);
+        assert_eq!(claim_full_screen(third), Some(3));
+        assert!(second_cancel.load(Ordering::Acquire));
+        release_full_screen("bluestacks:Supersede_Test_A", 4);
+        release_full_screen("bluestacks:Supersede_Test_B", 2);
+        assert!(!full_screen()
+            .iter()
+            .any(|entry| entry.target_id.starts_with("bluestacks:Supersede_Test_")));
+    }
+
+    #[test]
+    fn a_superseded_session_reports_its_own_phase() {
+        let response = superseded_status(7, 42, "bluestacks:Pie64");
+        let Some(base::message_proto::emulator_response::Union::Status(status)) = response.union
+        else {
+            panic!("not a status");
+        };
+        assert_eq!(status.state.enum_value_or_default(), EmulatorSessionState::EmulatorFailed);
+        assert_eq!(status.phase, "superseded");
+        assert_eq!(status.session_id, 42);
+        assert_eq!(status.target_id, "bluestacks:Pie64");
+        assert!(!status.error.is_empty());
+    }
+
+    #[test]
+    fn pending_decrement_saturates_at_zero() {
+        let pending = AtomicUsize::new(1);
+        decrement_pending(&pending);
+        decrement_pending(&pending);
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn inventory_negotiates_operation_capabilities_and_scope() {
+        let response = inventory(77, "scope-a", 4);
+        let inventory = match response.union {
+            Some(base::message_proto::emulator_response::Union::Inventory(inventory)) => inventory,
+            _ => panic!("Expected emulator inventory"),
+        };
+        assert_eq!(inventory.operation_session_identity, "scope-a");
+        assert_eq!(inventory.operation_generation, 4);
+        assert!(inventory
+            .capabilities
+            .contains(&"operation.identity.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"operation.ack.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"desktop.stream_liveness.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.process_end".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.shell_restart.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.process_identity.v2".to_owned()));
+        assert!(inventory.capabilities.contains(&"guest.text.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"guest.video_refresh.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.recover.bluestacks_adb".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.phone_workspace.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.gateway.status.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.gateway.setup.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.gateway.imdb.v1".to_owned()));
+        assert!(inventory
+            .capabilities
+            .contains(&"host.gateway.restart.v1".to_owned()));
+        // An older phone offers no Android Emulator management.
+        assert!(!inventory.capabilities.iter().any(|capability| capability.contains("avd")));
+        assert!(inventory.instances.iter().all(|instance| instance.provider != "avd"));
+    }
+
+    #[test]
+    fn idle_preview_refresh_is_bounded_and_rearmed_only_by_a_frame() {
+        let now = Instant::now();
+        let mut idle = GuestIdleRefresh::default();
+        assert!(!idle.take_due(now + Duration::from_secs(20)));
+        idle.note_frame(now);
+        assert!(!idle.take_due(now + Duration::from_secs(1)));
+        assert!(idle.take_due(now + Duration::from_secs(2)));
+        assert!(!idle.take_due(now + Duration::from_secs(30)));
+        idle.note_frame(now + Duration::from_secs(31));
+        assert!(!idle.take_due(now + Duration::from_secs(32)));
+        assert!(idle.take_due(now + Duration::from_secs(33)));
+    }
+
+    #[test]
+    fn flowing_preview_frames_do_not_request_capture_resets() {
+        let now = Instant::now();
+        let mut idle = GuestIdleRefresh::default();
+        for second in 0..30 {
+            let frame_at = now + Duration::from_secs(second);
+            idle.note_frame(frame_at);
+            assert!(!idle.take_due(frame_at + Duration::from_millis(1900)));
+        }
+    }
+
+    #[test]
+    fn startup_phase_is_carried_as_evidence() {
+        let response = with_phase(
+            status_response(
+                1,
+                2,
+                "bluestacks:Tiramisu64",
+                EmulatorSessionState::EmulatorStarting,
+                0,
+                0,
+                String::new(),
+            ),
+            "waiting_screen",
+        );
+        let status = match response.union {
+            Some(base::message_proto::emulator_response::Union::Status(status)) => status,
+            _ => panic!("Expected emulator status"),
+        };
+        assert_eq!(status.phase, "waiting_screen");
+    }
+
+    #[test]
+    fn guest_transport_preserves_short_frame_bursts_without_restarting_video() {
+        let (events, mut receiver) = hbb_common::tokio::sync::mpsc::channel(
+            super::super::remote::GUEST_EVENT_QUEUE_SIZE,
+        );
+        let (input, requests) = mpsc::sync_channel(2);
+        let mut sender = GuestFrameBackpressure::default();
+        // Six 30-FPS frames arriving together after a 200-ms scheduling delay.
+        for index in 0..6 {
+            sender
+                .deliver(
+                    EmulatorVideoFrame {
+                        session_id: 9,
+                        pts: index * 33,
+                        key: index == 0,
+                        ..Default::default()
+                    },
+                    &events,
+                    &input,
+                )
+                .unwrap();
+        }
+        assert!(
+            requests.try_recv().is_err(),
+            "A short frame burst must not reset the guest encoder"
+        );
+        let delivered = std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(|event| match event {
+                GuestEvent::Frame(frame) => frame.pts,
+                _ => panic!("Expected video frame"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(delivered, vec![0, 33, 66, 99, 132, 165]);
+    }
+
+    #[test]
+    fn guest_transport_preserves_a_short_burst_at_sixty_fps() {
+        let (events, mut receiver) = hbb_common::tokio::sync::mpsc::channel(
+            super::super::remote::GUEST_EVENT_QUEUE_SIZE,
+        );
+        let (input, requests) = mpsc::sync_channel(2);
+        let mut sender = GuestFrameBackpressure::default();
+        // The Android Emulator streams at 60 FPS: a 200-ms delay is 12 frames.
+        for index in 0..12 {
+            sender
+                .deliver(
+                    EmulatorVideoFrame {
+                        session_id: 9,
+                        pts: index * 17,
+                        key: index == 0,
+                        ..Default::default()
+                    },
+                    &events,
+                    &input,
+                )
+                .unwrap();
+        }
+        assert!(
+            requests.try_recv().is_err(),
+            "A short 60-FPS burst must not reset the guest encoder"
+        );
+        assert_eq!(std::iter::from_fn(|| receiver.try_recv().ok()).count(), 12);
+    }
+
+    #[test]
+    fn full_guest_event_channel_drops_references_and_recovers_at_next_keyframe() {
+        let (events, mut receiver) = hbb_common::tokio::sync::mpsc::channel(1);
+        let (input, requests) = mpsc::sync_channel(2);
+        let mut sender = GuestFrameBackpressure::default();
+        let frame = |pts, key| EmulatorVideoFrame {
+            session_id: 9,
+            pts,
+            key,
+            ..Default::default()
+        };
+
+        // Simulate a stalled connection: capture must not wait for the receiver.
+        events.try_send(GuestEvent::Frame(frame(0, true))).unwrap();
+        sender.deliver(frame(33, false), &events, &input).unwrap();
+        assert!(sender.waiting_key);
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(GuestInputCommand::ResetVideo)
+        ));
+        sender.deliver(frame(66, false), &events, &input).unwrap();
+        assert!(requests.try_recv().is_err(), "Do not flood reset requests");
+
+        // An available slot is not enough: dependent H.264 frames remain invalid
+        // after the first drop, even if the network briefly catches up.
+        assert!(matches!(receiver.try_recv(), Ok(GuestEvent::Frame(_))));
+        sender.deliver(frame(99, false), &events, &input).unwrap();
+        assert!(receiver.try_recv().is_err());
+        sender.deliver(frame(132, true), &events, &input).unwrap();
+        assert!(!sender.waiting_key);
+        match receiver.try_recv() {
+            Ok(GuestEvent::Frame(recovered)) => {
+                assert!(recovered.key);
+                assert_eq!(recovered.pts, 132);
+            }
+            _ => panic!("Expected fresh keyframe after recovery"),
+        }
+        sender.deliver(frame(165, false), &events, &input).unwrap();
+        assert!(matches!(receiver.try_recv(), Ok(GuestEvent::Frame(frame)) if frame.pts == 165));
+    }
+
+    #[hbb_common::tokio::test]
+    async fn unknown_instance_reports_failure_without_a_guest_session() {
+        let mut request = EmulatorRequest {
+            request_id: 9,
+            protocol_version: PROTOCOL_VERSION,
+            ..Default::default()
+        };
+        request.set_select(base::message_proto::EmulatorSelectRequest {
+            target_id: format!("bluestacks:missing-{}", uuid::Uuid::new_v4()),
+            start_if_stopped: true,
+            ..Default::default()
+        });
+        let (sender, mut receiver) = hbb_common::tokio::sync::mpsc::channel(2);
+        let session = GuestSession::start(request, sender).unwrap();
+        let event = hbb_common::tokio::time::timeout(Duration::from_secs(20), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            GuestEvent::Response(response) => match response.union {
+                Some(base::message_proto::emulator_response::Union::Status(status)) => {
+                    assert_eq!(status.session_id, session.id);
+                    assert_eq!(
+                        status.state.enum_value_or_default(),
+                        EmulatorSessionState::EmulatorFailed
+                    );
+                    assert!(status.error.contains("no longer exists"));
+                }
+                _ => panic!("Expected failed selection status"),
+            },
+            _ => panic!("Unknown instance must not stream video"),
+        }
+        assert!(
+            hbb_common::tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn disconnect_releases_guest_touches_and_held_keys() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender_socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        // The helper keeps its original control handle alive while the input
+        // worker releases held events. Preserve that ownership in this fixture.
+        let _owned_control = sender_socket.try_clone().unwrap();
+        let (mut reader, _) = listener.accept().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let mut touch = EmulatorRequest::new();
+        touch.set_touch(base::message_proto::EmulatorTouch {
+            action: 0,
+            pointer_id: 1,
+            x: 100,
+            y: 200,
+            width: 1280,
+            height: 720,
+            ..Default::default()
+        });
+        sender.send(GuestInputCommand::Request(touch)).unwrap();
+        let mut key = EmulatorRequest::new();
+        key.set_key(base::message_proto::EmulatorKey {
+            keycode: 29,
+            down: true,
+            ..Default::default()
+        });
+        sender.send(GuestInputCommand::Request(key)).unwrap();
+        drop(sender);
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &Mutex::new(GuestGeometry::ready(1280, 720)),
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &VideoReset::Helper,
+            )
+        });
+        let mut wire = [0; 92];
+        reader.read_exact(&mut wire).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(
+            &wire[..32],
+            &touch_packet(0, 1, 100, 200, 1280, 720).unwrap()
+        );
+        assert_eq!(&wire[32..46], &key_packet(29, true));
+        assert_eq!(
+            &wire[46..78],
+            &touch_packet(3, 1, 100, 200, 1280, 720).unwrap()
+        );
+        assert_eq!(&wire[78..], &key_packet(29, false));
+    }
+
+    #[test]
+    fn liveness_release_cancels_guest_input_without_stopping_worker() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender_socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _owned_control = sender_socket.try_clone().unwrap();
+        let (mut reader, _) = listener.accept().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (sender, receiver) = mpsc::sync_channel(5);
+
+        let mut touch = EmulatorRequest::new();
+        touch.set_touch(base::message_proto::EmulatorTouch {
+            action: 0,
+            pointer_id: 7,
+            x: 320,
+            y: 240,
+            width: 1280,
+            height: 720,
+            ..Default::default()
+        });
+        sender.send(GuestInputCommand::Request(touch)).unwrap();
+
+        let mut key = EmulatorRequest::new();
+        key.set_key(base::message_proto::EmulatorKey {
+            keycode: 29,
+            down: true,
+            ..Default::default()
+        });
+        sender.send(GuestInputCommand::Request(key)).unwrap();
+        sender.send(GuestInputCommand::ReleaseAll).unwrap();
+
+        for down in [true, false] {
+            let mut follow_up = EmulatorRequest::new();
+            follow_up.set_key(base::message_proto::EmulatorKey {
+                keycode: 30,
+                down,
+                ..Default::default()
+            });
+            sender.send(GuestInputCommand::Request(follow_up)).unwrap();
+        }
+        drop(sender);
+
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &Mutex::new(GuestGeometry::ready(1280, 720)),
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &VideoReset::Helper,
+            )
+        });
+        let mut wire = [0; 120];
+        reader.read_exact(&mut wire).unwrap();
+        worker.join().unwrap().unwrap();
+
+        assert_eq!(
+            &wire[..32],
+            &touch_packet(0, 7, 320, 240, 1280, 720).unwrap()
+        );
+        assert_eq!(&wire[32..46], &key_packet(29, true));
+        assert_eq!(
+            &wire[46..78],
+            &touch_packet(3, 7, 320, 240, 1280, 720).unwrap()
+        );
+        assert_eq!(&wire[78..92], &key_packet(29, false));
+        assert_eq!(&wire[92..106], &key_packet(30, true));
+        assert_eq!(&wire[106..], &key_packet(30, false));
+    }
+
+    #[test]
+    fn video_refresh_writes_scrcpy_reset_video_control_message() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender_socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _owned_control = sender_socket.try_clone().unwrap();
+        let (mut reader, _) = listener.accept().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(GuestInputCommand::ResetVideo).unwrap();
+        drop(sender);
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &Mutex::new(GuestGeometry::ready(1280, 720)),
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &VideoReset::Helper,
+            )
+        });
+        let mut wire = [0_u8; 1];
+        reader.read_exact(&mut wire).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(wire, [SCRCPY_CONTROL_RESET_VIDEO]);
+    }
+
+    #[test]
+    fn rotation_releases_multitouch_blocks_stale_contacts_and_keeps_worker_alive() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender_socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _owned_control = sender_socket.try_clone().unwrap();
+        let (mut reader, _) = listener.accept().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let geometry = Arc::new(Mutex::new(GuestGeometry::ready(1280, 720)));
+        let worker_geometry = geometry.clone();
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &worker_geometry,
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &VideoReset::Helper,
+            )
+        });
+
+        let request = |action, pointer_id, x, y, width, height| {
+            let mut request = EmulatorRequest::new();
+            request.set_touch(base::message_proto::EmulatorTouch {
+                action,
+                pointer_id,
+                x,
+                y,
+                width,
+                height,
+                ..Default::default()
+            });
+            GuestInputCommand::Request(request)
+        };
+
+        sender.send(request(0, 7, 320, 240, 1280, 720)).unwrap();
+        sender.send(request(0, 8, 500, 300, 1280, 720)).unwrap();
+        let mut initial = [0; 64];
+        reader.read_exact(&mut initial).unwrap();
+        assert_eq!(
+            &initial[..32],
+            &touch_packet(0, 7, 320, 240, 1280, 720).unwrap()
+        );
+        assert_eq!(
+            &initial[32..],
+            &touch_packet(0, 8, 500, 300, 1280, 720).unwrap()
+        );
+
+        geometry.lock().unwrap().begin_stream(720, 1280);
+        let mut releases = [0; 64];
+        reader.read_exact(&mut releases).unwrap();
+        assert_eq!(
+            &releases[..32],
+            &touch_packet(3, 7, 320, 240, 1280, 720).unwrap()
+        );
+        assert_eq!(
+            &releases[32..],
+            &touch_packet(3, 8, 500, 300, 1280, 720).unwrap()
+        );
+
+        // Old geometry is rejected while the new stream has no current frame.
+        sender.send(request(2, 7, 321, 241, 1280, 720)).unwrap();
+        // A fresh frame makes input eligible again, but an old pointer cannot
+        // resume with a move; it must start with a new down.
+        geometry.lock().unwrap().ready = true;
+        sender.send(request(2, 7, 200, 300, 720, 1280)).unwrap();
+        sender.send(request(0, 9, 200, 300, 720, 1280)).unwrap();
+        sender.send(request(1, 9, 200, 300, 720, 1280)).unwrap();
+        drop(sender);
+
+        let mut wire = [0; 64];
+        reader.read_exact(&mut wire).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(
+            &wire[..32],
+            &touch_packet(0, 9, 200, 300, 720, 1280).unwrap()
+        );
+        assert_eq!(
+            &wire[32..],
+            &touch_packet(1, 9, 200, 300, 720, 1280).unwrap()
+        );
+    }
+
+    fn loopback_control() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender_socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (reader, _) = listener.accept().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        (sender_socket, reader)
+    }
+
+    #[test]
+    fn host_touch_maps_feed_space_to_display_space() {
+        let (sender_socket, mut reader) = loopback_control();
+        let _owned_control = sender_socket.try_clone().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let mut touch = EmulatorRequest::new();
+        touch.set_touch(base::message_proto::EmulatorTouch {
+            action: 0,
+            pointer_id: 1,
+            x: 288,
+            y: 640,
+            width: 576,
+            height: 1280,
+            ..Default::default()
+        });
+        sender.send(GuestInputCommand::Request(touch)).unwrap();
+        drop(sender);
+        let geometry = GuestGeometry {
+            touch_space: (1080, 2400),
+            ..GuestGeometry::ready(576, 1280)
+        };
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &Mutex::new(geometry),
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &VideoReset::Helper,
+            )
+        });
+        let mut wire = [0; 64];
+        reader.read_exact(&mut wire).unwrap();
+        worker.join().unwrap().unwrap();
+        let down = &wire[..32];
+        assert_eq!(down[1], 0);
+        assert_eq!(u32::from_be_bytes(down[10..14].try_into().unwrap()), 540);
+        assert_eq!(u32::from_be_bytes(down[14..18].try_into().unwrap()), 1200);
+        assert_eq!(u16::from_be_bytes(down[18..20].try_into().unwrap()), 1080);
+        assert_eq!(u16::from_be_bytes(down[20..22].try_into().unwrap()), 2400);
+        // The release on disconnect uses the same display-space contact.
+        assert_eq!(
+            &wire[32..],
+            &touch_packet(3, 1, 540, 1200, 1080, 2400).unwrap()
+        );
+    }
+
+    #[test]
+    fn host_touch_space_clamps_to_the_display_edge() {
+        assert_eq!(scale_touch(575, 576, 1080), 1078);
+        assert_eq!(scale_touch(576, 576, 1080), 1079);
+        assert_eq!(scale_touch(100, 1280, 1280), 100);
+    }
+
+    #[test]
+    fn display_space_follows_orientation() {
+        assert_eq!(display_touch_space((1080, 2400), (1280, 576)), (2400, 1080));
+        assert_eq!(display_touch_space((1080, 2400), (576, 1280)), (1080, 2400));
+        assert_eq!(display_touch_space((2400, 1080), (576, 1280)), (1080, 2400));
+    }
+
+    #[test]
+    fn host_reset_sets_flag_instead_of_writing_control() {
+        let (sender_socket, mut reader) = loopback_control();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(GuestInputCommand::ResetVideo).unwrap();
+        drop(sender);
+        let flag = Arc::new(AtomicBool::new(false));
+        let reset = VideoReset::Host(flag.clone());
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &Mutex::new(GuestGeometry::ready(1280, 720)),
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &reset,
+            )
+        });
+        worker.join().unwrap().unwrap();
+        assert!(flag.load(Ordering::Acquire));
+        let mut wire = Vec::new();
+        reader.read_to_end(&mut wire).unwrap();
+        assert!(wire.is_empty(), "wrote {wire:?}");
+    }
+
+    #[test]
+    fn size_change_starts_a_new_geometry() {
+        let mut geometry = GuestGeometry::default();
+        assert!(geometry.begin_stream(576, 1280));
+        let first = geometry.generation;
+        assert!(geometry.begin_stream(1280, 576));
+        assert!(geometry.generation > first);
+        assert!(!geometry.ready);
+        assert_eq!(geometry.touch_space, (1280, 576));
+    }
+
+    #[hbb_common::tokio::test]
+    #[ignore = "Captures an explicitly selected idle local BlueStacks preview without injecting input"]
+    async fn idle_preview_keeps_delivering_current_frames() {
+        async fn next_frame(
+            receiver: &mut hbb_common::tokio::sync::mpsc::Receiver<GuestEvent>,
+            session_id: u64,
+        ) {
+            loop {
+                match receiver.recv().await.expect("Preview closed before its next frame") {
+                    GuestEvent::Frame(frame) if frame.session_id == session_id => {
+                        assert!(!frame.data.is_empty());
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let target = std::env::var("MIRPG_TEST_IDLE_TARGET").expect("Set MIRPG_TEST_IDLE_TARGET");
+        let (sender, mut receiver) = hbb_common::tokio::sync::mpsc::channel(32);
+        let session = GuestSession::start_preview(1, target, sender).unwrap();
+        hbb_common::tokio::time::timeout(
+            Duration::from_secs(30), next_frame(&mut receiver, session.id),
+        ).await.expect("Preview did not start");
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(12) {
+            hbb_common::tokio::time::timeout(
+                Duration::from_secs(3), next_frame(&mut receiver, session.id),
+            ).await.expect("Idle preview stopped delivering frames before the stale-image deadline");
+        }
+        session.cancel();
+    }
+
+    #[hbb_common::tokio::test]
+    #[ignore = "Captures an explicitly selected idle local fullscreen guest without injecting input"]
+    async fn idle_fullscreen_keeps_delivering_current_frames() {
+        let target = std::env::var("MIRPG_TEST_IDLE_TARGET").expect("Set MIRPG_TEST_IDLE_TARGET");
+        let (sender, mut receiver) = hbb_common::tokio::sync::mpsc::channel(32);
+        let mut request = EmulatorRequest { request_id: 1, protocol_version: PROTOCOL_VERSION, ..Default::default() };
+        request.set_select(base::message_proto::EmulatorSelectRequest { target_id: target, ..Default::default() });
+        let session = GuestSession::start(request, sender).unwrap();
+        let started = Instant::now();
+        let mut received = 0;
+        let mut maximum_gap = Duration::ZERO;
+        let mut last_frame = Instant::now();
+        let result = async {
+            while started.elapsed() < Duration::from_secs(15) {
+                let event = hbb_common::tokio::time::timeout(
+                    if received == 0 { Duration::from_secs(30) } else { Duration::from_secs(3) },
+                    receiver.recv(),
+                ).await.map_err(|_| "Fullscreen stopped delivering frames before the four-second input deadline")?
+                    .ok_or("Fullscreen closed before its next frame")?;
+                if let GuestEvent::Response(response) = &event {
+                    if let Some(base::message_proto::emulator_response::Union::Status(status)) = &response.union {
+                        if received != 0 && status.state.enum_value_or_default() == EmulatorSessionState::EmulatorStarting {
+                            return Err("Same-size recovery replaced the live image with a loading screen");
+                        }
+                    }
+                }
+                if let GuestEvent::Frame(frame) = event {
+                    assert_eq!(frame.session_id, session.id);
+                    assert!(!frame.data.is_empty());
+                    if received != 0 { maximum_gap = maximum_gap.max(last_frame.elapsed()); }
+                    last_frame = Instant::now();
+                    received += 1;
+                }
+            }
+            Ok::<_, &str>(())
+        }.await;
+        session.cancel();
+        eprintln!("Fullscreen capture: frames={received}, elapsed={:?}, maximum_gap={maximum_gap:?}", started.elapsed());
+        result.unwrap();
+    }
+
+    #[hbb_common::tokio::test]
+    #[ignore = "Starts guest capture in two explicitly selected local emulator instances"]
+    async fn two_guest_sessions_keep_separate_identities_and_cancel_independently() {
+        async fn next_key(
+            receiver: &mut hbb_common::tokio::sync::mpsc::Receiver<GuestEvent>,
+            expected: u64,
+            key_required: bool,
+        ) -> ResultType<()> {
+            loop {
+                let event =
+                    hbb_common::tokio::time::timeout(Duration::from_secs(110), receiver.recv())
+                        .await?
+                        .ok_or_else(|| hbb_common::anyhow::anyhow!("Guest event channel closed"))?;
+                match event {
+                    GuestEvent::Frame(frame) if frame.key || !key_required => {
+                        if frame.session_id != expected {
+                            bail!("Guest identity mismatch");
+                        }
+                        eprintln!(
+                            "Guest {expected} frame: {} bytes, key={}",
+                            frame.data.len(),
+                            frame.key
+                        );
+                        return Ok(());
+                    }
+                    GuestEvent::Response(response) => {
+                        if let Some(base::message_proto::emulator_response::Union::Status(status)) =
+                            response.union
+                        {
+                            if status.state.enum_value_or_default()
+                                == EmulatorSessionState::EmulatorFailed
+                            {
+                                bail!("{}", status.error);
+                            }
+                            if status.session_id != expected {
+                                bail!("Guest identity mismatch");
+                            }
+                            eprintln!("Guest {expected} status: {:?}", status.state);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let target_ids = [
+            std::env::var("MIRPG_TEST_TARGET_A").expect("Set MIRPG_TEST_TARGET_A"),
+            std::env::var("MIRPG_TEST_TARGET_B").expect("Set MIRPG_TEST_TARGET_B"),
+        ];
+        assert_ne!(target_ids[0], target_ids[1]);
+        let mut sessions = Vec::new();
+        let mut receivers = Vec::new();
+        for target_id in target_ids {
+            let mut request = EmulatorRequest {
+                request_id: 1,
+                protocol_version: PROTOCOL_VERSION,
+                ..Default::default()
+            };
+            request.set_select(base::message_proto::EmulatorSelectRequest {
+                target_id,
+                start_if_stopped: true,
+                ..Default::default()
+            });
+            let (sender, receiver) = hbb_common::tokio::sync::mpsc::channel(2);
+            sessions.push(GuestSession::start(request, sender).unwrap());
+            receivers.push(receiver);
+        }
+        assert_ne!(sessions[0].id, sessions[1].id);
+        let result = async {
+            eprintln!("Waiting for first guest {}", sessions[0].id);
+            next_key(&mut receivers[0], sessions[0].id, true).await?;
+            eprintln!("Waiting for second guest {}", sessions[1].id);
+            next_key(&mut receivers[1], sessions[1].id, true).await?;
+            sessions[0].cancel();
+            while receivers[1].try_recv().is_ok() {}
+            let mut navigation = EmulatorRequest {
+                session_id: sessions[1].id,
+                ..Default::default()
+            };
+            navigation.set_navigation(EmulatorNavigation::EmulatorHome);
+            sessions[1].input(navigation.clone())?;
+            eprintln!("Waiting for surviving guest after Home");
+            hbb_common::tokio::time::timeout(
+                Duration::from_secs(20),
+                next_key(&mut receivers[1], sessions[1].id, false),
+            )
+            .await??;
+            navigation.set_navigation(EmulatorNavigation::EmulatorBack);
+            sessions[1].input(navigation)?;
+            Ok::<(), hbb_common::anyhow::Error>(())
+        }
+        .await;
+        for session in &sessions {
+            session.cancel();
+        }
+        for receiver in &mut receivers {
+            hbb_common::tokio::time::timeout(Duration::from_secs(35), async {
+                while receiver.recv().await.is_some() {}
+            })
+            .await
+            .unwrap();
+        }
+        result.unwrap();
+    }
+}

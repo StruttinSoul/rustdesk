@@ -30,6 +30,7 @@ import 'package:window_size/window_size.dart' as window_size;
 
 import '../consts.dart';
 import 'common/widgets/overlay.dart';
+import 'common/widgets/aperture_brand.dart';
 import 'mobile/pages/file_manager_page.dart';
 import 'mobile/pages/remote_page.dart';
 import 'mobile/pages/view_camera_page.dart';
@@ -2647,6 +2648,7 @@ connect(BuildContext context, String id,
                 id: id,
                 password: password,
                 isSharedPassword: isSharedPassword,
+                connToken: connToken,
                 forceRelay: forceRelay),
           ),
         );
@@ -2687,6 +2689,7 @@ connect(BuildContext context, String id,
             password: password,
             isSharedPassword: isSharedPassword,
             forceRelay: forceRelay,
+            connToken: connToken,
           ),
         ),
       );
@@ -3021,7 +3024,7 @@ int versionCmp(String v1, String v2) {
 }
 
 String getWindowName({WindowType? overrideType}) {
-  final name = bind.mainGetAppNameSync();
+  const name = ApertureBrand.name;
   switch (overrideType ?? kWindowType) {
     case WindowType.Main:
       return name;
@@ -3819,10 +3822,24 @@ class _LogoState extends State<_Logo> {
 }
 
 // max 300 x 60
-Widget loadLogo() => const _Logo();
+Widget loadLogo() => bind.isCustomClient()
+    ? const _Logo()
+    : Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: const [
+            ApertureBrandMark(),
+            SizedBox(width: 12),
+            Text(ApertureBrand.name,
+                style: TextStyle(fontSize: 27, fontWeight: FontWeight.w600)),
+          ],
+        ),
+      );
 
 Widget loadIcon(double size) {
-  return Image.asset('assets/icon.png',
+  return Image.asset(
+      bind.isCustomClient() ? 'assets/icon.png' : ApertureBrand.iconAsset,
       width: size,
       height: size,
       errorBuilder: (ctx, error, stackTrace) => SvgPicture.asset(

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/mobile/pages/server_page.dart';
 import 'package:flutter_hbb/mobile/pages/settings_page.dart';
@@ -7,7 +8,23 @@ import '../../common.dart';
 import '../../common/widgets/chat_page.dart';
 import '../../models/platform_model.dart';
 import '../../models/state_model.dart';
+import '../../models/chat_model.dart';
+import '../widgets/mirpg_remote_theme.dart';
+import '../../common/widgets/aperture_brand.dart';
 import 'connection_page.dart';
+
+enum MobileRootTab { computers, share, settings }
+
+List<MobileRootTab> mobileRootTabs({
+  required bool android,
+  required bool incomingOnly,
+  required bool outgoingOnly,
+}) =>
+    [
+      if (!incomingOnly) MobileRootTab.computers,
+      if (android && !outgoingOnly) MobileRootTab.share,
+      MobileRootTab.settings,
+    ];
 
 abstract class PageShape extends Widget {
   final String title = "";
@@ -28,10 +45,30 @@ class HomePageState extends State<HomePage> {
   var _selectedIndex = 0;
   int get selectedIndex => _selectedIndex;
   final List<PageShape> _pages = [];
-  int _chatPageTabIndex = -1;
-  bool get isChatPageCurrentTab => isAndroid
-      ? _selectedIndex == _chatPageTabIndex
-      : false; // change this when ios have chat page
+  bool _chatOpen = false;
+  // Name kept: chat_model.dart reads it. True while the chat route is open.
+  bool get isChatPageCurrentTab => _chatOpen;
+
+  Future<void> openChat({MessageKey? key}) async {
+    if (_chatOpen) return;
+    if (key != null) {
+      gFFI.chatModel.changeCurrentKey(key);
+    }
+    gFFI.chatModel.hideChatIconOverlay();
+    gFFI.chatModel.hideChatWindowOverlay();
+    gFFI.chatModel.mobileClearClientUnread(gFFI.chatModel.currentKey.connId);
+    _chatOpen = true;
+    try {
+      await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => Scaffold(
+          appBar: AppBar(title: const MobileChatTitle()),
+          body: ChatPage(type: ChatPageType.mobileMain),
+        ),
+      ));
+    } finally {
+      _chatOpen = false;
+    }
+  }
 
   void refreshPages() {
     setState(() {
@@ -43,20 +80,35 @@ class HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     initPages();
+    if (isAndroid && !bind.isIncomingOnly()) {
+      unawaited(bind.mainDiscover());
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        final id = await bind.mainGetLastRemoteId();
+        if (mounted &&
+            id.isNotEmpty &&
+            ModalRoute.of(context)?.isCurrent == true) {
+          await connect(context, id);
+        }
+      });
+    }
   }
 
   void initPages() {
     _pages.clear();
-    if (!bind.isIncomingOnly()) {
-      _pages.add(ConnectionPage(
-        appBarActions: [],
-      ));
+    for (final tab in mobileRootTabs(
+      android: isAndroid,
+      incomingOnly: bind.isIncomingOnly(),
+      outgoingOnly: bind.isOutgoingOnly(),
+    )) {
+      switch (tab) {
+        case MobileRootTab.computers:
+          _pages.add(ConnectionPage(appBarActions: []));
+        case MobileRootTab.share:
+          _pages.add(ServerPage());
+        case MobileRootTab.settings:
+          _pages.add(SettingsPage());
+      }
     }
-    if (isAndroid && !bind.isOutgoingOnly()) {
-      _chatPageTabIndex = _pages.length;
-      _pages.addAll([ChatPage(type: ChatPageType.mobileMain), ServerPage()]);
-    }
-    _pages.add(SettingsPage());
   }
 
   @override
@@ -73,32 +125,18 @@ class HomePageState extends State<HomePage> {
           return false;
         },
         child: Scaffold(
-          // backgroundColor: MyTheme.grayBg,
           appBar: AppBar(
-            centerTitle: true,
+            automaticallyImplyLeading: false,
             title: appTitle(),
             actions: _pages.elementAt(_selectedIndex).appBarActions,
           ),
-          bottomNavigationBar: BottomNavigationBar(
+          bottomNavigationBar: MobileHomeNavigationBar(
             key: navigationBarKey,
-            items: _pages
-                .map((page) =>
-                    BottomNavigationBarItem(icon: page.icon, label: page.title))
-                .toList(),
+            pages: _pages,
             currentIndex: _selectedIndex,
-            type: BottomNavigationBarType.fixed,
-            selectedItemColor: MyTheme.accent, //
-            unselectedItemColor: MyTheme.darkGray,
-            onTap: (index) => setState(() {
-              // close chat overlay when go chat page
+            onDestinationSelected: (index) => setState(() {
               if (_selectedIndex != index) {
                 _selectedIndex = index;
-                if (isChatPageCurrentTab) {
-                  gFFI.chatModel.hideChatIconOverlay();
-                  gFFI.chatModel.hideChatWindowOverlay();
-                  gFFI.chatModel.mobileClearClientUnread(
-                      gFFI.chatModel.currentKey.connId);
-                }
               }
             }),
           ),
@@ -107,51 +145,99 @@ class HomePageState extends State<HomePage> {
   }
 
   Widget appTitle() {
+    final pageTitle =
+        _pages.isEmpty ? 'Computers' : _pages[_selectedIndex].title;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(pageTitle),
+        Text(
+          ApertureBrand.name,
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: MirpgRemoteTheme.textSecondary,
+                fontWeight: FontWeight.w500,
+              ),
+        ),
+      ],
+    );
+  }
+}
+
+class MobileChatTitle extends StatelessWidget {
+  const MobileChatTitle({super.key});
+
+  @override
+  Widget build(BuildContext context) {
     final currentUser = gFFI.chatModel.currentUser;
     final currentKey = gFFI.chatModel.currentKey;
-    if (isChatPageCurrentTab &&
-        currentUser != null &&
-        currentKey.peerId.isNotEmpty) {
-      final connected =
-          gFFI.serverModel.clients.any((e) => e.id == currentKey.connId);
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Tooltip(
-            message: currentKey.isOut
-                ? translate('Outgoing connection')
-                : translate('Incoming connection'),
-            child: Icon(
-              currentKey.isOut
-                  ? Icons.call_made_rounded
-                  : Icons.call_received_rounded,
+    if (currentUser == null || currentKey.peerId.isEmpty) {
+      return Text(translate('Chat'));
+    }
+    final connected =
+        gFFI.serverModel.clients.any((e) => e.id == currentKey.connId);
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Tooltip(
+          message: currentKey.isOut
+              ? translate('Outgoing connection')
+              : translate('Incoming connection'),
+          child: Icon(
+            currentKey.isOut
+                ? Icons.call_made_rounded
+                : Icons.call_received_rounded,
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  "${currentUser.firstName}   ${currentUser.id}",
+                ),
+                if (connected)
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Color.fromARGB(255, 133, 246, 199)),
+                  ).marginSymmetric(horizontal: 2),
+              ],
             ),
           ),
-          Expanded(
-            child: Center(
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    "${currentUser.firstName}   ${currentUser.id}",
-                  ),
-                  if (connected)
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Color.fromARGB(255, 133, 246, 199)),
-                    ).marginSymmetric(horizontal: 2),
-                ],
-              ),
+        ),
+      ],
+    );
+  }
+}
+
+class MobileHomeNavigationBar extends StatelessWidget {
+  const MobileHomeNavigationBar({
+    super.key,
+    required this.pages,
+    required this.currentIndex,
+    required this.onDestinationSelected,
+  });
+
+  final List<PageShape> pages;
+  final int currentIndex;
+  final ValueChanged<int> onDestinationSelected;
+
+  @override
+  Widget build(BuildContext context) => NavigationBar(
+        selectedIndex: currentIndex.clamp(0, pages.length - 1),
+        onDestinationSelected: onDestinationSelected,
+        destinations: [
+          for (final page in pages)
+            NavigationDestination(
+              icon: page.icon,
+              label: page is ServerPage ? 'Share' : page.title,
             ),
-          ),
         ],
       );
-    }
-    return Text(bind.mainGetAppNameSync());
-  }
 }
 
 class WebHomePage extends StatelessWidget {
@@ -245,11 +331,11 @@ class WebHomePage extends StatelessWidget {
       }
     }
     if (id != null) {
-      connect(context, id, 
-        isFileTransfer: isFileTransfer, 
-        isViewCamera: isViewCamera, 
-        isTerminal: isTerminal,
-        password: password);
+      connect(context, id,
+          isFileTransfer: isFileTransfer,
+          isViewCamera: isViewCamera,
+          isTerminal: isTerminal,
+          password: password);
     }
   }
 }

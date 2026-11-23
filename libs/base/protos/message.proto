@@ -84,6 +84,25 @@ message LoginRequest {
   string my_platform = 13;
   bytes hwid = 14;
   string avatar = 17;
+  DeviceProof device_proof = 18;
+}
+
+message DeviceProof {
+  bytes public_key = 1;
+  bytes signature = 2;
+  uint32 version = 3;
+}
+
+message AperturePairDeviceRequest {
+  uint64 request_id = 1;
+  bytes public_key = 2;
+  string name = 3;
+}
+
+message AperturePairDeviceResponse {
+  uint64 request_id = 1;
+  bool ok = 2;
+  string error = 3;
 }
 
 message Terminal {
@@ -101,6 +120,15 @@ message Features {
   bool privacy_mode = 1;
   bool terminal = 2;
   bool port_forward_mux = 3;
+  reserved 4;
+  reserved "codex";
+  bool emulator = 5;
+  bool target_dashboard = 6;
+  bool host_management = 7;
+  bool manual_clipboard = 8;
+  bool file_pause = 9;
+  bool file_keep_both = 10;
+  bool file_cancel_ack = 11;
 }
 
 message CodecAbility {
@@ -414,10 +442,32 @@ message FileAction {
     FileTransferSendConfirmRequest send_confirm = 9;
     FileRename rename = 10;
     ReadEmptyDirs read_empty_dirs = 11;
+    FileTransferPause pause = 12;
   }
 }
 
-message FileTransferCancel { int32 id = 1; }
+message FileTransferCancel {
+  int32 id = 1;
+  uint64 request_id = 2;
+}
+message FileTransferPause {
+  int32 id = 1;
+  // Correlates the acknowledgment with one specific pause attempt. A job id
+  // can survive reconnect/resume cycles, so it is not sufficient by itself.
+  uint64 request_id = 2;
+}
+message FileTransferPauseResponse {
+  int32 id = 1;
+  bool accepted = 2;
+  string error = 3;
+  uint64 request_id = 4;
+}
+message FileTransferCancelResponse {
+  int32 id = 1;
+  bool accepted = 2;
+  string error = 3;
+  uint64 request_id = 4;
+}
 
 message FileResponse {
   oneof union {
@@ -427,6 +477,8 @@ message FileResponse {
     FileTransferDone done = 4;
     FileTransferDigest digest = 5;
     ReadEmptyDirsResponse empty_dirs = 6;
+    FileTransferPauseResponse pause = 7;
+    FileTransferCancelResponse cancel = 8;
   }
 }
 
@@ -442,6 +494,12 @@ message FileTransferDigest {
                                // `is_resume` can let the controlled side know whether to check the `.digest` file.
                                // When `is_resume` is false, `.digest` exists, the same file does not exist,
                                // the controlled side should not check `.digest`, it should confirm with a new transfer request.
+  // Optional strong source-content identity. New peers require a 32-byte
+  // SHA-256 match before reusing a partial; older peers simply omit it.
+  bytes content_sha256 = 9;
+  // Opaque identity for the exact destination conflict snapshot presented to
+  // the sender. Destructive conflict decisions must echo this value.
+  string conflict_token = 10;
 }
 
 message FileTransferBlock {
@@ -477,7 +535,13 @@ message FileTransferSendConfirmRequest {
   oneof union {
     bool skip = 3;
     uint32 offset_blk = 4;
+    // Preserve the existing destination under a unique sibling name before
+    // accepting this file at the original destination path.
+    bool keep_both = 5;
   }
+  // Echoes FileTransferDigest.conflict_token for Replace/Keep-both decisions.
+  // Empty for non-conflict confirmations and legacy peers.
+  string conflict_token = 6;
 }
 
 message FileTransferDone {
@@ -491,6 +555,9 @@ message FileTransferReceiveRequest {
   repeated FileEntry files = 3;
   int32 file_num = 4;
   uint64 total_size = 5;
+  // Stable per-transfer capability used only to reclaim partial artifacts
+  // created by the same logical transfer after a reconnect/new job id.
+  string ownership_token = 6;
 }
 
 message FileRemoveDir {
@@ -997,7 +1064,207 @@ message PortForwardChannel {
   }
 }
 
+message EmulatorListRequest {}
+
+message EmulatorSelectRequest {
+  string target_id = 1;
+  bool start_if_stopped = 2;
+  bool launch_default_app = 3;
+}
+
+message EmulatorDesktopRequest {}
+
+message EmulatorPreviewRequest {
+  bool enabled = 1;
+  repeated string target_ids = 2;
+  repeated uint32 displays = 3;
+}
+
+message EmulatorPreviewState {
+  bool enabled = 1;
+  repeated uint64 session_ids = 2;
+  repeated uint32 displays = 3;
+}
+
+enum EmulatorNavigation {
+  EmulatorNavigationUnknown = 0;
+  EmulatorBack = 1;
+  EmulatorHome = 2;
+  EmulatorRecents = 3;
+}
+
+message EmulatorTouch {
+  uint32 action = 1;
+  uint64 pointer_id = 2;
+  uint32 x = 3;
+  uint32 y = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+}
+
+message EmulatorKey {
+  uint32 keycode = 1;
+  bool down = 2;
+}
+
+message EmulatorText {
+  string text = 1;
+}
+
+message EmulatorHostRequest {
+  string action = 1;
+  uint32 pid = 2;
+  string component = 3;
+  string operation_id = 4;
+  string session_identity = 5;
+  string target_identity = 6;
+  uint64 session_generation = 7;
+  uint64 process_start_time_secs = 8;
+  uint64 process_creation_time_100ns = 9;
+  string window_id = 10;
+  uint64 desktop_generation = 11;
+  uint32 display_width = 12;
+  uint32 display_height = 13;
+  uint32 display_dpi = 14;
+  string display_orientation = 15;
+  string owned_display_id = 16;
+  bool gateway_enabled = 17;
+  string gateway_expected_process_identity = 18;
+  uint32 gateway_confirmed_active_sessions = 19;
+  bool gateway_active_sessions_known = 20;
+  // Deprecated: belonged to the removed Android Emulator (AVD) actions. Kept,
+  // unused, so older and newer peers stay compatible.
+  string new_name = 21;
+  // `emulator_window`: show (true) or hide the emulator's window on the PC.
+  bool window_visible = 22;
+  // Deprecated: fields 23-27 belonged to the removed Android Emulator (AVD)
+  // settings. Kept, unused, so older and newer peers stay compatible.
+  uint32 avd_ram_mb = 23;
+  uint32 avd_cpu_cores = 24;
+  uint32 avd_screen_width = 25;
+  uint32 avd_screen_height = 26;
+  bool avd_restart = 27;
+}
+
+message EmulatorHostResponse {
+  string json = 1;
+}
+
+message EmulatorVideoRefreshRequest {}
+
+message EmulatorRequest {
+  uint64 request_id = 1;
+  uint32 protocol_version = 2;
+  uint64 session_id = 3;
+  oneof union {
+    EmulatorListRequest list = 4;
+    EmulatorSelectRequest select = 5;
+    EmulatorDesktopRequest desktop = 6;
+    EmulatorNavigation navigation = 7;
+    EmulatorTouch touch = 8;
+    EmulatorKey key = 9;
+    EmulatorPreviewRequest previews = 10;
+    EmulatorHostRequest host = 11;
+    EmulatorText text = 12;
+    EmulatorVideoRefreshRequest refresh_video = 13;
+  }
+}
+
+message EmulatorInstance {
+  string target_id = 1;
+  string provider = 2;
+  string name = 3;
+  string state = 4;
+  string android_version = 5;
+  string default_package = 6;
+  string last_error = 7;
+  // Deprecated: belonged to the removed Android Emulator (AVD) copies. Kept,
+  // unused, so older and newer peers stay compatible.
+  uint32 progress_percent = 8;
+  // The emulator's window is shown on the PC.
+  bool window_visible = 9;
+}
+
+message EmulatorInventory {
+  repeated EmulatorInstance instances = 1;
+  repeated string provider_errors = 2;
+  bool dashboard = 3;
+  repeated string capabilities = 4;
+  string operation_session_identity = 5;
+  uint64 operation_generation = 6;
+}
+
+enum EmulatorSessionState {
+  EmulatorSessionUnknown = 0;
+  EmulatorStarting = 1;
+  EmulatorStreaming = 2;
+  EmulatorDesktop = 3;
+  EmulatorFailed = 4;
+}
+
+message EmulatorSessionStatus {
+  uint64 session_id = 1;
+  string target_id = 2;
+  EmulatorSessionState state = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  string error = 6;
+  bool preview = 7;
+  string phase = 8;
+}
+
+message EmulatorResponse {
+  uint64 request_id = 1;
+  uint32 protocol_version = 2;
+  oneof union {
+    EmulatorInventory inventory = 3;
+    EmulatorSessionStatus status = 4;
+    string error = 5;
+    EmulatorPreviewState previews = 6;
+    EmulatorHostResponse host = 7;
+  }
+}
+
+message EmulatorVideoFrame {
+  uint64 session_id = 1;
+  bytes data = 2;
+  bool key = 3;
+  int64 pts = 4;
+}
+
+message VideoStreamHeartbeat {
+  uint32 display = 1;
+  uint64 sequence = 2;
+}
+
+enum ManualClipboardDirection {
+  ManualClipboardUnknown = 0;
+  ManualClipboardPhoneToHost = 1;
+  ManualClipboardHostToPhone = 2;
+}
+
+message ManualClipboardRequest {
+  string request_id = 1;
+  ManualClipboardDirection direction = 2;
+  string text = 3;
+  string target_identity = 4;
+}
+
+message ManualClipboardResponse {
+  string request_id = 1;
+  ManualClipboardDirection direction = 2;
+  bool accepted = 3;
+  bool applied = 4;
+  string text = 5;
+  string error_code = 6;
+  string error = 7;
+  string target_identity = 8;
+}
+
 message Message {
+  reserved 34 to 37;
+  reserved "codex_read_request", "codex_read_response",
+      "codex_control_request", "codex_control_response";
   oneof union {
     SignedId signed_id = 3;
     PublicKey public_key = 4;
@@ -1030,5 +1297,13 @@ message Message {
     TerminalAction terminal_action = 31;
     TerminalResponse terminal_response = 32;
     PortForwardChannel port_forward_channel = 33;
+    EmulatorRequest emulator_request = 38;
+    EmulatorResponse emulator_response = 39;
+    EmulatorVideoFrame emulator_video_frame = 40;
+    VideoStreamHeartbeat video_stream_heartbeat = 41;
+    ManualClipboardRequest manual_clipboard_request = 42;
+    ManualClipboardResponse manual_clipboard_response = 43;
+    AperturePairDeviceRequest aperture_pair_device_request = 44;
+    AperturePairDeviceResponse aperture_pair_device_response = 45;
   }
 }

@@ -1017,8 +1017,13 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
     }
 }
 
+/// Aperture never asks RustDesk's servers for a newer official client.
+pub(crate) fn software_update_check_allowed() -> bool {
+    false
+}
+
 pub fn check_software_update() {
-    if is_custom_client() {
+    if !software_update_check_allowed() || is_custom_client() {
         return;
     }
     let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
@@ -1531,13 +1536,22 @@ where
 /// - 4xx responses are returned as-is (server is reachable, business logic error).
 /// - If fallback also fails, returns the original HTTP result (text or error).
 pub async fn post_request(url: String, body: String, header: &str) -> ResultType<String> {
-    with_tcp_proxy_fallback(
+    crate::hbbs_http::api_backoff::check(&url)?;
+    post_request_probe(url, body, header).await
+}
+
+/// `post_request` that is sent even while the server's posts are paused; its
+/// result still counts. The heartbeat uses it as the recovery probe.
+pub async fn post_request_probe(url: String, body: String, header: &str) -> ResultType<String> {
+    let result = with_tcp_proxy_fallback(
         &url,
         "POST",
         post_request_http(&url, &body, header),
         post_request_via_tcp_proxy(&url, &body, header),
     )
-    .await
+    .await;
+    crate::hbbs_http::api_backoff::record(&url, result.is_ok());
+    result
 }
 
 /// POST request via TCP proxy, preserving the HTTP status code.
@@ -1561,6 +1575,17 @@ async fn post_request_via_tcp_proxy_status(
 /// a server-side failure from success. Same fallback rules: on connection
 /// failure or 5xx, retry once through the raw TCP proxy when eligible.
 pub async fn post_request_with_status(
+    url: String,
+    body: String,
+    header: &str,
+) -> ResultType<(u16, String)> {
+    crate::hbbs_http::api_backoff::check(&url)?;
+    let result = post_request_with_status_(url.clone(), body, header).await;
+    crate::hbbs_http::api_backoff::record(&url, result.is_ok());
+    result
+}
+
+async fn post_request_with_status_(
     url: String,
     body: String,
     header: &str,
@@ -2947,6 +2972,11 @@ pub fn is_valid_untrusted_peer_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn aperture_never_checks_rustdesk_for_updates() {
+        assert!(!super::software_update_check_allowed());
+    }
+
     use super::*;
     use hbb_common::tokio::{
         self,

@@ -13,6 +13,7 @@ import 'package:flutter_hbb/desktop/pages/desktop_home_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/mobile/widgets/dialog.dart';
+import 'package:flutter_hbb/models/bluestacks_model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/printer_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
@@ -24,6 +25,9 @@ import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
+import '../widgets/aperture_settings_frame.dart';
+
+bool get _useApertureSettings => isWindows && !bind.isCustomClient();
 
 const double _kTabWidth = 200;
 const double _kTabHeight = 42;
@@ -55,6 +59,7 @@ enum SettingsTabKey {
   display,
   account,
   printer,
+  bluestacks,
   about,
 }
 
@@ -77,6 +82,7 @@ class DesktopSettingPage extends StatefulWidget {
         !bind.isDisableSettings() &&
         bind.mainGetBuildinOption(key: kOptionHideRemotePrinterSetting) != 'Y')
       SettingsTabKey.printer,
+    if (isWindows && !bind.isDisableSettings()) SettingsTabKey.bluestacks,
     SettingsTabKey.about,
   ];
 
@@ -208,6 +214,10 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
           settingTabs
               .add(_TabInfo(tab, 'Printer', Icons.print_outlined, Icons.print));
           break;
+        case SettingsTabKey.bluestacks:
+          settingTabs.add(_TabInfo(
+              tab, 'BlueStacks', Icons.layers_outlined, Icons.layers));
+          break;
         case SettingsTabKey.about:
           settingTabs
               .add(_TabInfo(tab, 'About', Icons.info_outline, Icons.info));
@@ -238,6 +248,9 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
           break;
         case SettingsTabKey.printer:
           children.add(const _Printer());
+          break;
+        case SettingsTabKey.bluestacks:
+          children.add(const _BlueStacksSettings());
           break;
         case SettingsTabKey.about:
           children.add(const _About());
@@ -273,6 +286,17 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    if (_useApertureSettings) {
+      return _buildBlock(children: [Expanded(child: ApertureSettingsFrame(
+        title: translate('Settings'),
+        navigation: _listView(tabs: _settingTabs()),
+        content: PageView(
+          controller: controller,
+          physics: const NeverScrollableScrollPhysics(),
+          children: _children(),
+        ),
+      ))]);
+    }
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.background,
       body: _buildBlock(
@@ -352,6 +376,19 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
   Widget _listItem({required _TabInfo tab}) {
     return Obx(() {
       bool selected = tab.key == selectedTab.value;
+      if (_useApertureSettings) {
+        return ApertureSettingsItem(
+          label: translate(tab.label),
+          icon: selected ? tab.selected : tab.unselected,
+          selected: selected,
+          onTap: () {
+            final index = DesktopSettingPage.tabKeys.indexOf(tab.key);
+            if (index < 0 || selected) return;
+            controller.jumpToPage(index);
+            selectedTab.value = tab.key;
+          },
+        );
+      }
       return SizedBox(
         width: _kTabWidth,
         height: _kTabHeight,
@@ -482,8 +519,6 @@ class _GeneralState extends State<_General> {
   Widget other() {
     final incomingOnly = bind.isIncomingOnly();
     final outgoingOnly = bind.isOutgoingOnly();
-    final showAutoUpdate = (isWindows && bind.mainIsInstalled()) ||
-    (isMacOS && bind.mainIsInstalled() && bind.mainIsInstalledDaemon(prompt: false) && !bind.isCustomClient());
     final children = <Widget>[
       if (!isWeb && !incomingOnly)
         _OptionCheckBox(context, 'Confirm before closing multiple tabs',
@@ -551,20 +586,6 @@ class _GeneralState extends State<_General> {
             ),
           ),
       ],
-      if (!isWeb && !bind.isCustomClient())
-        _OptionCheckBox(
-          context,
-          'Check for software update on startup',
-          kOptionEnableCheckUpdate,
-          isServer: false,
-        ),
-      if (showAutoUpdate)
-        _OptionCheckBox(
-          context,
-          'Auto update',
-          kOptionAllowAutoUpdate,
-          isServer: true,
-        ),
       if (isWindows && !outgoingOnly)
         _OptionCheckBox(
           context,
@@ -998,6 +1019,9 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                 permissions(context),
                 password(context),
                 _Card(title: '2FA', children: [tfa()]),
+                _Card(
+                    title: 'Trusted phones',
+                    children: [_TrustedPhones(enabled: !locked)]),
                 if (!isChangeIdDisabled())
                   _Card(title: 'ID', children: [changeId()]),
                 more(context),
@@ -2352,6 +2376,993 @@ class _CheckboxState extends State<_Checkbox> {
   }
 }
 
+class _BlueStacksSettings extends StatefulWidget {
+  const _BlueStacksSettings();
+
+  @override
+  State<_BlueStacksSettings> createState() => _BlueStacksSettingsState();
+}
+
+class _BlueStacksSettingsState extends State<_BlueStacksSettings> {
+  static const _eventName = 'bluestacks-action-result';
+  static const _eventHandlerName = 'bluestacks-settings-page';
+
+  late final BlueStacksModel _model;
+  final Map<String, TextEditingController> _defaultAppControllers = {};
+  final Map<String, String> _lastSyncedDefaultPackages = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _model = BlueStacksModel(
+      inventoryReader: () =>
+          bind.mainGetCommon(key: 'bluestacks-inventory'),
+      actionSender: (payload) =>
+          bind.mainSetCommon(key: 'bluestacks-action', value: payload),
+    );
+    platformFFI.registerEventHandler(
+      _eventName,
+      _eventHandlerName,
+      (evt) async {
+        if (!mounted) return;
+        await _model.handleActionResult(evt['result']);
+      },
+      replace: true,
+    );
+    _model.refresh();
+  }
+
+  @override
+  void dispose() {
+    platformFFI.unregisterEventHandler(_eventName, _eventHandlerName);
+    for (final controller in _defaultAppControllers.values) {
+      controller.dispose();
+    }
+    _model.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scrollController = ScrollController();
+    return AnimatedBuilder(
+      animation: _model,
+      builder: (context, _) {
+        return ListView(
+          controller: scrollController,
+          children: [
+            _buildInstallation(context),
+            if (_model.inventory.installed) ...[
+              _buildInstances(context),
+              _buildStartup(context),
+              _buildOptionalComponents(context),
+              _buildAndroidApps(context),
+              _buildCleanup(context),
+              _buildAdvanced(context),
+            ],
+          ],
+        ).marginOnly(bottom: _kListViewBottomMargin);
+      },
+    );
+  }
+
+  Widget _buildInstallation(BuildContext context) {
+    final inventory = _model.inventory;
+    final installation = inventory.installation;
+    final children = <Widget>[
+      if (_model.loading) const LinearProgressIndicator(),
+      if (_model.error.isNotEmpty)
+        _statusLine(
+          context,
+          Icons.error_outline,
+          _model.error,
+          color: Theme.of(context).colorScheme.error,
+        ),
+      if (_model.lastActionMessage.isNotEmpty)
+        _statusLine(
+          context,
+          Icons.check_circle_outline,
+          _model.lastActionMessage,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      if (!_model.loading && !inventory.installed)
+        _statusLine(
+          context,
+          Icons.info_outline,
+          'BlueStacks 5 was not detected. Install the official BlueStacks 5 runtime, then refresh this page.',
+        ),
+      if (inventory.installed) ...[
+        _infoRow('Version', installation.version),
+        _infoRow(
+          'Hyper-V mode',
+          inventory.hypervisor.isEmpty ? 'Unknown' : inventory.hypervisor,
+        ),
+        _infoRow('Install location', installation.installDir, selectable: true),
+        _infoRow(
+          'Multi-instance Manager',
+          installation.multiInstanceManagerAvailable ? 'Detected' : 'Unavailable',
+        ),
+        _statusLine(
+          context,
+          Icons.verified_user_outlined,
+          'Official BlueStacks binaries stay untouched and updates remain enabled.',
+        ),
+      ],
+    ];
+
+    return _Card(
+      title: 'Installation',
+      title_suffix: [
+        IconButton(
+          tooltip: translate('Refresh'),
+          onPressed: _model.loading || _model.actionPending
+              ? null
+              : () => _model.refresh(),
+          icon: const Icon(Icons.refresh),
+        ),
+      ],
+      children: children,
+    );
+  }
+
+  Widget _buildInstances(BuildContext context) {
+    final instances = _model.inventory.instances;
+    if (instances.isEmpty) {
+      return _Card(
+        title: 'Instances',
+        children: [
+          _statusLine(
+            context,
+            Icons.info_outline,
+            'No BlueStacks instances were found in the current configuration.',
+          ),
+        ],
+      );
+    }
+
+    final children = <Widget>[];
+    for (var index = 0; index < instances.length; index++) {
+      final instance = instances[index];
+      final controller = _defaultAppControllers.putIfAbsent(
+        instance.id,
+        () => TextEditingController(text: instance.defaultPackage),
+      );
+      final lastSyncedDefault = _lastSyncedDefaultPackages.putIfAbsent(
+        instance.id,
+        () => instance.defaultPackage,
+      );
+      if (lastSyncedDefault != instance.defaultPackage &&
+          controller.text == lastSyncedDefault) {
+        controller.text = instance.defaultPackage;
+      }
+      _lastSyncedDefaultPackages[instance.id] = instance.defaultPackage;
+      if (index > 0) children.add(const Divider());
+      children.add(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    instance.displayName.isEmpty
+                        ? instance.id
+                        : instance.displayName,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                _compactStatus(
+                  context,
+                  instance.running ? 'Running' : 'Stopped',
+                  instance.running ? Icons.play_circle : Icons.stop_circle,
+                  active: instance.running,
+                ),
+              ],
+            ),
+            Text(
+              [
+                instance.androidFlavor,
+                if (instance.androidVersion.isNotEmpty)
+                  'Android ${instance.androidVersion}',
+              ].where((value) => value.isNotEmpty).join(' • '),
+              style: Theme.of(context).textTheme.bodySmall,
+            ).marginOnly(top: 4),
+            if (instance.width != null && instance.height != null)
+              Text(
+                '${instance.width}×${instance.height}'
+                '${instance.dpi == null ? '' : ' • ${instance.dpi} DPI'}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ).marginOnly(top: 2),
+            Text(
+              instance.adbEnabled
+                  ? 'ADB enabled${instance.adbPort == null ? '' : ' • 127.0.0.1:${instance.adbPort}'}'
+                  : 'ADB disabled',
+              style: Theme.of(context).textTheme.bodySmall,
+            ).marginOnly(top: 2, bottom: 8),
+            if (instance.installedApps.isNotEmpty) ...[
+              Text(
+                'Installed apps',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ).marginOnly(bottom: 4),
+              ...instance.installedApps.map((app) {
+                final isDefault = instance.defaultPackage == app.package;
+                final label = app.label.isEmpty ? app.package : app.label;
+                final details = [
+                  app.category,
+                  if (app.versionName.isNotEmpty) 'v${app.versionName}',
+                  app.package,
+                ].where((value) => value.isNotEmpty).join(' • ');
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.sports_esports_outlined, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              label,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            if (details.isNotEmpty)
+                              Text(
+                                details,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                          ],
+                        ),
+                      ),
+                      if (isDefault) ...[
+                        _compactStatus(
+                          context,
+                          'Default',
+                          Icons.star_outline,
+                          active: true,
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      ElevatedButton.icon(
+                        onPressed: _model.actionPending
+                            ? null
+                            : () => _model.playApp(instance.id, app.package),
+                        icon: const Icon(Icons.play_arrow, size: 18),
+                        label: const Text('Play'),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+              const Divider(),
+            ],
+            TextField(
+              controller: controller,
+              enabled: !_model.actionPending,
+              decoration: const InputDecoration(
+                isDense: true,
+                border: OutlineInputBorder(),
+                labelText: 'Default Android package (advanced)',
+                hintText: 'com.example.game',
+              ),
+            ),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: _model.actionPending
+                      ? null
+                      : () {
+                          final package = controller.text.trim();
+                          if (package.isNotEmpty) {
+                            _model.setDefaultApp(instance.id, package);
+                          }
+                        },
+                  icon: const Icon(Icons.save_outlined, size: 18),
+                  label: Text(translate('Save default app')),
+                ),
+                OutlinedButton.icon(
+                  onPressed:
+                      _model.actionPending || instance.defaultPackage.isEmpty
+                      ? null
+                      : () => _model.launchDefaultApp(instance.id),
+                  icon: const Icon(Icons.rocket_launch_outlined, size: 18),
+                  label: Text(translate('Launch default app')),
+                ),
+              ],
+            ).marginOnly(top: 8),
+          ],
+        ),
+      );
+    }
+    return _Card(title: 'Instances', children: children);
+  }
+
+  Widget _buildStartup(BuildContext context) {
+    final entries = _model.inventory.startupEntries;
+    final shortcuts = _model.inventory.shortcuts;
+    final children = <Widget>[
+      if (entries.isEmpty)
+        _statusLine(
+          context,
+          Icons.check_circle_outline,
+          'No BlueStacks startup entries were detected.',
+        )
+      else
+        ...entries.map((entry) => ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(entry.valueName),
+              subtitle: Text(
+                '${_prettyClassification(entry.classification)} • '
+                '${entry.safeToDisable ? 'Clean Gaming may disable this entry' : 'Protected or unsupported'}',
+              ),
+              trailing: Icon(
+                entry.safeToDisable
+                    ? Icons.power_settings_new_outlined
+                    : Icons.lock_outline,
+                size: 20,
+              ),
+            )),
+      if (shortcuts.isNotEmpty) ...[
+        const Divider(),
+        Text(
+          translate('Shortcuts'),
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        ...shortcuts.map((shortcut) => ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(shortcut.name),
+              subtitle: Text(
+                '${_prettyClassification(shortcut.location)} • '
+                '${shortcut.recommendedCleanup ? 'Clean Gaming hides this desktop shortcut' : 'Kept by default'}',
+              ),
+              trailing: Icon(
+                shortcut.recommendedCleanup
+                    ? Icons.visibility_off_outlined
+                    : Icons.link_outlined,
+                size: 20,
+              ),
+            )),
+      ],
+    ];
+    return _Card(title: 'Startup', children: children);
+  }
+
+  Widget _buildOptionalComponents(BuildContext context) {
+    final components = _model.inventory.components;
+    final children = <Widget>[
+      if (components.isEmpty)
+        _statusLine(
+          context,
+          Icons.info_outline,
+          'No separately installed BlueStacks components were detected.',
+        )
+      else
+        ...components.map((component) {
+          final protected = !component.canRemove;
+          return ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: Text(component.displayName),
+            subtitle: Text(
+              [
+                _prettyClassification(component.classification),
+                if (component.version.isNotEmpty) component.version,
+                protected ? 'Protected' : 'Optional removal available',
+              ].join(' • '),
+            ),
+            trailing: component.canRemove
+                ? TextButton(
+                    onPressed: _model.actionPending
+                        ? null
+                        : () => _confirmRemoveComponent(component),
+                    child: Text(
+                      translate('Remove'),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  )
+                : const Icon(Icons.lock_outline, size: 20),
+          );
+        }),
+      _statusLine(
+        context,
+        Icons.info_outline,
+        'Profiles never uninstall components. Removal is always a separate explicit action.',
+      ),
+    ];
+    return _Card(title: 'Optional Components', children: children);
+  }
+
+  Widget _buildAndroidApps(BuildContext context) {
+    final children = <Widget>[];
+    for (var index = 0; index < _model.inventory.instances.length; index++) {
+      final instance = _model.inventory.instances[index];
+      if (index > 0) children.add(const Divider());
+      final packageInventory = _model.androidPackages[instance.id];
+      children.add(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    instance.displayName.isEmpty
+                        ? instance.id
+                        : instance.displayName,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                OutlinedButton.icon(
+                  onPressed: !instance.adbEnabled ||
+                          !instance.running ||
+                          _model.actionPending
+                      ? null
+                      : () => _model.inspectAndroidPackages(instance.id),
+                  icon: const Icon(Icons.inventory_2_outlined, size: 18),
+                  label: Text(translate('Inspect apps')),
+                ),
+              ],
+            ),
+            if (!instance.adbEnabled)
+              _statusLine(
+                context,
+                Icons.usb_off_outlined,
+                'ADB is disabled for this instance. Package inspection is unavailable, and this app will not enable ADB automatically.',
+              ),
+            if (instance.adbEnabled && !instance.running)
+              _statusLine(
+                context,
+                Icons.pause_circle_outline,
+                'Start this BlueStacks instance before inspecting Android packages.',
+              ),
+            if (packageInventory != null) ...[
+              if (packageInventory.message.isNotEmpty)
+                _statusLine(
+                  context,
+                  packageInventory.available
+                      ? Icons.info_outline
+                      : Icons.warning_amber_outlined,
+                  packageInventory.message,
+                ),
+              if (packageInventory.available)
+                ..._buildPackageGroups(context, instance, packageInventory),
+            ],
+          ],
+        ),
+      );
+    }
+    if (children.isEmpty) {
+      children.add(_statusLine(
+        context,
+        Icons.info_outline,
+        'No BlueStacks instances are available for Android package inspection.',
+      ));
+    }
+    return _Card(title: 'Android Apps', children: children);
+  }
+
+  List<Widget> _buildPackageGroups(
+    BuildContext context,
+    BlueStacksInstanceInfo instance,
+    BlueStacksAndroidPackageInventory inventory,
+  ) {
+    const order = [
+      'optional_promotional',
+      'user_installed',
+      'protected_google',
+      'protected_bluestacks',
+      'protected_system',
+      'unknown',
+    ];
+    final grouped = <String, List<BlueStacksAndroidPackageInfo>>{};
+    for (final package in inventory.packages) {
+      grouped.putIfAbsent(package.classification, () => []).add(package);
+    }
+    final result = <Widget>[];
+    for (final classification in order) {
+      final packages = grouped[classification];
+      if (packages == null || packages.isEmpty) continue;
+      result.add(ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: EdgeInsets.zero,
+        initiallyExpanded: classification == 'optional_promotional' ||
+            classification == 'user_installed',
+        title: Text(
+          '${_packageGroupLabel(classification)} (${packages.length})',
+          style: const TextStyle(fontWeight: FontWeight.w500),
+        ),
+        children: packages
+            .map((package) => ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: SelectionArea(child: Text(package.package)),
+                  subtitle: Text(package.disabled ? 'Disabled' : 'Enabled'),
+                  trailing: Wrap(
+                    spacing: 4,
+                    children: [
+                      if (package.userInstalled)
+                        TextButton(
+                          onPressed: _model.actionPending
+                              ? null
+                              : () => _model.setDefaultApp(
+                                    instance.id,
+                                    package.package,
+                                  ),
+                          child: Text(translate('Use as default')),
+                        ),
+                      if (package.canDisable)
+                        TextButton(
+                          onPressed: _model.actionPending
+                              ? null
+                              : () => _confirmDisablePackage(
+                                    instance,
+                                    package,
+                                  ),
+                          child: Text(
+                            translate('Disable'),
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ))
+            .toList(),
+      ));
+    }
+    return result;
+  }
+
+  Widget _buildCleanup(BuildContext context) {
+    final support = _model.inventory.cleanupSupport;
+    final selection = _model.selection;
+    final anyRunning = _model.inventory.instances.any((instance) => instance.running);
+    final children = <Widget>[
+      _Radio<BlueStacksCleanupProfile>(
+        context,
+        value: BlueStacksCleanupProfile.standard,
+        groupValue: _model.profile,
+        label: 'Standard',
+        onChanged: _model.actionPending ? null : _model.selectProfile,
+      ),
+      _Radio<BlueStacksCleanupProfile>(
+        context,
+        value: BlueStacksCleanupProfile.cleanGaming,
+        groupValue: _model.profile,
+        label: 'Clean Gaming (recommended)',
+        onChanged: _model.actionPending ? null : _model.selectProfile,
+      ),
+      _Radio<BlueStacksCleanupProfile>(
+        context,
+        value: BlueStacksCleanupProfile.custom,
+        groupValue: _model.profile,
+        label: 'Custom',
+        onChanged: _model.actionPending ? null : _model.selectProfile,
+      ),
+      if (_model.profile == BlueStacksCleanupProfile.custom) ...[
+        const Divider(),
+        _cleanupToggle(
+          'Disable gameplay advertisements',
+          support.disableGameplayAds,
+          selection.disableGameplayAds,
+          (value) => _model.updateCustomSelection(
+            selection.copyWith(disableGameplayAds: value),
+          ),
+        ),
+        _cleanupToggle(
+          'Disable Smart Downloads',
+          support.disableSmartDownloads,
+          selection.disableSmartDownloads,
+          (value) => _model.updateCustomSelection(
+            selection.copyWith(disableSmartDownloads: value),
+          ),
+        ),
+        _cleanupToggle(
+          'Disable store launch on boot',
+          support.disableStoreOnStart,
+          selection.disableStoreOnStart,
+          (value) => _model.updateCustomSelection(
+            selection.copyWith(disableStoreOnStart: value),
+          ),
+        ),
+        _cleanupToggle(
+          'Disable BlueStacks notifications',
+          support.disableDesktopNotifications,
+          selection.disableDesktopNotifications,
+          (value) => _model.updateCustomSelection(
+            selection.copyWith(disableDesktopNotifications: value),
+          ),
+        ),
+        _cleanupToggle(
+          'Disable automatic app shortcut creation',
+          support.disableAppShortcuts,
+          selection.disableAppShortcuts,
+          (value) => _model.updateCustomSelection(
+            selection.copyWith(disableAppShortcuts: value),
+          ),
+        ),
+        _cleanupToggle(
+          'Disable optional BlueStacks startup helpers',
+          support.disableOptionalStartup,
+          selection.disableOptionalStartup,
+          (value) => _model.updateCustomSelection(
+            selection.copyWith(disableOptionalStartup: value),
+          ),
+        ),
+        _cleanupToggle(
+          'Hide unnecessary desktop shortcuts',
+          support.hideDesktopShortcuts,
+          selection.hideDesktopShortcuts,
+          (value) => _model.updateCustomSelection(
+            selection.copyWith(hideDesktopShortcuts: value),
+          ),
+        ),
+      ],
+      const Divider(),
+      Text(
+        translate('Selected cleanup'),
+        style: const TextStyle(fontWeight: FontWeight.w600),
+      ),
+      _cleanupSummaryLine(
+        context,
+        'Disable gameplay advertisements',
+        support.disableGameplayAds,
+        selection.disableGameplayAds,
+      ),
+      _cleanupSummaryLine(
+        context,
+        'Disable Smart Downloads',
+        support.disableSmartDownloads,
+        selection.disableSmartDownloads,
+      ),
+      _cleanupSummaryLine(
+        context,
+        'Avoid store/promotional launch on boot',
+        support.disableStoreOnStart,
+        selection.disableStoreOnStart,
+      ),
+      _cleanupSummaryLine(
+        context,
+        'Disable unnecessary notifications',
+        support.disableDesktopNotifications,
+        selection.disableDesktopNotifications,
+      ),
+      _cleanupSummaryLine(
+        context,
+        'Disable optional startup helpers',
+        support.disableOptionalStartup,
+        selection.disableOptionalStartup,
+      ),
+      _cleanupSummaryLine(
+        context,
+        'Hide unnecessary desktop shortcuts',
+        support.hideDesktopShortcuts,
+        selection.hideDesktopShortcuts,
+      ),
+      if (_model.inventory.cleanupNeedsReapply)
+        _statusLine(
+          context,
+          Icons.system_update_alt_outlined,
+          'BlueStacks was updated after cleanup was last applied. Reapply the selected supported settings if you want them restored.',
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      if (anyRunning)
+        _statusLine(
+          context,
+          Icons.pause_circle_outline,
+          'Stop all BlueStacks instances before applying cleanup settings.',
+          color: Theme.of(context).colorScheme.error,
+        ),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          ElevatedButton.icon(
+            onPressed: _model.actionPending || anyRunning
+                ? null
+                : () => _model.applyProfile(),
+            icon: const Icon(Icons.auto_fix_high_outlined, size: 18),
+            label: Text(
+              translate(
+                _model.profile == BlueStacksCleanupProfile.cleanGaming
+                    ? 'Apply Recommended Cleanup'
+                    : 'Apply ${_model.profile.label}',
+              ),
+            ),
+          ),
+          if (_model.inventory.restoreAvailable)
+            OutlinedButton.icon(
+              onPressed: _model.actionPending || anyRunning
+                  ? null
+                  : _confirmRestore,
+              icon: const Icon(Icons.restore, size: 18),
+              label: Text(translate('Restore BlueStacks defaults')),
+            ),
+        ],
+      ).marginOnly(top: 8),
+      if (_model.actionPending)
+        _statusLine(
+          context,
+          Icons.sync,
+          'Applying BlueStacks changes…',
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      if (!_model.actionPending && _model.lastActionMessage.isNotEmpty)
+        _statusLine(
+          context,
+          Icons.check_circle_outline,
+          _model.lastActionMessage,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      if (!_model.actionPending && _model.error.isNotEmpty)
+        _statusLine(
+          context,
+          Icons.error_outline,
+          _model.error,
+          color: Theme.of(context).colorScheme.error,
+        ),
+      _statusLine(
+        context,
+        Icons.shield_outlined,
+        'Component removal and Android app cleanup are intentionally excluded from every profile.',
+      ),
+    ];
+    return _Card(title: 'Cleanup', children: children);
+  }
+
+  Widget _buildAdvanced(BuildContext context) {
+    final installation = _model.inventory.installation;
+    final children = <Widget>[
+      _infoRow('Config', installation.configPath, selectable: true),
+      _infoRow('Player', installation.playerPath, selectable: true),
+      _infoRow('ADB', installation.adbPath, selectable: true),
+      _infoRow(
+        'Multi-instance Manager',
+        installation.multiInstanceManagerPath,
+        selectable: true,
+      ),
+      const Divider(),
+      Text(
+        translate('BlueStacks services'),
+        style: const TextStyle(fontWeight: FontWeight.w600),
+      ),
+      if (_model.inventory.services.isEmpty)
+        Text(translate('No BlueStacks services were detected.'))
+      else
+        ..._model.inventory.services.map((service) => ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(service.displayName),
+              subtitle: Text(
+                '${service.name} • ${_prettyClassification(service.classification)}',
+              ),
+              trailing: service.classification == 'required'
+                  ? const Icon(Icons.lock_outline, size: 20)
+                  : const Icon(Icons.help_outline, size: 20),
+            )),
+      _statusLine(
+        context,
+        Icons.security_outlined,
+        'Required runtime, Hyper-V, graphics, networking, updater, input, audio, shared-folder, and account integration remain protected.',
+      ),
+    ];
+    return _Card(title: 'Advanced', children: children);
+  }
+
+  Widget _cleanupToggle(
+    String label,
+    bool supported,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
+    return CheckboxListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      controlAffinity: ListTileControlAffinity.leading,
+      value: supported && value,
+      onChanged: !supported || _model.actionPending
+          ? null
+          : (next) => onChanged(next ?? false),
+      title: Text(translate(label)),
+      subtitle: supported
+          ? null
+          : Text(translate('Unavailable in this BlueStacks release')),
+    );
+  }
+
+  Widget _cleanupSummaryLine(
+    BuildContext context,
+    String label,
+    bool supported,
+    bool selected,
+  ) {
+    final enabled = supported && selected;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          !supported
+              ? Icons.remove_circle_outline
+              : enabled
+                  ? Icons.check_circle
+                  : Icons.radio_button_unchecked,
+          size: 19,
+          color: !supported
+              ? Theme.of(context).disabledColor
+              : enabled
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.onSurfaceVariant,
+        ).marginOnly(right: 8, top: 1),
+        Expanded(
+          child: Text(
+            supported
+                ? translate(label)
+                : '${translate(label)} — ${translate('not exposed by this release')}',
+          ),
+        ),
+      ],
+    ).marginOnly(left: _kContentHMargin, top: 5);
+  }
+
+  Widget _infoRow(String label, String value, {bool selectable = false}) {
+    final valueWidget = Text(value.isEmpty ? '—' : value);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 145,
+          child: Text(
+            translate(label),
+            style: const TextStyle(fontWeight: FontWeight.w500),
+          ),
+        ),
+        Expanded(
+          child: selectable ? SelectionArea(child: valueWidget) : valueWidget,
+        ),
+      ],
+    ).marginOnly(left: _kContentHMargin, top: 5);
+  }
+
+  Widget _statusLine(
+    BuildContext context,
+    IconData icon,
+    String text, {
+    Color? color,
+  }) {
+    final foreground = color ?? Theme.of(context).colorScheme.onSurfaceVariant;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 19, color: foreground).marginOnly(right: 8, top: 1),
+        Expanded(child: Text(translate(text), style: TextStyle(color: foreground))),
+      ],
+    ).marginOnly(left: _kContentHMargin, top: 5);
+  }
+
+  Widget _compactStatus(
+    BuildContext context,
+    String label,
+    IconData icon, {
+    required bool active,
+  }) {
+    final color = active
+        ? Theme.of(context).colorScheme.primary
+        : Theme.of(context).colorScheme.onSurfaceVariant;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 17, color: color).marginOnly(right: 4),
+        Text(label, style: TextStyle(color: color)),
+      ],
+    );
+  }
+
+  Future<void> _confirmRemoveComponent(BlueStacksComponentInfo component) async {
+    final confirmed = await _confirm(
+      'Remove optional BlueStacks component?',
+      'This will launch the registered BlueStacks uninstaller for ${component.displayName}. The core emulator will stay untouched. Restoring this app’s settings cannot reinstall a removed component automatically.',
+      confirmLabel: 'Remove',
+      destructive: true,
+    );
+    if (confirmed && mounted) {
+      await _model.removeOptionalComponent(component.id);
+    }
+  }
+
+  Future<void> _confirmDisablePackage(
+    BlueStacksInstanceInfo instance,
+    BlueStacksAndroidPackageInfo package,
+  ) async {
+    final confirmed = await _confirm(
+      'Disable optional Android package?',
+      'Disable ${package.package} on ${instance.displayName}? Only this package will be disabled with Android’s supported package manager. Protected system, Google, and BlueStacks packages cannot be selected here.',
+      confirmLabel: 'Disable',
+      destructive: true,
+    );
+    if (confirmed && mounted) {
+      await _model.disableOptionalAndroidPackage(instance.id, package.package);
+    }
+  }
+
+  Future<void> _confirmRestore() async {
+    final confirmed = await _confirm(
+      'Restore BlueStacks defaults?',
+      'This restores only settings, startup entries, shortcuts, and Android packages changed by this application. Manual changes are left alone. Removed optional components require manual reinstall.',
+      confirmLabel: 'Restore',
+    );
+    if (confirmed && mounted) {
+      await _model.restore();
+    }
+  }
+
+  Future<bool> _confirm(
+    String title,
+    String message, {
+    required String confirmLabel,
+    bool destructive = false,
+  }) async {
+    return (await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: Text(translate(title)),
+            content: Text(translate(message)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: Text(translate('Cancel')),
+              ),
+              ElevatedButton(
+                style: destructive
+                    ? ElevatedButton.styleFrom(
+                        backgroundColor: Theme.of(context).colorScheme.error,
+                        foregroundColor: Theme.of(context).colorScheme.onError,
+                      )
+                    : null,
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: Text(translate(confirmLabel)),
+              ),
+            ],
+          ),
+        )) ??
+        false;
+  }
+
+  String _prettyClassification(String value) {
+    if (value.isEmpty) return 'Unknown';
+    return value
+        .split('_')
+        .map((part) => part.isEmpty
+            ? part
+            : '${part.substring(0, 1).toUpperCase()}${part.substring(1)}')
+        .join(' ');
+  }
+
+  String _packageGroupLabel(String value) {
+    switch (value) {
+      case 'optional_promotional':
+        return 'Optional / promotional';
+      case 'user_installed':
+        return 'User-installed apps';
+      case 'protected_google':
+        return 'Google / Play Services — protected';
+      case 'protected_bluestacks':
+        return 'BlueStacks integration — protected';
+      case 'protected_system':
+        return 'Android system — protected';
+      default:
+        return 'Unknown — review only';
+    }
+  }
+}
+
 class _Printer extends StatefulWidget {
   const _Printer({super.key});
 
@@ -2532,7 +3543,11 @@ class _AboutState extends State<_About> {
       final scrollController = ScrollController();
       return SingleChildScrollView(
         controller: scrollController,
-        child: _Card(title: translate('About RustDesk'), children: [
+        child: _Card(
+            title: _useApertureSettings
+                ? 'About Aperture'
+                : translate('About RustDesk'),
+            children: [
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -2569,9 +3584,18 @@ class _AboutState extends State<_About> {
                     style: linkStyle,
                   ).marginSymmetric(vertical: 4.0)),
               Container(
-                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
-                padding:
-                    const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
+                decoration: _useApertureSettings
+                    ? BoxDecoration(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Theme.of(context).dividerColor),
+                      )
+                    : const BoxDecoration(color: Color(0xFF2c8cff)),
+                padding: _useApertureSettings
+                    ? const EdgeInsets.symmetric(vertical: 16, horizontal: 16)
+                    : const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
                 child: SelectionArea(
                     child: Row(
                   children: [
@@ -2579,15 +3603,22 @@ class _AboutState extends State<_About> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          if (_useApertureSettings)
+                            const Text('Aperture is built on RustDesk.')
+                                .marginOnly(bottom: 6),
                           Text(
                             'Copyright © ${DateTime.now().toString().substring(0, 4)} Purslane Tech Pte. Ltd.\n$license',
-                            style: const TextStyle(color: Colors.white),
+                            style: _useApertureSettings
+                                ? null
+                                : const TextStyle(color: Colors.white),
                           ),
                           Text(
                             translate('Slogan_tip'),
                             style: TextStyle(
                                 fontWeight: FontWeight.w800,
-                                color: Colors.white),
+                                color: _useApertureSettings
+                                    ? null
+                                    : Colors.white),
                           )
                         ],
                       ),
@@ -2616,7 +3647,7 @@ Widget _Card(
     children: [
       Flexible(
         child: SizedBox(
-          width: _kCardFixedWidth,
+          width: _useApertureSettings ? double.infinity : _kCardFixedWidth,
           child: Card(
             child: Column(
               children: [
@@ -2626,8 +3657,9 @@ Widget _Card(
                         child: Text(
                       translate(title),
                       textAlign: TextAlign.start,
-                      style: const TextStyle(
-                        fontSize: _kTitleFontSize,
+                      style: TextStyle(
+                        fontSize: _useApertureSettings ? 18 : _kTitleFontSize,
+                        fontWeight: _useApertureSettings ? FontWeight.w600 : null,
                       ),
                     )),
                     ...?title_suffix
@@ -2637,7 +3669,7 @@ Widget _Card(
                     .map((e) => e.marginOnly(top: 4, right: _kContentHMargin)),
               ],
             ).marginOnly(bottom: 10),
-          ).marginOnly(left: _kCardLeftMargin, top: 15),
+          ).marginOnly(left: _useApertureSettings ? 0 : _kCardLeftMargin, top: _useApertureSettings ? 16 : 15),
         ),
       ),
     ],
@@ -3287,3 +4319,115 @@ void changeSocks5Proxy() async {
 }
 
 //#endregion
+
+/// Phones paired for passwordless LAN login (host-side list, with Remove).
+class _TrustedPhones extends StatefulWidget {
+  const _TrustedPhones({required this.enabled});
+
+  final bool enabled;
+
+  @override
+  State<_TrustedPhones> createState() => _TrustedPhonesState();
+}
+
+class _TrustedPhonesState extends State<_TrustedPhones> {
+  List<Map<String, dynamic>> _phones = const [];
+  Timer? _refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    // Keep the list current so a newly paired phone appears without reopening settings.
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    var phones = <Map<String, dynamic>>[];
+    try {
+      final raw = await bind.mainGetCommon(key: 'aperture-trusted-phones');
+      final decoded = jsonDecode(raw.isEmpty ? '[]' : raw);
+      if (decoded is List) {
+        phones = [
+          for (final e in decoded)
+            if (e is Map) Map<String, dynamic>.from(e)
+        ];
+      }
+    } catch (e) {
+      debugPrint('Failed to load trusted phones: $e');
+    }
+    if (mounted) setState(() => _phones = phones);
+  }
+
+  Future<void> _remove(String publicKey) async {
+    await bind.mainSetCommon(
+        key: 'aperture-remove-trusted-phone', value: publicKey);
+    if (mounted) {
+      setState(() => _phones = [
+            for (final p in _phones)
+              if ('${p['public_key']}' != publicKey) p
+          ]);
+    }
+    // The host applies the removal over IPC asynchronously; reload after it settled.
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (mounted) await _load();
+  }
+
+  String _date(Object? unix) {
+    final seconds = unix is num ? unix.toInt() : int.tryParse('$unix') ?? 0;
+    if (seconds <= 0) return 'Never';
+    final d = DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_phones.isEmpty) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          'No trusted phones',
+          style: TextStyle(color: disabledTextColor(context, widget.enabled)),
+        ).marginOnly(left: _kContentHMargin),
+      );
+    }
+    return Column(
+      children: [
+        for (final phone in _phones)
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${phone['name'] ?? ''}'),
+                    Text(
+                      'Added ${_date(phone['added_unix'])}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Text(
+                      'Last used ${_date(phone['last_used_unix'])}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              ElevatedButton(
+                onPressed: widget.enabled
+                    ? () => _remove('${phone['public_key'] ?? ''}')
+                    : null,
+                child: const Text('Remove'),
+              ),
+            ],
+          ).marginOnly(left: _kContentHMargin, bottom: 8),
+      ],
+    );
+  }
+}

@@ -278,4 +278,60 @@ void main() {
 
     expect(controller.directory.value.path, '/latest');
   });
+
+  group('received files go to Downloads', () {
+    JobController controllerWith(List<String> published) => JobController(
+          () => _sessionId,
+          () => null,
+          publishReceivedTransfer: (path) async => published.add(path),
+        );
+
+    Map<String, dynamic> done(int id) =>
+        {'id': '$id', 'file_num': '0', 'speed': '0'};
+
+    test('a finished receive is published from its destination', () async {
+      final published = <String>[];
+      final jobs = controllerWith(published);
+      final id = jobs.addTransferJob(Entry()..path = r'C:\Users\a.txt', true,
+          destinationPath: '/data/app/files/a.txt');
+
+      await jobs.jobDone(done(id));
+
+      expect(published, ['/data/app/files/a.txt']);
+    });
+
+    test('a finished send to the PC is not published', () async {
+      final published = <String>[];
+      final jobs = controllerWith(published);
+      final id = jobs.addTransferJob(Entry()..path = '/data/app/files/a.txt',
+          false,
+          destinationPath: r'C:\Users\a.txt');
+
+      await jobs.jobDone(done(id));
+
+      expect(published, isEmpty);
+    });
+
+    test('a cancelled receive is not published', () async {
+      final published = <String>[];
+      final jobs = controllerWith(published);
+      final id = jobs.addTransferJob(Entry()..path = r'C:\Users\a.txt', true,
+          destinationPath: '/data/app/files/a.txt');
+      jobs.jobTable.single.state = JobState.cancelled;
+
+      await jobs.jobDone(done(id));
+
+      expect(published, isEmpty);
+    });
+
+    test('a publish failure does not fail the finished job', () async {
+      final jobs = JobController(() => _sessionId, () => null,
+          publishReceivedTransfer: (_) async => throw Exception('no space'));
+      final id = jobs.addTransferJob(Entry()..path = r'C:\Users\a.txt', true,
+          destinationPath: '/data/app/files/a.txt');
+
+      expect(await jobs.jobDone(done(id)), isTrue);
+      expect(jobs.jobTable.single.state, JobState.done);
+    });
+  });
 }

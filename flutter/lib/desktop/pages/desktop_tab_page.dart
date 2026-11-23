@@ -8,6 +8,7 @@ import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:get/get.dart';
 import 'package:window_manager/window_manager.dart';
+import '../widgets/aperture_host_panel.dart';
 // import 'package:flutter/services.dart';
 
 import '../../common/shared_state.dart';
@@ -18,9 +19,24 @@ class DesktopTabPage extends StatefulWidget {
   @override
   State<DesktopTabPage> createState() => _DesktopTabPageState();
 
+  static void onAddConnections(Widget page) {
+    Get.find<DesktopTabController>().add(TabInfo(
+      key: 'aperture-connections',
+      label: 'Connect',
+      selectedIcon: Icons.computer,
+      unselectedIcon: Icons.computer_outlined,
+      page: page,
+    ));
+    windowManager.setSize(apertureExpandedWindowSize);
+  }
+
   static void onAddSetting(
       {SettingsTabKey initialPage = SettingsTabKey.general}) {
     try {
+      if (isWindows && !bind.isCustomClient() && !bind.isOutgoingOnly()) {
+        windowManager.setSize(apertureExpandedWindowSize);
+        if (bind.isIncomingOnly()) setResizable(true);
+      }
       DesktopTabController tabController = Get.find<DesktopTabController>();
       tabController.add(TabInfo(
           key: kTabLabelSettingPage,
@@ -52,7 +68,14 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
         page: DesktopHomePage(
           key: const ValueKey(kTabLabelHomePage),
         )));
-    if (bind.isIncomingOnly()) {
+    if (isWindows && !bind.isCustomClient() && !bind.isOutgoingOnly()) {
+      tabController.onSelected = (key) {
+        windowManager.setSize(key == kTabLabelHomePage
+            ? apertureHostWindowSize
+            : apertureExpandedWindowSize);
+        if (bind.isIncomingOnly()) setResizable(key != kTabLabelHomePage);
+      };
+    } else if (bind.isIncomingOnly()) {
       tabController.onSelected = (key) {
         if (key == kTabLabelHomePage) {
           windowManager.setSize(getIncomingOnlyHomeSize());
@@ -97,7 +120,11 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
             body: DesktopTab(
               controller: tabController,
               tail: Offstage(
-                offstage: bind.isIncomingOnly() || bind.isDisableSettings(),
+                offstage: bind.isIncomingOnly() ||
+                    bind.isDisableSettings() ||
+                    (isWindows &&
+                        !bind.isCustomClient() &&
+                        !bind.isOutgoingOnly()),
                 child: ActionIcon(
                   message: 'Settings',
                   icon: IconFont.menu,

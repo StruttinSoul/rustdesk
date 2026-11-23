@@ -242,7 +242,7 @@ async fn start_hbbs_sync_async() {
                 }
                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
                 v["modified_at"] = json!(modified_at);
-                let response = crate::post_request(url.clone(), v.to_string(), "").await;
+                let response = crate::post_request_probe(url.clone(), v.to_string(), "").await;
                 if let Err(err) = &response {
                     hbb_common::throttled_log!(API_LOG_INTERVAL, warn, "Heartbeat failed: {err:?}");
                 }

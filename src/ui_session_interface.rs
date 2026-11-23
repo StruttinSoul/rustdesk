@@ -534,6 +534,7 @@ impl<T: InvokeUiSession> Session<T> {
             is_override,
             remember,
             is_upload,
+            String::new(),
         )));
         true
     }
@@ -839,6 +840,67 @@ impl<T: InvokeUiSession> Session<T> {
         let mut msg_out = Message::new();
         msg_out.set_terminal_action(action);
         self.send(Data::Message(msg_out));
+    }
+
+    pub fn request_emulator(&self, payload: String) {
+        if let Some(request) = crate::client::emulator_request_from_json(&payload) {
+            if matches!(
+                request.union.as_ref(),
+                Some(emulator_request::Union::Touch(touch)) if touch.action == 0
+            ) {
+                crate::frame_timing::CLIENT_TAPS.touch_down(std::time::Instant::now());
+            }
+            let mut message = Message::new();
+            message.set_emulator_request(request);
+            self.send(Data::Message(message));
+        }
+    }
+
+    pub fn request_manual_clipboard(
+        &self,
+        request_id: String,
+        direction: String,
+        text: String,
+        target_identity: String,
+    ) {
+        let direction = match direction.as_str() {
+            "phone_to_host" => ManualClipboardDirection::ManualClipboardPhoneToHost,
+            "host_to_phone" => ManualClipboardDirection::ManualClipboardHostToPhone,
+            _ => ManualClipboardDirection::ManualClipboardUnknown,
+        };
+        let request = ManualClipboardRequest {
+            request_id,
+            direction: direction.into(),
+            text,
+            target_identity,
+            ..Default::default()
+        };
+        let mut message = Message::new();
+        message.set_manual_clipboard_request(request);
+        self.send(Data::Message(message));
+    }
+
+    /// Ask the host to trust this phone's device key; the host replies with
+    /// `AperturePairDeviceResponse`.
+    pub fn request_aperture_pair_device(&self, name: String) {
+        let sk = crate::client::aperture_device_key::load_or_create_key();
+        let request = AperturePairDeviceRequest {
+            request_id: hbb_common::rand::random(),
+            public_key: sk.public_key().0.to_vec().into(),
+            name,
+            ..Default::default()
+        };
+        let mut message = Message::new();
+        message.set_aperture_pair_device_request(request);
+        self.send(Data::Message(message));
+    }
+
+    pub fn forget_aperture_pairing(&self) {
+        self.lc.write().unwrap().set_aperture_paired(false);
+    }
+
+    pub fn aperture_pairing_state(&self) -> &'static str {
+        self.lc.read().unwrap().aperture_pairing_state()
     }
 
     pub fn capture_displays(&self, add: Vec<i32>, sub: Vec<i32>, set: Vec<i32>) {
@@ -1304,6 +1366,14 @@ impl<T: InvokeUiSession> Session<T> {
         let round = connection_round_state_lock.new_round();
         drop(connection_round_state_lock);
 
+        // Privacy and lock-on-disconnect describe the authenticated transport
+        // that just ended. A reconnect is a new connection round, so do not
+        // carry those sensitive runtime states into it.
+        self.lc
+            .write()
+            .unwrap()
+            .reset_sensitive_session_state();
+
         let cloned = self.clone();
 
         // override only if true
@@ -1428,6 +1498,12 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     fn try_auto_start_job_str(is_reconnected: bool, job_str: &str) -> Option<String> {
+        // Flutter/mobile exposes interrupted transfers for explicit user resume.
+        // Reconnection must never replay a transfer automatically because the
+        // previous request may already have been accepted by the peer.
+        if cfg!(feature = "flutter") {
+            return None;
+        }
         if is_reconnected {
             let job_str = job_str.trim();
             if let Some(stripped) = job_str.strip_suffix('}') {
@@ -1704,10 +1780,21 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn set_permission(&self, name: &str, value: bool);
     fn close_success(&self);
     fn update_quality_status(&self, qs: QualityStatus);
+    fn update_stream_liveness(&self, _display: usize, _sequence: u64) {}
+    fn update_decoder_health(&self, _display: usize, _healthy: bool) {}
     fn set_connection_type(&self, is_secured: bool, direct: bool, stream_type: &str);
     fn set_fingerprint(&self, fingerprint: String);
     fn job_error(&self, id: i32, err: String, file_num: i32);
     fn job_done(&self, id: i32, file_num: i32);
+    fn job_paused(&self, _id: i32, _accepted: bool, _error: String) {}
+    fn job_cancelled(
+        &self,
+        _id: i32,
+        _applied: bool,
+        _confirmed: bool,
+        _error: String,
+    ) {
+    }
     fn clear_all_jobs(&self);
     fn new_message(&self, msg: String);
     fn update_transfer_list(&self);
@@ -1728,6 +1815,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
         to: String,
         is_upload: bool,
         is_identical: bool,
+        conflict_token: String,
     );
     fn update_block_input_state(&self, on: bool);
     fn job_progress(&self, id: i32, file_num: i32, speed: f64, finished_size: f64);
@@ -1756,6 +1844,9 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn printer_request(&self, id: i32, path: String);
     fn handle_screenshot_resp(&self, sid: String, msg: String);
     fn handle_terminal_response(&self, response: TerminalResponse);
+    fn handle_emulator_response(&self, _response: EmulatorResponse) {}
+    fn handle_manual_clipboard_response(&self, _response: ManualClipboardResponse) {}
+    fn handle_aperture_pair_device_result(&self, _ok: bool, _error: String) {}
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {
@@ -1960,7 +2051,7 @@ pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let (sender, mut receiver) = mpsc::unbounded_channel::<Data>();
     *handler.sender.write().unwrap() = Some(sender.clone());
-    let token = LocalConfig::get_option("access_token");
+    let token = connection_account_token();
     let key = crate::get_key(false).await;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if handler.is_port_forward() {
@@ -2087,4 +2178,18 @@ async fn start_one_port_forward<T: InvokeUiSession>(
 async fn send_note(url: String, id: String, sid: u64, note: String) {
     let body = serde_json::json!({ "id": id, "session_id": sid, "note": note });
     allow_err!(crate::post_request(url, body.to_string(), "").await);
+}
+
+/// Aperture has no RustDesk account sign-in, so a session never carries an account token, even
+/// if an old one is still saved. A token would also keep the secured LAN path from being used.
+fn connection_account_token() -> String {
+    String::new()
+}
+
+#[cfg(test)]
+mod aperture_account_tests {
+    #[test]
+    fn sessions_never_send_an_account_token() {
+        assert!(super::connection_account_token().is_empty());
+    }
 }

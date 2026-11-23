@@ -626,6 +626,15 @@ class RustdeskImpl {
         ]));
   }
 
+  Future<void> sessionSetConfirmKeepBothFile(
+      {required UuidValue sessionId,
+      required int actId,
+      required int fileNum,
+      required bool isUpload,
+      dynamic hint}) {
+    throw UnimplementedError("sessionSetConfirmKeepBothFile");
+  }
+
   Future<void> sessionRemoveFile(
       {required UuidValue sessionId,
       required int actId,
@@ -680,6 +689,11 @@ class RustdeskImpl {
         () => js.context.callMethod('setByName', ['cancel_job', actId]));
   }
 
+  Future<void> sessionPauseJob(
+      {required UuidValue sessionId, required int actId, dynamic hint}) {
+    throw UnimplementedError("sessionPauseJob");
+  }
+
   Future<void> sessionCreateDir(
       {required UuidValue sessionId,
       required int actId,
@@ -722,6 +736,7 @@ class RustdeskImpl {
       required int fileNum,
       required bool includeHidden,
       required bool isRemote,
+      required String ownershipToken,
       dynamic hint}) {
     throw UnimplementedError("sessionAddJob");
   }
@@ -1908,12 +1923,15 @@ class RustdeskImpl {
   }
 
   Future<void> sessionSetCommon(
-      {required UuidValue sessionId, required String key, required String value, dynamic hint}) {
-      js.context.callMethod('setByName', [
-        'common',
-        jsonEncode({'name': key, 'value': value})
-      ]);
-      return Future.value();
+      {required UuidValue sessionId,
+      required String key,
+      required String value,
+      dynamic hint}) {
+    js.context.callMethod('setByName', [
+      'common',
+      jsonEncode({'name': key, 'value': value})
+    ]);
+    return Future.value();
   }
 
   String? sessionGetCommonSync(

@@ -11,16 +11,13 @@ use crate::{
     input::*,
     ui_interface::{self, *},
 };
+use base::{config::keys, fs};
 use flutter_rust_bridge::{StreamSink, SyncReturn};
 use hbb_common::{
     config::{self, LocalConfig, PeerConfig, PeerInfoSerde},
     lazy_static, log,
     rendezvous_proto::ConnType,
     ResultType,
-};
-use base::{
-    config::keys,
-    fs,
 };
 use std::{
     collections::HashMap,
@@ -791,9 +788,29 @@ pub fn session_set_confirm_override_file(
     need_override: bool,
     remember: bool,
     is_upload: bool,
+    conflict_token: String,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.set_confirm_override_file(act_id, file_num, need_override, remember, is_upload);
+        session.set_confirm_override_file(
+            act_id,
+            file_num,
+            need_override,
+            remember,
+            is_upload,
+            conflict_token,
+        );
+    }
+}
+
+pub fn session_set_confirm_keep_both_file(
+    session_id: SessionID,
+    act_id: i32,
+    file_num: i32,
+    is_upload: bool,
+    conflict_token: String,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.set_confirm_keep_both_file(act_id, file_num, is_upload, conflict_token);
     }
 }
 
@@ -835,6 +852,12 @@ pub fn session_remove_all_empty_dirs(
 pub fn session_cancel_job(session_id: SessionID, act_id: i32) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.cancel_job(act_id);
+    }
+}
+
+pub fn session_pause_job(session_id: SessionID, act_id: i32) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.pause_job(act_id);
     }
 }
 
@@ -903,9 +926,10 @@ pub fn session_add_job(
     file_num: i32,
     include_hidden: bool,
     is_remote: bool,
+    ownership_token: String,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.add_job(
+        session.add_job_with_ownership_token(
             act_id,
             fs::JobType::Generic.into(),
             path,
@@ -913,6 +937,7 @@ pub fn session_add_job(
             file_num,
             include_hidden,
             is_remote,
+            ownership_token,
         );
     }
 }
@@ -2524,8 +2549,9 @@ pub fn is_disable_ab() -> SyncReturn<bool> {
     SyncReturn(config::is_disable_ab())
 }
 
+/// Aperture has no RustDesk account sign-in: this hides Account, address book and groups.
 pub fn is_disable_account() -> SyncReturn<bool> {
-    SyncReturn(config::is_disable_account())
+    SyncReturn(true)
 }
 
 pub fn is_disable_group_panel() -> SyncReturn<bool> {
@@ -2718,6 +2744,20 @@ pub fn main_get_common(key: String) -> String {
         return ui_interface::is_permanent_password_set().to_string();
     } else if key == "local-permanent-password-set" {
         return ui_interface::is_local_permanent_password_set().to_string();
+    } else if key == "aperture-trusted-phones" {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        return match crate::ipc::get_config(crate::server::aperture_trusted_phones::OPTION_KEY) {
+            Ok(Some(v)) => v,
+            _ => "[]".to_owned(),
+        };
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        return "[]".to_owned();
+    } else if key == "bluestacks-inventory" {
+        #[cfg(target_os = "windows")]
+        return crate::server::emulator::bluestacks::management_inventory_json();
+        #[cfg(not(target_os = "windows"))]
+        return r#"{"ok":false,"error":"BlueStacks management is only available on Windows"}"#
+            .to_owned();
     } else {
         if key.starts_with("download-data-") {
             let id = key.replace("download-data-", "");
@@ -2774,6 +2814,38 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
 }
 
 pub fn main_set_common(_key: String, _value: String) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if _key == "aperture-remove-trusted-phone" {
+        if let Err(e) = crate::ipc::set_data(&crate::ipc::Data::RemoveApertureTrustedPhone(_value))
+        {
+            log::error!("Failed to remove Aperture trusted phone: {}", e);
+        }
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    if _key == "bluestacks-action" {
+        let payload = _value.clone();
+        std::thread::spawn(move || {
+            let result = crate::server::emulator::bluestacks::handle_action_json(&payload);
+            let result_value =
+                serde_json::from_str::<serde_json::Value>(&result).unwrap_or_else(|error| {
+                    serde_json::json!({
+                        "ok": false,
+                        "action": "invalid",
+                        "error": format!("failed to decode BlueStacks action result: {error}"),
+                    })
+                });
+            let data = HashMap::from([
+                ("name", serde_json::json!("bluestacks-action-result")),
+                ("result", result_value),
+            ]);
+            let _res = flutter::push_global_event(
+                flutter::APP_TYPE_MAIN,
+                serde_json::ser::to_string(&data).unwrap_or_default(),
+            );
+        });
+        return;
+    }
     #[cfg(target_os = "windows")]
     if _key == "install-printer" && crate::platform::is_win_10_or_greater() {
         std::thread::spawn(move || {
@@ -2904,8 +2976,51 @@ pub fn main_set_common(_key: String, _value: String) {
 
 pub fn session_set_common(session_id: SessionID, key: String, value: String) {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
-        if key == "continue-insecure-connection"
-        {
+        if key == "emulator-request" {
+            s.request_emulator(value);
+            return;
+        }
+        if key == "dashboard-preview-mode" {
+            if let Ok(preview) = value.parse::<bool>() {
+                s.set_dashboard_preview_mode(preview);
+            }
+            return;
+        }
+        if key == "manual-clipboard-request" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&value) {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let direction = payload
+                    .get("direction")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let target_identity = payload
+                    .get("target_identity")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                s.request_manual_clipboard(request_id, direction, text, target_identity);
+            }
+            return;
+        }
+        if key == "aperture-pair-device" {
+            s.request_aperture_pair_device(value);
+            return;
+        }
+        if key == "aperture-forget-pairing" {
+            s.forget_aperture_pairing();
+            return;
+        }
+        if key == "continue-insecure-connection" {
             s.continue_insecure_connection(value == "Y");
             return;
         }
@@ -2928,6 +3043,8 @@ pub fn session_get_common(
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
         let v = if key == "is_screenshot_supported" {
             s.is_screenshot_supported().to_string()
+        } else if key == "aperture-pairing-state" {
+            s.aperture_pairing_state().to_owned()
         } else {
             "".to_owned()
         };
@@ -3054,5 +3171,13 @@ pub mod server_side {
         _class: JClass,
     ) -> jboolean {
         jboolean::from(crate::server::is_clipboard_service_ok())
+    }
+}
+
+#[cfg(test)]
+mod aperture_account_tests {
+    #[test]
+    fn account_sign_in_is_disabled() {
+        assert!(super::is_disable_account().0);
     }
 }

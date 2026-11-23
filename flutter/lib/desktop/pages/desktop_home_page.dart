@@ -24,6 +24,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:window_size/window_size.dart' as window_size;
 import '../widgets/button.dart';
+import '../widgets/aperture_host_panel.dart';
 
 class DesktopHomePage extends StatefulWidget {
   const DesktopHomePage({Key? key}) : super(key: key);
@@ -50,6 +51,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   Timer? _updateTimer;
   bool isCardClosed = false;
 
+  bool get _useHostPanel =>
+      isWindows && !bind.isCustomClient() && !bind.isOutgoingOnly();
+
   final RxBool _editHover = false.obs;
   final RxBool _block = false.obs;
 
@@ -59,6 +63,26 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   Widget build(BuildContext context) {
     super.build(context);
     final isIncomingOnly = bind.isIncomingOnly();
+    if (_useHostPanel) {
+      return _buildBlock(
+          child: ApertureHostPanel(
+        status: const OnlineStatusWidget(compact: true),
+        identity: buildIDBoard(context, compact: true),
+        password: buildPasswordBoard(context, compact: true),
+        notice: Column(mainAxisSize: MainAxisSize.min, children: [
+          buildPresetPasswordWarning(),
+          buildHelpCards('', showUpdates: false),
+        ]),
+        translate: (key) => translate(key),
+        onSettings:
+            bind.isDisableSettings() ? null : DesktopTabPage.onAddSetting,
+        onConnect: isIncomingOnly
+            ? null
+            : () => DesktopTabPage.onAddConnections(
+                _buildBlock(child: buildRightPane(context))),
+        onHide: () => windowManager.hide(),
+      ));
+    }
     return _buildBlock(
         child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -185,22 +209,25 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     );
   }
 
-  buildIDBoard(BuildContext context) {
+  buildIDBoard(BuildContext context, {bool compact = false}) {
     final model = gFFI.serverModel;
     return Container(
-      margin: const EdgeInsets.only(left: 20, right: 11),
-      height: 57,
+      margin: compact
+          ? EdgeInsets.zero
+          : const EdgeInsets.only(left: 20, right: 11),
+      height: compact ? 72 : 57,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.baseline,
         textBaseline: TextBaseline.alphabetic,
         children: [
           Container(
             width: 2,
-            decoration: const BoxDecoration(color: MyTheme.accent),
+            decoration: BoxDecoration(
+                color: compact ? Colors.transparent : MyTheme.accent),
           ).marginOnly(top: 5),
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.only(left: 7),
+              padding: EdgeInsets.only(left: compact ? 0 : 7),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -220,7 +247,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                                   ?.color
                                   ?.withOpacity(0.5)),
                         ).marginOnly(top: 5),
-                        buildPopupMenu(context)
+                        if (!compact) buildPopupMenu(context)
                       ],
                     ),
                   ),
@@ -278,24 +305,27 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     );
   }
 
-  buildPasswordBoard(BuildContext context) {
+  buildPasswordBoard(BuildContext context, {bool compact = false}) {
     return ChangeNotifierProvider.value(
         value: gFFI.serverModel,
         child: Consumer<ServerModel>(
           builder: (context, model, child) {
-            return buildPasswordBoard2(context, model);
+            return buildPasswordBoard2(context, model, compact: compact);
           },
         ));
   }
 
-  buildPasswordBoard2(BuildContext context, ServerModel model) {
+  buildPasswordBoard2(BuildContext context, ServerModel model,
+      {bool compact = false}) {
     RxBool refreshHover = false.obs;
     RxBool editHover = false.obs;
     final textColor = Theme.of(context).textTheme.titleLarge?.color;
     final showOneTime = model.approveMode != 'click' &&
         model.verificationMethod != kUsePermanentPassword;
     return Container(
-      margin: EdgeInsets.only(left: 20.0, right: 16, top: 13, bottom: 13),
+      margin: compact
+          ? EdgeInsets.zero
+          : EdgeInsets.only(left: 20.0, right: 16, top: 13, bottom: 13),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.baseline,
         textBaseline: TextBaseline.alphabetic,
@@ -303,11 +333,12 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           Container(
             width: 2,
             height: 52,
-            decoration: BoxDecoration(color: MyTheme.accent),
+            decoration: BoxDecoration(
+                color: compact ? Colors.transparent : MyTheme.accent),
           ),
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.only(left: 7),
+              padding: EdgeInsets.only(left: compact ? 0 : 7),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -427,8 +458,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     );
   }
 
-  Widget buildHelpCards(String updateUrl) {
-    if (!bind.isCustomClient() &&
+  Widget buildHelpCards(String updateUrl, {bool showUpdates = true}) {
+    if (showUpdates &&
+        !bind.isCustomClient() &&
         updateUrl.isNotEmpty &&
         !isCardClosed &&
         bind.mainUriPrefixSync().contains('rustdesk')) {

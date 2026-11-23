@@ -13,6 +13,7 @@ import '../../common/widgets/dialog.dart';
 import '../../consts.dart';
 import '../../models/platform_model.dart';
 import '../../models/server_model.dart';
+import '../widgets/share_chat_button.dart';
 import 'home_page.dart';
 
 class ServerPage extends StatefulWidget implements PageShape {
@@ -23,10 +24,15 @@ class ServerPage extends StatefulWidget implements PageShape {
   final icon = const Icon(Icons.mobile_screen_share);
 
   @override
-  final appBarActions = (!bind.isDisableSettings() &&
-          bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) != 'Y')
-      ? [_DropDownAction()]
-      : [];
+  final appBarActions = <Widget>[
+    Obx(() => ShareChatButton(
+          unread: gFFI.chatModel.mobileUnreadSum.value,
+          onPressed: () => HomePage.homeKey.currentState?.openChat(),
+        )),
+    if (!bind.isDisableSettings() &&
+        bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) != 'Y')
+      _DropDownAction(),
+  ];
 
   ServerPage({Key? key}) : super(key: key);
 
@@ -692,13 +698,9 @@ class ConnectionManager extends StatelessWidget {
                               ? const SizedBox.shrink()
                               : IconButton(
                                   onPressed: () {
-                                    gFFI.chatModel.changeCurrentKey(
-                                        MessageKey(client.peerId, client.id));
-                                    final bar = navigationBarKey.currentWidget;
-                                    if (bar != null) {
-                                      bar as BottomNavigationBar;
-                                      bar.onTap!(1);
-                                    }
+                                    HomePage.homeKey.currentState?.openChat(
+                                        key: MessageKey(
+                                            client.peerId, client.id));
                                   },
                                   icon: unreadTopRightBuilder(
                                       client.unreadChatMessageCount)))

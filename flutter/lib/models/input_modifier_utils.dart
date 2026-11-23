@@ -70,6 +70,25 @@ String terminalPastePayload(String text, {required bool bracketedPasteMode}) {
   return '\x1B[200~$text\x1B[201~';
 }
 
+const _terminalBracketedPasteStart = '\x1B[200~';
+const _terminalBracketedPasteEnd = '\x1B[201~';
+
+bool isBracketedTerminalPastePayload(String data) =>
+    data.startsWith(_terminalBracketedPasteStart) &&
+    data.endsWith(_terminalBracketedPasteEnd) &&
+    data.length >=
+        _terminalBracketedPasteStart.length + _terminalBracketedPasteEnd.length;
+
+/// Returns the exact clipboard text represented by xterm's bracketed-paste
+/// framing. Non-paste input is returned unchanged.
+String terminalPasteReviewText(String data) {
+  if (!isBracketedTerminalPastePayload(data)) return data;
+  return data.substring(
+    _terminalBracketedPasteStart.length,
+    data.length - _terminalBracketedPasteEnd.length,
+  );
+}
+
 /// Returns whether one-shot Ctrl/Alt may transform and consume this input.
 ///
 /// xterm emits terminal control keys as either one control byte or a longer
@@ -146,6 +165,121 @@ bool shouldHandleTerminalPasteShortcut({
     case TargetPlatform.windows:
       return controlPressed && !metaPressed && !shiftPressed;
   }
+}
+
+/// Mobile Shell uses an explicit paste review flow. Unlike
+/// [shouldHandleTerminalPasteShortcut], this intentionally intercepts the
+/// platform paste chord even when no virtual modifier is locked so xterm's
+/// built-in PasteTextIntent cannot forward clipboard content directly.
+bool shouldInterceptMobileTerminalPasteShortcut({
+  required TargetPlatform platform,
+  required LogicalKeyboardKey logicalKey,
+  required bool isKeyDown,
+  required bool isKeyRepeat,
+  required bool controlPressed,
+  required bool metaPressed,
+  required bool altPressed,
+  required bool shiftPressed,
+}) {
+  if (!isKeyDown && !isKeyRepeat) return false;
+  if (logicalKey != LogicalKeyboardKey.keyV || altPressed) return false;
+  switch (platform) {
+    case TargetPlatform.linux:
+      return controlPressed && !metaPressed && shiftPressed;
+    case TargetPlatform.iOS:
+    case TargetPlatform.macOS:
+      return !controlPressed && metaPressed && !shiftPressed;
+    case TargetPlatform.android:
+    case TargetPlatform.fuchsia:
+    case TargetPlatform.windows:
+      return controlPressed && !metaPressed && !shiftPressed;
+  }
+}
+
+/// Android/iOS IMEs do not identify a paste separately from normal text input.
+/// A multi-character payload containing a line terminator is therefore treated
+/// as potentially executable paste and must be staged locally for review.
+/// A lone newline remains the user's ordinary Enter key.
+bool shouldStagePotentialMobileTerminalPaste(String data) {
+  if (data.runes.length <= 1) return false;
+  return data.contains('\n') || data.contains('\r');
+}
+
+class TerminalPasteInspection {
+  const TerminalPasteInspection({
+    required this.lineCount,
+    required this.hasLineBreaks,
+    required this.hasAnsiEscape,
+    required this.controlCharacters,
+  });
+
+  final int lineCount;
+  final bool hasLineBreaks;
+  final bool hasAnsiEscape;
+  final List<String> controlCharacters;
+
+  bool get hasControlWarning => controlCharacters.isNotEmpty;
+}
+
+TerminalPasteInspection inspectTerminalPaste(String text) {
+  final controls = <String>{};
+  var lineCount = 1;
+  for (final rune in text.runes) {
+    if (rune == 0x0A) {
+      lineCount++;
+      continue;
+    }
+    if (rune == 0x09) continue;
+    if (rune == 0x0D) {
+      controls.add('CR (U+000D)');
+      continue;
+    }
+    if (rune == 0x1B) {
+      controls.add('ESC (U+001B)');
+      continue;
+    }
+    if (rune < 0x20 || rune == 0x7F) {
+      controls.add(
+        'U+${rune.toRadixString(16).toUpperCase().padLeft(4, '0')}',
+      );
+    }
+  }
+  return TerminalPasteInspection(
+    lineCount: lineCount,
+    hasLineBreaks: text.contains('\n') || text.contains('\r'),
+    hasAnsiEscape: text.contains('\x1B'),
+    controlCharacters: List.unmodifiable(controls),
+  );
+}
+
+/// A secondary representation used only to make otherwise invisible controls
+/// reviewable. The exact text is still shown separately and is never rewritten
+/// before execution.
+String terminalPasteVisibleControls(String text) {
+  final out = StringBuffer();
+  for (final rune in text.runes) {
+    switch (rune) {
+      case 0x00:
+        out.write('␀');
+      case 0x09:
+        out.write('⇥');
+      case 0x0A:
+        out.writeln('␊');
+      case 0x0D:
+        out.write('␍');
+      case 0x1B:
+        out.write('␛');
+      case 0x7F:
+        out.write('␡');
+      default:
+        if (rune < 0x20) {
+          out.write('\\u${rune.toRadixString(16).padLeft(4, '0')}');
+        } else {
+          out.writeCharCode(rune);
+        }
+    }
+  }
+  return out.toString();
 }
 
 /// Returns true when collapsing Row3 should also clear hidden modifier state.

@@ -13,7 +13,7 @@ class _FakeFFI implements FFI {
   late final FfiModel ffiModel = FfiModel(WeakReference(this));
 
   @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+  dynamic noSuchMethod(Invocation invocation) => null;
 }
 
 void main() {
@@ -25,4 +25,52 @@ void main() {
     expect(isWeb, isFalse);
     expect(model.webrtcTransport, isNull);
   });
+
+  test('explicitly unavailable telemetry does not keep an old value', () {
+    final ffi = _FakeFFI();
+    final model = QualityMonitorModel(WeakReference(ffi));
+
+    model.updateQualityStatus({
+      'speed': '4.2 MB/s',
+      'delay': '28',
+    });
+    expect(model.data.speed, '4.2 MB/s');
+    expect(model.data.delay, '28');
+
+    model.updateQualityStatus({
+      'speed': '',
+      'delay': '',
+    });
+    expect(model.data.speed, isNull);
+    expect(model.data.delay, isNull);
+  });
+
+  test('reconnect continuity generation advances immediately', () {
+    final ffi = _FakeFFI();
+    expect(ffi.ffiModel.reconnectGeneration, 0);
+
+    ffi.ffiModel.markReconnectStarted();
+
+    expect(ffi.ffiModel.reconnectGeneration, 1);
+  });
+
+  test('the per-second status fills FPS, codec and chroma', () {
+    final ffi = _FakeFFI();
+    final model = QualityMonitorModel(WeakReference(ffi));
+
+    // As the io_loop sends it every second (src/flutter.rs).
+    model.updateQualityStatus({
+      'speed': '512.00kB/s',
+      'fps': '{"0":30}',
+      'delay': '',
+      'target_bitrate': '',
+      'codec_format': 'H265',
+      'chroma': '4:2:0',
+    });
+
+    expect(model.data.fps, '30');
+    expect(model.data.codecFormat, 'H265');
+    expect(model.data.chroma, '4:2:0');
+  });
 }
+

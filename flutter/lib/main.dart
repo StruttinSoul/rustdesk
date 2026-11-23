@@ -7,6 +7,7 @@ import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/overlay.dart';
+import 'package:flutter_hbb/common/widgets/studio_theme.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
@@ -16,6 +17,7 @@ import 'package:flutter_hbb/desktop/screen/desktop_port_forward_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_remote_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_terminal_screen.dart';
 import 'package:flutter_hbb/desktop/widgets/refresh_wrapper.dart';
+import 'package:flutter_hbb/desktop/widgets/aperture_host_panel.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -133,7 +135,6 @@ Future<void> initEnv(String appType) async {
 void runMainApp(bool startService) async {
   // register uni links
   await initEnv(kAppTypeMain);
-  checkUpdate();
   // trigger connection status updater
   await bind.mainCheckConnectStatus();
   if (startService) {
@@ -155,6 +156,9 @@ void runMainApp(bool startService) async {
   windowManager.waitUntilReadyToShow(windowOptions, () async {
     // Restore the location of the main window before window hide or show.
     await restoreWindowPosition(WindowType.Main);
+    if (isWindows && !bind.isCustomClient() && !bind.isOutgoingOnly()) {
+      await windowManager.setSize(apertureHostWindowSize);
+    }
     // Check the startup argument, if we successfully handle the argument, we keep the main window hidden.
     final handledByUniLinks = await initUniLinks();
     debugPrint("handled by uni links: $handledByUniLinks");
@@ -175,7 +179,6 @@ void runMainApp(bool startService) async {
 
 void runMobileApp() async {
   await initEnv(kAppTypeMain);
-  checkUpdate();
   if (isAndroid) androidChannelInit();
   if (isAndroid) platformFFI.syncAndroidServiceAppDirConfigPath();
   draggablePositions.load();
@@ -498,8 +501,10 @@ class _AppState extends State<App> with WidgetsBindingObserver {
           title: isWeb
               ? '${bind.mainGetAppNameSync()} Web Client V2 (Preview)'
               : bind.mainGetAppNameSync(),
-          theme: MyTheme.lightTheme,
-          darkTheme: MyTheme.darkTheme,
+          theme: apertureAppTheme(MyTheme.lightTheme,
+              mobile: isAndroid || isIOS),
+          darkTheme: apertureAppTheme(MyTheme.darkTheme,
+              mobile: isAndroid || isIOS),
           themeMode: MyTheme.currentThemeMode(),
           home: isDesktop
               ? const DesktopTabPage()

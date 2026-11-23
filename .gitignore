@@ -58,3 +58,8 @@ libsciter.dylib
 flutter/web/
 # libdrmtap is cloned at build time by build.py (not a submodule)
 /third_party/libdrmtap/
+# Aperture source branding assets
+!/design/branding/aperture/aperture-master.png
+!/flutter/assets/aperture_icon.png
+!/flutter/android/app/src/main/res/mipmap-*/aperture_launcher.png
+!/flutter/android/app/src/main/res/drawable-nodpi/aperture_launcher_art.png

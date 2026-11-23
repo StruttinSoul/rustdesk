@@ -114,6 +114,8 @@ qrcode-generator = "4.1"
 winapi = { version = "0.3", features = [
     "winuser",
     "wincrypt",
+    "dpapi",
+    "winbase",
     "shellscalingapi",
     "pdh",
     "synchapi",
@@ -125,7 +127,9 @@ winapi = { version = "0.3", features = [
     "cfgmgr32",
     "ioapiset",
     "winspool",
+    "iphlpapi",
 ] }
+native-tls = "0.2"
 windows = { version = "0.61", features = [
     "Win32",
     "Win32_Foundation",
@@ -138,11 +142,15 @@ windows = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Environment",
     "Win32_System_IO",
+    "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
