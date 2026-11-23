@@ -1054,7 +1054,12 @@ pub fn try_get_displays_(add_amyuni_headless: bool) -> ResultType<Vec<Display>> 
     // }
 
     let no_displays_v = no_displays(&displays);
-    if no_displays_v {
+    // Devices are enumerated only when there is no screen, so the common path stays free.
+    let mttvdd_installed = no_displays_v && !crate::headless_vdd::find_mttvdd().is_empty();
+    if mttvdd_installed {
+        log::trace!("no displays; MttVDD is installed, leaving it to the watchdog repair");
+    }
+    if crate::headless_vdd::should_add_builtin_headless(no_displays_v, mttvdd_installed) {
         log::debug!("no displays, create virtual display");
         if let Err(e) = virtual_display_manager::plug_in_headless() {
             log::error!("plug in headless failed {}", e);

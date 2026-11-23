@@ -22,6 +22,13 @@ pub fn is_mttvdd_hardware_id(ids: &[String]) -> bool {
         .any(|id| id.eq_ignore_ascii_case(MTTVDD_HARDWARE_ID))
 }
 
+/// Whether RustDesk's built-in (Amyuni) headless display may be plugged in. Never beside an
+/// installed MttVDD: a second virtual display driver fights it during a monitor hand-over, and
+/// a failed MttVDD is restarted by the watchdog instead.
+pub fn should_add_builtin_headless(no_displays: bool, mttvdd_installed: bool) -> bool {
+    no_displays && !mttvdd_installed
+}
+
 /// Shared by the watchdog and the login path so the driver is never restarted in a loop.
 #[derive(Debug, Default)]
 pub struct RepairLimiter {
@@ -355,6 +362,14 @@ mod tests {
     #[cfg(windows)]
     use super::win::run_with_timeout;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_second_virtual_display_is_never_added_beside_mttvdd() {
+        assert!(!should_add_builtin_headless(true, true));
+        assert!(should_add_builtin_headless(true, false));
+        assert!(!should_add_builtin_headless(false, false));
+        assert!(!should_add_builtin_headless(false, true));
+    }
 
     #[test]
     fn healthy_and_disabled_are_not_repaired() {
