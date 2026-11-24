@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-pub const MANAGED_INSTANCES: [&str; 3] = ["Tiramisu64", "Tiramisu64_2", "Tiramisu64_3"];
+pub const MANAGED_INSTANCES: [&str; 2] = ["Tiramisu64", "Tiramisu64_2"];
 pub const NORMAL_FPS: u8 = 60;
 pub const DEFAULT_IDLE_FPS: u8 = 12;
 pub const DEFAULT_IDLE_AFTER: Duration = Duration::from_secs(120);
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_by_default_never_writes_three_idle_instances() {
+    fn disabled_by_default_never_writes_idle_instances() {
         let mut controller =
             EcoController::new(EcoPolicy::default(), MockBackend::with_normal_instances()).unwrap();
         let observations: Vec<_> = MANAGED_INSTANCES.iter().map(|id| signals(id)).collect();
@@ -320,19 +320,23 @@ mod tests {
             .reconcile(Duration::from_secs(119), &observations)
             .is_empty());
         let report = controller.reconcile(Duration::from_secs(120), &observations);
-        assert_eq!(report.len(), 3);
+        assert_eq!(report.len(), 2);
         assert!(report
             .iter()
             .all(|entry| entry.requested == EcoMode::Eco(12) && entry.result.is_ok()));
         observations[0].remote = Activity::Active;
-        observations[1].local = Activity::Active;
         let report = controller.reconcile(Duration::from_secs(121), &observations);
-        assert_eq!(report.len(), 2);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].instance_id, "Tiramisu64");
         assert_eq!(report[0].requested, EcoMode::Normal);
-        assert_eq!(report[1].requested, EcoMode::Normal);
-        assert_eq!(controller.backend.modes["Tiramisu64_3"], EcoMode::Eco(12));
+        assert_eq!(controller.backend.modes["Tiramisu64_2"], EcoMode::Eco(12));
+        observations[1].local = Activity::Active;
+        let report = controller.reconcile(Duration::from_secs(122), &observations);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].instance_id, "Tiramisu64_2");
+        assert_eq!(report[0].requested, EcoMode::Normal);
         assert!(controller
-            .reconcile(Duration::from_secs(122), &observations)
+            .reconcile(Duration::from_secs(123), &observations)
             .is_empty());
     }
 
@@ -390,14 +394,13 @@ mod tests {
         let observations: Vec<_> = MANAGED_INSTANCES.iter().map(|id| signals(id)).collect();
         controller.reconcile(Duration::ZERO, &observations);
         let report = controller.reconcile(Duration::from_secs(120), &observations);
-        assert_eq!(report.len(), 3);
+        assert_eq!(report.len(), 2);
         assert!(report[1].result.is_err());
         controller.set_enabled(false);
         let report = controller.reconcile(Duration::from_secs(121), &observations);
-        assert_eq!(report.len(), 2);
-        assert!(report
-            .iter()
-            .all(|entry| entry.requested == EcoMode::Normal && entry.result.is_ok()));
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].requested, EcoMode::Normal);
+        assert!(report[0].result.is_ok());
         assert_eq!(
             controller.backend.modes[MANAGED_INSTANCES[1]],
             EcoMode::Eco(5)
