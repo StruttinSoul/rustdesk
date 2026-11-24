@@ -1116,7 +1116,9 @@ fn input_loop(
             }
             let current = *geometry.lock().unwrap();
             if current.generation != observed_generation {
+                let mut resized = touches_in_space(&touches, current.touch_space);
                 release_guest_input(&mut socket, &mut touches, &mut keys);
+                release_guest_touches(&mut socket, &mut resized);
                 observed_generation = current.generation;
             }
             let Some(command) = command else {
@@ -1202,6 +1204,16 @@ fn input_loop(
                         space_width,
                         space_height,
                     )?)?;
+                    if touch.action == 3 {
+                        socket.write_all(&touch_packet(
+                            1,
+                            touch.pointer_id,
+                            x,
+                            y,
+                            space_width,
+                            space_height,
+                        )?)?;
+                    }
                     if touch.action == 0 {
                         crate::frame_timing::HOST_TAPS.touch_down(Instant::now());
                     }
@@ -1238,12 +1250,35 @@ fn release_guest_touches(
     touches: &mut BTreeMap<u64, (u32, u32, u16, u16)>,
 ) {
     for (pointer, (x, y, width, height)) in std::mem::take(touches) {
-        if let Err(error) = touch_packet(3, pointer, x, y, width, height)
-            .and_then(|packet| socket.write_all(&packet))
-        {
-            log::trace!("Guest touch release: {error}");
+        // scrcpy forgets a finger only on up. A cancel alone leaves it down, and
+        // Android then rejects every later tap as part of the ended gesture. The
+        // up follows the cancel so that it does not complete a tap.
+        for action in [3, 1] {
+            if let Err(error) = touch_packet(action, pointer, x, y, width, height)
+                .and_then(|packet| socket.write_all(&packet))
+            {
+                log::trace!("Guest touch release: {error}");
+            }
         }
     }
+}
+
+/// The touches not in `space`, moved into it. scrcpy ignores a touch sized for
+/// another video size, so after a rotation these must be released again.
+fn touches_in_space(
+    touches: &BTreeMap<u64, (u32, u32, u16, u16)>,
+    space: (u16, u16),
+) -> BTreeMap<u64, (u32, u32, u16, u16)> {
+    let (width, height) = space;
+    touches
+        .iter()
+        .filter(|(_, touch)| (touch.2, touch.3) != space)
+        .map(|(pointer, (x, y, _, _))| {
+            let x = (*x).min((width as u32).saturating_sub(1));
+            let y = (*y).min((height as u32).saturating_sub(1));
+            (*pointer, (x, y, width, height))
+        })
+        .collect()
 }
 
 fn key_packet(keycode: u32, down: bool) -> [u8; 14] {
@@ -1670,7 +1705,7 @@ mod tests {
                 &VideoReset::Helper,
             )
         });
-        let mut wire = [0; 92];
+        let mut wire = [0; 124];
         reader.read_exact(&mut wire).unwrap();
         worker.join().unwrap().unwrap();
         assert_eq!(
@@ -1682,7 +1717,11 @@ mod tests {
             &wire[46..78],
             &touch_packet(3, 1, 100, 200, 1280, 720).unwrap()
         );
-        assert_eq!(&wire[78..], &key_packet(29, false));
+        assert_eq!(
+            &wire[78..110],
+            &touch_packet(1, 1, 100, 200, 1280, 720).unwrap()
+        );
+        assert_eq!(&wire[110..], &key_packet(29, false));
     }
 
     #[test]
@@ -1738,7 +1777,7 @@ mod tests {
                 &VideoReset::Helper,
             )
         });
-        let mut wire = [0; 120];
+        let mut wire = [0; 152];
         reader.read_exact(&mut wire).unwrap();
         worker.join().unwrap().unwrap();
 
@@ -1751,9 +1790,54 @@ mod tests {
             &wire[46..78],
             &touch_packet(3, 7, 320, 240, 1280, 720).unwrap()
         );
-        assert_eq!(&wire[78..92], &key_packet(29, false));
-        assert_eq!(&wire[92..106], &key_packet(30, true));
-        assert_eq!(&wire[106..], &key_packet(30, false));
+        assert_eq!(
+            &wire[78..110],
+            &touch_packet(1, 7, 320, 240, 1280, 720).unwrap()
+        );
+        assert_eq!(&wire[110..124], &key_packet(29, false));
+        assert_eq!(&wire[124..138], &key_packet(30, true));
+        assert_eq!(&wire[138..], &key_packet(30, false));
+    }
+
+    #[test]
+    fn phone_cancel_lifts_the_finger_so_the_next_tap_is_not_secondary() {
+        let (sender_socket, mut reader) = loopback_control();
+        let _owned_control = sender_socket.try_clone().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(4);
+        for (action, pointer_id) in [(0, 7), (3, 7), (0, 8), (1, 8)] {
+            let mut touch = EmulatorRequest::new();
+            touch.set_touch(base::message_proto::EmulatorTouch {
+                action,
+                pointer_id,
+                x: 320,
+                y: 240,
+                width: 1280,
+                height: 720,
+                ..Default::default()
+            });
+            sender.send(GuestInputCommand::Request(touch)).unwrap();
+        }
+        drop(sender);
+        let worker = thread::spawn(move || {
+            input_loop(
+                sender_socket,
+                &receiver,
+                &Mutex::new(GuestGeometry::ready(1280, 720)),
+                &AtomicBool::new(false),
+                &AtomicUsize::new(0),
+                &VideoReset::Helper,
+            )
+        });
+        let mut wire = [0; 160];
+        reader.read_exact(&mut wire).unwrap();
+        worker.join().unwrap().unwrap();
+        let expected: Vec<u8> = [(0, 7), (3, 7), (1, 7), (0, 8), (1, 8)]
+            .into_iter()
+            .flat_map(|(action, pointer)| {
+                touch_packet(action, pointer, 320, 240, 1280, 720).unwrap()
+            })
+            .collect();
+        assert_eq!(&wire[..], &expected[..]);
     }
 
     #[test]
@@ -1835,16 +1919,17 @@ mod tests {
         );
 
         geometry.lock().unwrap().begin_stream(720, 1280);
-        let mut releases = [0; 64];
+        let mut releases = [0; 256];
         reader.read_exact(&mut releases).unwrap();
-        assert_eq!(
-            &releases[..32],
-            &touch_packet(3, 7, 320, 240, 1280, 720).unwrap()
-        );
-        assert_eq!(
-            &releases[32..],
-            &touch_packet(3, 8, 500, 300, 1280, 720).unwrap()
-        );
+        let mut expected = Vec::new();
+        for (width, height) in [(1280, 720), (720, 1280)] {
+            for (pointer, x, y) in [(7, 320, 240), (8, 500, 300)] {
+                for action in [3, 1] {
+                    expected.extend(touch_packet(action, pointer, x, y, width, height).unwrap());
+                }
+            }
+        }
+        assert_eq!(&releases[..], &expected[..]);
 
         // Old geometry is rejected while the new stream has no current frame.
         sender.send(request(2, 7, 321, 241, 1280, 720)).unwrap();
@@ -1910,7 +1995,7 @@ mod tests {
                 &VideoReset::Helper,
             )
         });
-        let mut wire = [0; 64];
+        let mut wire = [0; 96];
         reader.read_exact(&mut wire).unwrap();
         worker.join().unwrap().unwrap();
         let down = &wire[..32];
@@ -1921,8 +2006,12 @@ mod tests {
         assert_eq!(u16::from_be_bytes(down[20..22].try_into().unwrap()), 2400);
         // The release on disconnect uses the same display-space contact.
         assert_eq!(
-            &wire[32..],
+            &wire[32..64],
             &touch_packet(3, 1, 540, 1200, 1080, 2400).unwrap()
+        );
+        assert_eq!(
+            &wire[64..],
+            &touch_packet(1, 1, 540, 1200, 1080, 2400).unwrap()
         );
     }
 
